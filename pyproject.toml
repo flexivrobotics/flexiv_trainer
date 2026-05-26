@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flexiv-trainer"
+version = "0.1.0"
+description = "All-in-one Flexiv teleoperation, data recording, and training platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.136,<1.0",
+  "uvicorn>=0.48,<1.0",
+  "pydantic-settings>=2.14,<3.0",
+  "typer>=0.25,<1.0",
+  "numpy>=1.26",
+  "flexivtdk==1.6.0",
+  "flexivddk==1.4.0",
+  "lerobot==0.5.1",
+  "pyrealsense2",
+]
+
+[project.scripts]
+flexiv-trainer-server = "flexiv_trainer.api.app:run"
+teleop = "flexiv_trainer.cli.teleop:main"
+record_data = "flexiv_trainer.cli.record_data:main"
+combine_episodes = "flexiv_trainer.cli.combine_episodes:main"
+train_policy = "flexiv_trainer.cli.train_policy:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/src/flexiv_trainer"]
