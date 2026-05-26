@@ -41,8 +41,8 @@ def test_dependency_log_bridge_captures_python_warnings(capsys) -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("always")
-        warnings.warn("sdk calibration drift", RuntimeWarning)
+        warnings.warn("sdk timing drift", RuntimeWarning)
 
     captured = capsys.readouterr()
-    assert "sdk calibration drift" in captured.err
+    assert "sdk timing drift" in captured.err
     assert "logger=py.warnings" in captured.err

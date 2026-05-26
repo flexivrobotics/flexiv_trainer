@@ -8,7 +8,7 @@ Flexiv Trainer is a local-first platform for dual-arm Flexiv teleoperation, epis
 2. Start the backend with `flexiv-trainer-server`.
 3. Open the single URL printed by the backend.
 4. On the Home page, enter the serial numbers for the two local robots and the two remote robots.
-5. Use the Home page service buttons to connect teleoperation, robot data, cameras, and calibration flows.
+5. Use the Home page service buttons to connect teleoperation, robot data, and cameras.
 
 You do not need to start a separate frontend development server. The backend serves the web UI directly.
 
@@ -43,7 +43,6 @@ These can be installed into a dedicated virtual environment or into an existing 
 - `.local/episodes/`: saved single-episode LeRobot datasets
 - `.local/combined/`: combined datasets
 - `.local/training/`: training outputs
-- `.local/calibration/`: camera calibration files
 
 ## Setup
 

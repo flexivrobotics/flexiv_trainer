@@ -108,8 +108,9 @@ class DDKService:
             "robots": robots,
         }
 
-    def snapshot(self) -> dict[str, Any]:
-        self.initialize()
+    def snapshot(self, initialize: bool = True) -> dict[str, Any]:
+        if initialize:
+            self.initialize()
         robots: dict[str, Any] = {}
         for serial, client in self._clients.items():
             try:

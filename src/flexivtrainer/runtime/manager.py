@@ -219,18 +219,6 @@ class RuntimeManager:
                 camera_errors, "Press Connect to start the camera feeds."
             )
 
-        calibration_files = sorted(
-            path.name for path in self.settings.storage.calibration_root.glob("*.json")
-        )
-        if calibration_files:
-            calibration_state = "Available"
-            calibration_tone = "ok"
-            calibration_detail = f"{len(calibration_files)} calibration files found."
-        else:
-            calibration_state = "Missing"
-            calibration_tone = "error"
-            calibration_detail = "No calibration files found."
-
         return {
             "teleop_service": {
                 "label": "TELEOP SERVICE",
@@ -249,12 +237,6 @@ class RuntimeManager:
                 "state": camera_state,
                 "detail": camera_detail,
                 "tone": camera_tone,
-            },
-            "calibration": {
-                "label": "CALIBRATION",
-                "state": calibration_state,
-                "detail": calibration_detail,
-                "tone": calibration_tone,
             },
         }
 
@@ -285,19 +267,6 @@ class RuntimeManager:
 
         return {"result": result, "services": self.service_summary()}
 
-    def run_calibration(self, calibration_name: str) -> dict[str, Any]:
-        labels = {
-            "egocentric": "Egocentric calibration is not implemented in this build.",
-            "in-hand": "In-hand calibration is not implemented in this build.",
-        }
-        if calibration_name not in labels:
-            raise ValueError(f"Unsupported calibration action: {calibration_name}")
-        return {
-            "ok": False,
-            "message": labels[calibration_name],
-            "services": self.service_summary(),
-        }
-
     def system_summary(self) -> dict[str, Any]:
         return {
             "backend": {
@@ -309,13 +278,6 @@ class RuntimeManager:
             "teleop": self.teleop.snapshot().__dict__,
             "ddk": self.ddk.status(),
             "cameras": self.cameras.discover(),
-            "calibration": {
-                "root": str(self.settings.storage.calibration_root),
-                "available_files": sorted(
-                    path.name
-                    for path in self.settings.storage.calibration_root.glob("*.json")
-                ),
-            },
             "storage": {
                 "root": str(self.settings.storage.root),
                 "episodes": str(self.settings.storage.episodes_root),
@@ -353,12 +315,11 @@ class RuntimeManager:
         stages.append({"stage": "cameras", "progress": 75, "detail": cameras})
 
         overlay = {
-            "calibration_files": sorted(
-                path.name
-                for path in self.settings.storage.calibration_root.glob("*.json")
-            )
+            "left_force_anchor": "bottom-left",
+            "right_force_anchor": "bottom-right",
+            "dynamic_position": False,
         }
-        stages.append({"stage": "overlay", "progress": 100, "detail": overlay})
+        stages.append({"stage": "force_overlay", "progress": 100, "detail": overlay})
 
         return {
             "ready": not teleop.get("error")

@@ -59,7 +59,73 @@ class RealSenseService:
             )
         return {"available": True, "devices": devices, "errors": dict(self._errors)}
 
-    def start_streams(self) -> dict[str, Any]:
+    def _resolve_camera_names(self, camera_names: list[str] | None = None) -> list[str]:
+        selected = list(self._runtimes) if camera_names is None else list(camera_names)
+        unknown = [name for name in selected if name not in self._runtimes]
+        if unknown:
+            raise ValueError(f"Unsupported cameras: {', '.join(unknown)}")
+        return selected
+
+    def _available_serials(self) -> list[str]:
+        available = [device["serial"] for device in self.discover()["devices"]]
+        occupied = {
+            runtime.actual_serial or runtime.config.device_serial
+            for runtime in self._runtimes.values()
+            if runtime.started
+            and (runtime.actual_serial or runtime.config.device_serial)
+        }
+        return [serial for serial in available if serial not in occupied]
+
+    def _stop_runtime(self, runtime: CameraRuntime) -> None:
+        if runtime.pipeline is not None:
+            try:
+                runtime.pipeline.stop()
+            except Exception as exc:  # pragma: no cover - hardware specific
+                self._errors[runtime.config.name] = describe_exception(exc)
+        runtime.pipeline = None
+        runtime.started = False
+        runtime.last_frame_time = None
+        runtime.fps = 0.0
+
+    def _start_runtime(
+        self, runtime: CameraRuntime, available_serials: list[str]
+    ) -> None:
+        serial = runtime.config.device_serial or runtime.actual_serial
+        if serial and serial in available_serials:
+            available_serials.remove(serial)
+        elif not serial and available_serials:
+            serial = available_serials.pop(0)
+
+        pipeline = rs.pipeline()
+        config = rs.config()
+        if serial:
+            config.enable_device(serial)
+        config.enable_stream(
+            rs.stream.color,
+            runtime.config.width,
+            runtime.config.height,
+            rs.format.bgr8,
+            runtime.config.fps,
+        )
+        try:
+            profile = pipeline.start(config)
+            runtime.pipeline = pipeline
+            runtime.started = True
+            runtime.last_frame_time = None
+            runtime.fps = 0.0
+            try:
+                runtime.actual_serial = profile.get_device().get_info(
+                    rs.camera_info.serial_number
+                )
+            except Exception:  # pragma: no cover - hardware specific
+                runtime.actual_serial = serial
+            self._errors.pop(runtime.config.name, None)
+        except Exception as exc:  # pragma: no cover - hardware specific
+            runtime.pipeline = None
+            runtime.started = False
+            self._errors[runtime.config.name] = describe_exception(exc)
+
+    def start_streams(self, camera_names: list[str] | None = None) -> dict[str, Any]:
         if rs is None:
             return {
                 "available": False,
@@ -67,46 +133,18 @@ class RealSenseService:
                 "errors": {"import": "pyrealsense2 is not importable"},
             }
 
-        discovered = self.discover()["devices"]
-        unused_devices = [device["serial"] for device in discovered]
-        for runtime in self._runtimes.values():
+        available_serials = self._available_serials()
+        for name in self._resolve_camera_names(camera_names):
+            runtime = self._runtimes[name]
             if runtime.started:
                 continue
-            serial = runtime.config.device_serial
-            if serial is None and unused_devices:
-                serial = unused_devices.pop(0)
-
-            pipeline = rs.pipeline()
-            config = rs.config()
-            if serial:
-                config.enable_device(serial)
-            config.enable_stream(
-                rs.stream.color,
-                runtime.config.width,
-                runtime.config.height,
-                rs.format.bgr8,
-                runtime.config.fps,
-            )
-            try:
-                pipeline.start(config)
-                runtime.pipeline = pipeline
-                runtime.started = True
-                runtime.actual_serial = serial
-                self._errors.pop(runtime.config.name, None)
-            except Exception as exc:  # pragma: no cover - hardware specific
-                self._errors[runtime.config.name] = describe_exception(exc)
+            self._start_runtime(runtime, available_serials)
 
         return self.status()
 
-    def stop_streams(self) -> dict[str, Any]:
-        for runtime in self._runtimes.values():
-            if runtime.pipeline is not None:
-                try:
-                    runtime.pipeline.stop()
-                except Exception as exc:  # pragma: no cover - hardware specific
-                    self._errors[runtime.config.name] = describe_exception(exc)
-            runtime.pipeline = None
-            runtime.started = False
+    def stop_streams(self, camera_names: list[str] | None = None) -> dict[str, Any]:
+        for name in self._resolve_camera_names(camera_names):
+            self._stop_runtime(self._runtimes[name])
         return self.status()
 
     def status(self) -> dict[str, Any]:

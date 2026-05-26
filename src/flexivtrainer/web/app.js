@@ -95,10 +95,6 @@ function createServiceStatusCard(serviceKey, service) {
             { label: "Connect", action: () => controlHomeService("cameras", "connect"), className: "start-button" },
             { label: "Disconnect", action: () => controlHomeService("cameras", "disconnect"), className: "stop-button" },
         ],
-        calibration: [
-            { label: "Calibrate Egocentric", action: () => runCalibration("egocentric") },
-            { label: "Calibrate In-hand", action: () => runCalibration("in-hand") },
-        ],
     };
     (definitions[serviceKey] || []).forEach((definition) => {
         const button = document.createElement("button");
@@ -191,6 +187,7 @@ function renderHomeRobotConfigInputs() {
     if (!state.summary) {
         return;
     }
+    const sideLabels = ["LEFT", "RIGHT"];
     const robotConfig = state.summary.robot_config || {
         local_robot_serials: ["", ""],
         remote_robot_serials: ["", ""],
@@ -206,8 +203,8 @@ function renderHomeRobotConfigInputs() {
             const field = document.createElement("label");
             field.className = "robot-input-group";
             field.innerHTML = `
-                <span>Robot ${index + 1}</span>
-                <input type="text" value="${serial}" placeholder="Enter serial number" />
+                <span>${sideLabels[index] || `Robot ${index + 1}`}</span>
+                <input type="text" value="${serial}" placeholder="Enter robot serial number" />
             `;
             const input = field.querySelector("input");
             input.oninput = () => {
@@ -280,6 +277,153 @@ function queueRobotConfigSave() {
     }, 180);
 }
 
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
+
+function coerceFiniteNumber(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readVectorFromObject(source, keys) {
+    const values = keys.map((key) => coerceFiniteNumber(source?.[key]));
+    return values.every((value) => value !== null) ? values : null;
+}
+
+function scoreForceKey(key) {
+    const value = String(key || "").toLowerCase();
+    let score = 0;
+    if (value.includes("force")) {
+        score += 4;
+    }
+    if (value.includes("wrench")) {
+        score += 3;
+    }
+    if (value.includes("contact")) {
+        score += 2;
+    }
+    if (value.includes("torque")) {
+        score -= 2;
+    }
+    return score;
+}
+
+function extractForceVector(payload, keyHint = "") {
+    if (payload === null || payload === undefined) {
+        return null;
+    }
+
+    const hint = String(keyHint || "").toLowerCase();
+    if (Array.isArray(payload)) {
+        if ((hint.includes("force") || hint.includes("wrench")) && payload.length >= 3) {
+            const values = payload.slice(0, 3).map((value) => coerceFiniteNumber(value));
+            if (values.every((value) => value !== null)) {
+                return values;
+            }
+        }
+        for (const item of payload) {
+            const candidate = extractForceVector(item, hint);
+            if (candidate) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    if (typeof payload !== "object") {
+        return null;
+    }
+
+    const directVector =
+        readVectorFromObject(payload, ["fx", "fy", "fz"])
+        || readVectorFromObject(payload, ["force_x", "force_y", "force_z"])
+        || (((hint.includes("force") || hint.includes("wrench")) && readVectorFromObject(payload, ["x", "y", "z"])) || null);
+    if (directVector) {
+        return directVector;
+    }
+
+    const orderedKeys = Object.keys(payload).sort((left, right) => scoreForceKey(right) - scoreForceKey(left));
+    for (const key of orderedKeys) {
+        const candidate = extractForceVector(payload[key], key);
+        if (candidate) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+function getRobotTelemetryForSide(side, teleopStatus) {
+    const robots = teleopStatus.ddk?.robots || {};
+    const sideIndex = side === "left" ? 0 : 1;
+    const preferredSerial = state.summary?.robot_config?.remote_robot_serials?.[sideIndex];
+    if (preferredSerial && robots[preferredSerial]) {
+        return { serial: preferredSerial, robot: robots[preferredSerial] };
+    }
+
+    const fallback = Object.entries(robots)[sideIndex];
+    if (fallback) {
+        return { serial: fallback[0], robot: fallback[1] };
+    }
+    return { serial: preferredSerial || null, robot: null };
+}
+
+function renderForceOverlay(side, robotEntry) {
+    const overlay = byId(`${side}-force-overlay`);
+    const shaft = overlay?.querySelector("[data-force-shaft]");
+    const head = overlay?.querySelector("[data-force-head]");
+    const label = byId(`${side}-force-label`);
+    if (!overlay || !shaft || !head || !label) {
+        return;
+    }
+
+    const baseX = side === "left" ? 18 : 78;
+    const baseY = 78;
+    let dx = side === "left" ? 18 : -18;
+    let dy = -20;
+    let magnitude = null;
+
+    const force = extractForceVector(robotEntry?.robot?.cartesian_state, "cartesian_state")
+        || extractForceVector(robotEntry?.robot?.cartesian_command, "cartesian_command");
+    if (force) {
+        const [fx, fy, fz] = force;
+        magnitude = Math.hypot(fx, fy, fz);
+        const inwardX = side === "left" ? fx : -fx;
+        const upwardY = -fy;
+        const planarMagnitude = Math.hypot(inwardX, upwardY);
+        if (planarMagnitude > 1e-6) {
+            const length = clamp(14 + Math.min(planarMagnitude, 25) * 0.9, 14, 38);
+            dx = (inwardX / planarMagnitude) * length;
+            dy = (upwardY / planarMagnitude) * length;
+        }
+    }
+
+    const tipX = clamp(baseX + dx, 8, 88);
+    const tipY = clamp(baseY + dy, 8, 88);
+    const angle = Math.atan2(tipY - baseY, tipX - baseX);
+    const headLength = 10;
+    const headWidth = 5.5;
+    const leftX = tipX - Math.cos(angle) * headLength + Math.sin(angle) * headWidth;
+    const leftY = tipY - Math.sin(angle) * headLength - Math.cos(angle) * headWidth;
+    const rightX = tipX - Math.cos(angle) * headLength - Math.sin(angle) * headWidth;
+    const rightY = tipY - Math.sin(angle) * headLength + Math.cos(angle) * headWidth;
+
+    shaft.setAttribute("x1", String(baseX));
+    shaft.setAttribute("y1", String(baseY));
+    shaft.setAttribute("x2", String(tipX));
+    shaft.setAttribute("y2", String(tipY));
+    head.setAttribute(
+        "points",
+        `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`,
+    );
+
+    overlay.classList.toggle("force-overlay--live", magnitude !== null);
+    overlay.title = robotEntry?.serial || `${side} robot`;
+    label.textContent = magnitude === null
+        ? `${side.toUpperCase()} FORCE`
+        : `${side.toUpperCase()} FORCE · ${magnitude.toFixed(1)} N`;
+}
+
 async function controlHomeService(serviceName, action) {
     const result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
     state.summary.services = result.services;
@@ -293,13 +437,6 @@ async function controlHomeService(serviceName, action) {
         cameras: "Cameras",
     };
     showToast(`${labels[serviceName] || serviceName} ${action === "connect" ? "connected" : "disconnected"}.`);
-}
-
-async function runCalibration(calibrationName) {
-    const result = await api(`/system/calibration/${calibrationName}`, { method: "POST" });
-    state.summary.services = result.services;
-    renderHomeStatus();
-    showToast(result.message, !result.ok);
 }
 
 function renderTeleop() {
@@ -318,6 +455,8 @@ function renderTeleop() {
     byId("ego-fps").textContent = `${Number(cameras.ego?.fps || 0).toFixed(1)} FPS`;
     byId("left-wrist-fps").textContent = `${Number(cameras.left_wrist?.fps || 0).toFixed(1)} FPS`;
     byId("right-wrist-fps").textContent = `${Number(cameras.right_wrist?.fps || 0).toFixed(1)} FPS`;
+    renderForceOverlay("left", getRobotTelemetryForSide("left", teleopStatus));
+    renderForceOverlay("right", getRobotTelemetryForSide("right", teleopStatus));
 
     const grid = byId("teleop-status-grid");
     grid.innerHTML = "";

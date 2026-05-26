@@ -37,14 +37,3 @@ def control_service(
         return runtime.control_service(service_name, action)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/calibration/{calibration_name}")
-def run_calibration(
-    calibration_name: str,
-    runtime: RuntimeManager = Depends(get_runtime_manager),
-) -> dict:
-    try:
-        return runtime.run_calibration(calibration_name)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc

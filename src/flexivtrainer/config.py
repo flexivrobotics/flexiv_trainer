@@ -28,7 +28,6 @@ class StorageConfig(BaseModel):
     staging_dirname: str = "staging"
     combined_dirname: str = "combined"
     training_dirname: str = "training"
-    calibration_dirname: str = "calibration"
     cache_dirname: str = "cache"
 
     @property
@@ -48,10 +47,6 @@ class StorageConfig(BaseModel):
         return self.root / self.training_dirname
 
     @property
-    def calibration_root(self) -> Path:
-        return self.root / self.calibration_dirname
-
-    @property
     def cache_root(self) -> Path:
         return self.root / self.cache_dirname
 
@@ -65,7 +60,6 @@ class StorageConfig(BaseModel):
         self.staging_root.mkdir(parents=True, exist_ok=True)
         self.combined_root.mkdir(parents=True, exist_ok=True)
         self.training_root.mkdir(parents=True, exist_ok=True)
-        self.calibration_root.mkdir(parents=True, exist_ok=True)
         self.cache_root.mkdir(parents=True, exist_ok=True)
 
 

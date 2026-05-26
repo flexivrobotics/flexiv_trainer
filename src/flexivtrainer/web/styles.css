@@ -368,6 +368,13 @@ button:disabled {
     min-height: 0;
 }
 
+.feed__viewport {
+    position: relative;
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
 .feed__placeholder,
 .progress-block {
     display: grid;
@@ -377,6 +384,61 @@ button:disabled {
     border-radius: 18px;
     border: 1px dashed rgba(255, 255, 255, 0.24);
     color: rgba(251, 247, 240, 0.78);
+}
+
+.force-overlay {
+    position: absolute;
+    bottom: 1rem;
+    display: grid;
+    gap: 0.35rem;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.force-overlay--left {
+    left: 1rem;
+    justify-items: start;
+}
+
+.force-overlay--right {
+    right: 1rem;
+    justify-items: end;
+}
+
+.force-overlay__svg {
+    width: 88px;
+    height: 88px;
+    overflow: visible;
+    filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.32));
+}
+
+.force-overlay__shaft {
+    stroke: #8de0ff;
+    stroke-width: 5;
+    stroke-linecap: round;
+}
+
+.force-overlay__head {
+    fill: #8de0ff;
+}
+
+.force-overlay__label {
+    display: inline-flex;
+    max-width: 160px;
+    border: 1px solid rgba(141, 224, 255, 0.34);
+    border-radius: 999px;
+    background: rgba(17, 28, 36, 0.8);
+    color: #d8f5ff;
+    padding: 0.28rem 0.55rem;
+    font-size: 0.74rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.force-overlay:not(.force-overlay--live) .force-overlay__shaft,
+.force-overlay:not(.force-overlay--live) .force-overlay__head,
+.force-overlay:not(.force-overlay--live) .force-overlay__label {
+    opacity: 0.72;
 }
 
 .control-panel {
