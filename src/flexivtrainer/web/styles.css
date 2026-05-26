@@ -259,14 +259,8 @@ button:disabled {
     color: rgba(251, 247, 240, 0.78);
 }
 
-.module-panel {
-    position: relative;
-    overflow: hidden;
-}
-
-.module-overlay,
 .dialog-backdrop {
-    position: absolute;
+    position: fixed;
     inset: 0;
     display: grid;
     place-items: center;
@@ -275,11 +269,6 @@ button:disabled {
     z-index: 20;
 }
 
-.dialog-backdrop {
-    position: fixed;
-}
-
-.module-overlay__panel,
 .dialog-panel {
     width: min(720px, calc(100vw - 2rem));
     border: 1px solid var(--line);
@@ -287,6 +276,58 @@ button:disabled {
     background: rgba(255, 252, 246, 0.98);
     box-shadow: var(--shadow);
     padding: 1.3rem;
+}
+
+.component-wrapper {
+    position: relative;
+    overflow: hidden;
+}
+
+.component-loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    background: rgba(247, 241, 231, 0.82);
+    backdrop-filter: blur(6px);
+    z-index: 5;
+}
+
+.component-loading-overlay__label {
+    font-size: 0.82rem;
+    color: var(--muted);
+    font-style: italic;
+}
+
+.mini-progress-bar {
+    width: 120px;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(105, 185, 232, 0.2);
+    overflow: hidden;
+    position: relative;
+}
+
+.mini-progress-bar span {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    width: 45%;
+    background: linear-gradient(90deg, #90d2f5, #3c9fd5);
+    animation: mini-loading 1.6s ease-in-out infinite;
+}
+
+@keyframes mini-loading {
+    0% {
+        left: -50%;
+    }
+
+    100% {
+        left: 110%;
+    }
 }
 
 .progress-bar {

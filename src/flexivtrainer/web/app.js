@@ -82,20 +82,28 @@ function setActiveView(view) {
     });
 }
 
-function setOverlay(moduleName, active, stages = []) {
-    const overlay = byId(`${moduleName}-overlay`);
-    const progress = byId(`${moduleName}-overlay-progress`);
-    const list = byId(`${moduleName}-overlay-stages`);
-    overlay.classList.toggle("hidden", !active);
-    list.innerHTML = "";
-    let lastProgress = 10;
-    stages.forEach((stage) => {
-        lastProgress = stage.progress;
-        const item = document.createElement("li");
-        item.innerHTML = `<strong>${stage.stage}</strong><span>${stage.progress}%</span>`;
-        list.appendChild(item);
-    });
-    progress.style.width = `${lastProgress}%`;
+function setComponentLoading(wrapperId, loading, label = "Initializing") {
+    const wrapper = byId(wrapperId);
+    if (!wrapper) {
+        return;
+    }
+    const existing = wrapper.querySelector(".component-loading-overlay");
+    if (loading) {
+        if (existing) {
+            return;
+        }
+        const overlay = document.createElement("div");
+        overlay.className = "component-loading-overlay";
+        overlay.innerHTML = `
+            <div class="mini-progress-bar"><span></span></div>
+            <span class="component-loading-overlay__label">${label}…</span>
+        `;
+        wrapper.appendChild(overlay);
+    } else {
+        if (existing) {
+            existing.remove();
+        }
+    }
 }
 
 function renderHome() {
@@ -358,11 +366,15 @@ function renderTraining() {
 
     if (state.trainingStep === 4) {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
+        const policiesReady = !!state.trainingPolicies;
         container.innerHTML = `
       <div class="panel-header"><div><p class="eyebrow">Training</p><h2>Choose Training Policy</h2></div></div>
-      <div class="policy-grid" id="policy-grid"></div>
+      <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
+        <div class="policy-grid" id="policy-grid"></div>
+        ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
+      </div>
       <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${state.outputDir || "No directory selected"}</strong></div><button class="secondary-button" id="training-pick-output" type="button">Choose Directory</button></div>
-      <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${state.outputDir ? "" : "disabled"}>Start Training</button></div>
+      <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${state.outputDir && policiesReady ? "" : "disabled"}>Start Training</button></div>
     `;
         const grid = byId("policy-grid");
         Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
@@ -504,10 +516,13 @@ async function bootstrapTeleoperation() {
     if (state.teleopBootstrapped) {
         return;
     }
-    setOverlay("teleop", true, []);
-    const result = await api("/teleop/bootstrap", { method: "POST" });
-    setOverlay("teleop", true, result.stages || []);
-    state.teleopBootstrapped = true;
+    setComponentLoading("teleop-cameras-wrap", true, "Initializing cameras");
+    try {
+        await api("/teleop/bootstrap", { method: "POST" });
+        state.teleopBootstrapped = true;
+    } finally {
+        setComponentLoading("teleop-cameras-wrap", false);
+    }
     await refreshTeleopStatus();
     window.clearInterval(state.intervals.teleop);
     state.intervals.teleop = window.setInterval(() => {
@@ -515,40 +530,34 @@ async function bootstrapTeleoperation() {
             refreshTeleopStatus().catch((error) => showToast(error.message, true));
         }
     }, 1500);
-    window.setTimeout(() => setOverlay("teleop", false), 220);
 }
 
 async function bootstrapTraining() {
     if (state.trainingBootstrapped) {
         return;
     }
-    setOverlay("training", true, []);
-    const result = await api("/training/bootstrap", { method: "POST" });
-    setOverlay("training", true, result.stages || []);
+    await api("/training/bootstrap", { method: "POST" });
     state.trainingPolicies = await api("/training/policies");
     state.selectedPolicy = state.trainingPolicies.default;
     state.trainingBootstrapped = true;
-    renderTraining();
-    window.setTimeout(() => setOverlay("training", false), 220);
+    if (state.activeView === "training") {
+        renderTraining();
+    }
 }
 
 function bindGlobalEvents() {
     document.querySelectorAll("[data-nav]").forEach((button) => {
-        button.addEventListener("click", async () => {
+        button.addEventListener("click", () => {
             const target = button.dataset.nav;
             if (!target) {
                 return;
             }
             setActiveView(target);
-            try {
-                if (target === "teleoperation") {
-                    await bootstrapTeleoperation();
-                }
-                if (target === "training") {
-                    await bootstrapTraining();
-                }
-            } catch (error) {
-                showToast(error.message, true);
+            if (target === "teleoperation") {
+                bootstrapTeleoperation().catch((error) => showToast(error.message, true));
+            }
+            if (target === "training") {
+                bootstrapTraining().catch((error) => showToast(error.message, true));
             }
         });
     });

@@ -88,39 +88,33 @@
             </section>
 
             <section class="view" data-view="teleoperation">
-                <section class="panel panel--wide module-panel">
-                    <div class="module-overlay hidden" id="teleop-overlay">
-                        <div class="module-overlay__panel">
-                            <p class="eyebrow">Loading Module</p>
-                            <h2>Preparing Teleoperation</h2>
-                            <div class="progress-bar"><span id="teleop-overlay-progress"></span></div>
-                            <ul class="stage-list" id="teleop-overlay-stages"></ul>
-                        </div>
-                    </div>
-
+                <section class="panel panel--wide">
                     <div class="teleop-layout">
-                        <div class="feed feed--hero">
-                            <div class="feed__header">
-                                <span>Ego Camera</span>
-                                <strong id="ego-fps">-- FPS</strong>
+                        <div class="component-wrapper" id="teleop-cameras-wrap">
+                            <div class="feed feed--hero">
+                                <div class="feed__header">
+                                    <span>Ego Camera</span>
+                                    <strong id="ego-fps">-- FPS</strong>
+                                </div>
+                                <div class="feed__placeholder">Egocentric camera view and force overlay placeholder
+                                </div>
                             </div>
-                            <div class="feed__placeholder">Egocentric camera view and force overlay placeholder</div>
-                        </div>
 
-                        <div class="feed-row">
-                            <div class="feed">
-                                <div class="feed__header">
-                                    <span>Left Wrist</span>
-                                    <strong id="left-wrist-fps">-- FPS</strong>
+                            <div class="feed-row">
+                                <div class="feed">
+                                    <div class="feed__header">
+                                        <span>Left Wrist</span>
+                                        <strong id="left-wrist-fps">-- FPS</strong>
+                                    </div>
+                                    <div class="feed__placeholder">Left in-hand camera placeholder</div>
                                 </div>
-                                <div class="feed__placeholder">Left in-hand camera placeholder</div>
-                            </div>
-                            <div class="feed">
-                                <div class="feed__header">
-                                    <span>Right Wrist</span>
-                                    <strong id="right-wrist-fps">-- FPS</strong>
+                                <div class="feed">
+                                    <div class="feed__header">
+                                        <span>Right Wrist</span>
+                                        <strong id="right-wrist-fps">-- FPS</strong>
+                                    </div>
+                                    <div class="feed__placeholder">Right in-hand camera placeholder</div>
                                 </div>
-                                <div class="feed__placeholder">Right in-hand camera placeholder</div>
                             </div>
                         </div>
 
@@ -149,16 +143,7 @@
             </section>
 
             <section class="view" data-view="training">
-                <section class="panel panel--wide module-panel">
-                    <div class="module-overlay hidden" id="training-overlay">
-                        <div class="module-overlay__panel">
-                            <p class="eyebrow">Loading Module</p>
-                            <h2>Preparing Training</h2>
-                            <div class="progress-bar"><span id="training-overlay-progress"></span></div>
-                            <ul class="stage-list" id="training-overlay-stages"></ul>
-                        </div>
-                    </div>
-
+                <section class="panel panel--wide">
                     <div id="training-content"></div>
                 </section>
             </section>
