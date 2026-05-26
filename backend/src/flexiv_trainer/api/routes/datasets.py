@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from flexiv_trainer.runtime.manager import RuntimeManager, get_runtime_manager
+from flexiv_trainer.terminal import info, ok
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -40,4 +41,19 @@ def browse(
 def combine(
     request: CombineRequest, runtime: RuntimeManager = Depends(get_runtime_manager)
 ) -> dict:
-    return runtime.combine_episodes(request.episode_paths, request.output_name)
+    info(
+        "Combining episode datasets",
+        f"count={len(request.episode_paths)} output={request.output_name}",
+    )
+    result = runtime.combine_episodes(request.episode_paths, request.output_name)
+    ok(
+        "Combined dataset ready",
+        " ".join(
+            [
+                f"root={result.get('root', request.output_name)}",
+                f"episodes={result.get('episodes', len(request.episode_paths))}",
+                f"output={result.get('output_name', request.output_name)}",
+            ]
+        ),
+    )
+    return result
