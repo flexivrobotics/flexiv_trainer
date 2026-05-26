@@ -29,6 +29,7 @@ class RuntimeManager:
                 "reachable": True,
                 "host": self.settings.host,
                 "port": self.settings.port,
+                "ui_url": self.settings.ui_url,
             },
             "teleop": self.teleop.snapshot().__dict__,
             "ddk": self.ddk.status(),

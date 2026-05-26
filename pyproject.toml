@@ -29,3 +29,8 @@ train_policy = "flexiv_trainer.cli.train_policy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend/src/flexiv_trainer"]
+
+[tool.hatch.build]
+include = [
+  "backend/src/flexiv_trainer/web/**/*",
+]

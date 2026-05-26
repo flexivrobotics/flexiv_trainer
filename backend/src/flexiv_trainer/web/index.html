@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flexiv Trainer</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+    <div class="app-shell">
+        <header class="app-nav">
+            <button class="brand" data-nav="home" type="button">Flexiv Trainer</button>
+            <nav>
+                <button class="nav-link" data-nav="teleoperation" type="button">Teleoperation</button>
+                <button class="nav-link" data-nav="training" type="button">Training</button>
+            </nav>
+        </header>
+
+        <main class="page-shell">
+            <section class="view view--active" data-view="home">
+                <section class="hero-panel">
+                    <p class="eyebrow">Home</p>
+                    <h1>Flexiv Trainer</h1>
+                    <p>
+                        Start the backend, open this page, and use the navigation bar to enter Teleoperation or
+                        Training.
+                        Each module initializes only when selected.
+                    </p>
+                </section>
+
+                <section class="panel-grid">
+                    <section class="panel">
+                        <h2>Quick Start</h2>
+                        <ol class="number-list">
+                            <li>Confirm robots, cameras, and network are ready.</li>
+                            <li>Open Teleoperation and verify module health.</li>
+                            <li>Record and save one or more episodes.</li>
+                            <li>Open Training to load, combine, and train.</li>
+                        </ol>
+                    </section>
+
+                    <section class="panel">
+                        <h2>Safety &amp; Readiness Checklist</h2>
+                        <ul class="plain-list">
+                            <li>Robots powered and reachable.</li>
+                            <li>RealSense cameras connected and discoverable.</li>
+                            <li>Calibration files available if overlay is required.</li>
+                            <li>Home postures configured before reset operations.</li>
+                        </ul>
+                    </section>
+
+                    <section class="panel">
+                        <h2>Data Storage &amp; Outputs</h2>
+                        <div class="kv-list" id="home-storage"></div>
+                    </section>
+                </section>
+
+                <section class="panel panel--wide">
+                    <div class="panel-header">
+                        <h2>Example Workflows</h2>
+                        <p>Choose a module to continue.</p>
+                    </div>
+                    <div class="workflow-grid">
+                        <button class="workflow-card" data-nav="teleoperation" type="button">
+                            <span class="workflow-card__badge">Example</span>
+                            <h3>Record a New Episode</h3>
+                            <p>Open Teleoperation, start teleop, and record a saved episode.</p>
+                        </button>
+                        <button class="workflow-card" data-nav="training" type="button">
+                            <span class="workflow-card__badge">Example</span>
+                            <h3>Review or Combine Episodes</h3>
+                            <p>Open Training, load saved datasets, and combine selected episodes.</p>
+                        </button>
+                        <button class="workflow-card" data-nav="training" type="button">
+                            <span class="workflow-card__badge">Example</span>
+                            <h3>Train a Policy</h3>
+                            <p>Choose a policy, select an output directory, and start training.</p>
+                        </button>
+                    </div>
+                </section>
+
+                <section class="panel panel--wide">
+                    <h2>System Status</h2>
+                    <div class="status-grid" id="home-status"></div>
+                </section>
+            </section>
+
+            <section class="view" data-view="teleoperation">
+                <section class="panel panel--wide module-panel">
+                    <div class="module-overlay hidden" id="teleop-overlay">
+                        <div class="module-overlay__panel">
+                            <p class="eyebrow">Loading Module</p>
+                            <h2>Preparing Teleoperation</h2>
+                            <div class="progress-bar"><span id="teleop-overlay-progress"></span></div>
+                            <ul class="stage-list" id="teleop-overlay-stages"></ul>
+                        </div>
+                    </div>
+
+                    <div class="teleop-layout">
+                        <div class="feed feed--hero">
+                            <div class="feed__header">
+                                <span>Ego Camera</span>
+                                <strong id="ego-fps">-- FPS</strong>
+                            </div>
+                            <div class="feed__placeholder">Egocentric camera view and force overlay placeholder</div>
+                        </div>
+
+                        <div class="feed-row">
+                            <div class="feed">
+                                <div class="feed__header">
+                                    <span>Left Wrist</span>
+                                    <strong id="left-wrist-fps">-- FPS</strong>
+                                </div>
+                                <div class="feed__placeholder">Left in-hand camera placeholder</div>
+                            </div>
+                            <div class="feed">
+                                <div class="feed__header">
+                                    <span>Right Wrist</span>
+                                    <strong id="right-wrist-fps">-- FPS</strong>
+                                </div>
+                                <div class="feed__placeholder">Right in-hand camera placeholder</div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel--soft">
+                            <div class="panel-header">
+                                <h2>Module Status</h2>
+                                <button class="secondary-button" id="teleop-refresh" type="button">Refresh</button>
+                            </div>
+                            <div class="status-grid" id="teleop-status-grid"></div>
+                        </div>
+
+                        <div class="control-bar">
+                            <button id="teleop-start" type="button">Start Teleoperation</button>
+                            <button id="teleop-stop" type="button">Stop Teleoperation</button>
+                            <button id="teleop-home" type="button">Reset All Robots to Home</button>
+                            <button id="record-start" type="button">Start Recording</button>
+                            <button id="record-stop" type="button">Stop Recording</button>
+                            <button class="secondary-button hidden" id="record-save" type="button">Save Episode</button>
+                            <button class="secondary-button hidden" id="record-discard" type="button">Discard
+                                Episode</button>
+                        </div>
+
+                        <div class="panel panel--soft hidden" id="teleop-message"></div>
+                    </div>
+                </section>
+            </section>
+
+            <section class="view" data-view="training">
+                <section class="panel panel--wide module-panel">
+                    <div class="module-overlay hidden" id="training-overlay">
+                        <div class="module-overlay__panel">
+                            <p class="eyebrow">Loading Module</p>
+                            <h2>Preparing Training</h2>
+                            <div class="progress-bar"><span id="training-overlay-progress"></span></div>
+                            <ul class="stage-list" id="training-overlay-stages"></ul>
+                        </div>
+                    </div>
+
+                    <div id="training-content"></div>
+                </section>
+            </section>
+        </main>
+    </div>
+
+    <div class="dialog-backdrop hidden" id="browser-modal">
+        <div class="dialog-panel">
+            <div class="dialog-header">
+                <div>
+                    <p class="eyebrow">Server Path Browser</p>
+                    <h3 id="browser-title">Select Path</h3>
+                </div>
+                <button class="secondary-button" id="browser-close" type="button">Close</button>
+            </div>
+            <div class="dialog-toolbar">
+                <button class="secondary-button" id="browser-up" type="button">Up</button>
+                <code id="browser-path">/</code>
+            </div>
+            <div class="dialog-list" id="browser-list"></div>
+            <div class="dialog-footer">
+                <button class="secondary-button" id="browser-cancel" type="button">Cancel</button>
+                <button id="browser-confirm" type="button">Select</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast hidden" id="toast"></div>
+
+    <script type="module" src="/static/app.js"></script>
+</body>
+
+</html>

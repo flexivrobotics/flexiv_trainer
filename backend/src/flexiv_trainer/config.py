@@ -81,6 +81,7 @@ class AppSettings(BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = 8000
+    public_base_url: str | None = None
     robot_type: str = "flexiv_rizon_dual"
     default_task: str = "Dual-arm Flexiv teleoperation demonstration"
     network_interface_whitelist: list[str] = Field(default_factory=list)
@@ -105,6 +106,16 @@ class AppSettings(BaseSettings):
 
     def ensure_storage(self) -> None:
         self.storage.ensure()
+
+    @property
+    def ui_url(self) -> str:
+        if self.public_base_url:
+            return self.public_base_url.rstrip("/") + "/"
+
+        host = self.host
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        return f"http://{host}:{self.port}/"
 
 
 @lru_cache(maxsize=1)

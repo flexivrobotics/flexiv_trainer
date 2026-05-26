@@ -3,18 +3,28 @@
 Flexiv Trainer is a local-first platform for dual-arm Flexiv teleoperation,
 episode recording, dataset combination, and LeRobot policy training.
 
-## Current Scope
+## What End Users Need To Do
 
-- Python backend scaffold with FastAPI routes and CLI entrypoints.
+1. Prepare a Python environment containing the required robot and runtime packages.
+2. Start the backend with `flexiv-trainer-server`.
+3. Open the single URL printed by the backend.
+
+You do not need to start a separate frontend development server. The backend
+serves the web UI directly.
+
+## Current Product Scope
+
+- Backend-served operator UI available from the same URL as the backend.
 - Flexiv TDK teleoperation wrapper around `TransparentCartesianTeleopLAN`.
 - Flexiv DDK snapshot reader for remote robots.
 - RealSense discovery and stream bootstrap service.
 - LeRobot episode writer for local single-episode datasets.
 - Dataset combination and training job orchestration scaffolds.
+- Command-line entrypoints for teleoperation, recording, combining, and training.
 
 ## Prerequisites
 
-The backend expects a Python environment with:
+The runtime expects a Python environment with:
 
 - `flexivtdk==1.6.0`
 - `flexivddk==1.4.0`
@@ -22,17 +32,19 @@ The backend expects a Python environment with:
 - `pyrealsense2`
 - `fastapi`, `uvicorn`, `pydantic-settings`, `typer`
 
-The frontend expects a recent Node.js and npm installation.
+These can be installed into a dedicated virtual environment or into an existing
+vendor-provided Flexiv environment.
 
 ## Repository Layout
 
-- `backend/src/flexiv_trainer/`: backend package and CLI tools
+- `backend/src/flexiv_trainer/`: backend package and API/CLI logic
+- `backend/src/flexiv_trainer/web/`: packaged web UI served by the backend
 - `.local/episodes/`: saved single-episode LeRobot datasets
 - `.local/combined/`: combined datasets
 - `.local/training/`: training outputs
 - `.local/calibration/`: camera calibration files
 
-## Backend Setup
+## Setup
 
 Create and activate a virtual environment, then install the package in editable
 mode:
@@ -50,32 +62,40 @@ activate that environment first and then run:
 pip install -e .
 ```
 
-## Run the Backend
+## Start Flexiv Trainer
 
 ```bash
 source .venv/bin/activate
 flexiv-trainer-server
 ```
 
-Equivalent `uvicorn` command:
+After startup, the backend prints a single clickable URL. Open that URL in a
+browser to use the UI.
 
-```bash
-source .venv/bin/activate
-python -m uvicorn flexiv_trainer.api.app:app --host 0.0.0.0 --port 8000 --app-dir backend/src
+By default this is:
+
+```text
+http://127.0.0.1:8000/
 ```
 
-## Frontend Setup
+If you want to open the UI from another device on the same LAN, set a public
+base URL before startup:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+export FLEXIV_TRAINER_PUBLIC_BASE_URL=http://<backend-host-ip>:8000
+flexiv-trainer-server
 ```
 
-If the frontend is served from a different host or port than the backend, set
-`VITE_API_BASE` before starting the frontend. See `frontend/.env.example`.
+The backend also exposes the API documentation at:
 
-## CLI Entrypoints
+```text
+http://127.0.0.1:8000/docs
+```
+
+## Optional CLI Tools
+
+In addition to the browser UI, the following command-line entrypoints are
+available:
 
 ```bash
 teleop --help
@@ -83,3 +103,9 @@ record_data --help
 combine_episodes --help
 train_policy --help
 ```
+
+## Maintainer Notes
+
+The repository also contains a separate `frontend/` workspace used for UI source
+maintenance and future packaging work. End users do not need Node.js or npm to
+run Flexiv Trainer in its packaged backend-served form.
