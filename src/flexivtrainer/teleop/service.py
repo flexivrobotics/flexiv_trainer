@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from flexiv_trainer.config import AppSettings
+from flexivtrainer.config import AppSettings
 
 try:
     from flexivtdk import TransparentCartesianTeleopLAN

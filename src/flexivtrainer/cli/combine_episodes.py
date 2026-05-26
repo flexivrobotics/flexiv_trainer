@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typer
 
-from flexiv_trainer.runtime.manager import get_runtime_manager
+from flexivtrainer.runtime.manager import get_runtime_manager
 
 app = typer.Typer(add_completion=False)
 

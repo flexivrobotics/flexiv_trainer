@@ -1,4 +1,4 @@
-from flexiv_trainer.api.app import run
+from flexivtrainer.api.app import run
 
 
 def main() -> None:

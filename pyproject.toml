@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "flexiv-trainer"
+name = "flexivtrainer"
 version = "0.1.0"
-description = "All-in-one Flexiv teleoperation, data recording, and training platform"
+description = "All-in-one software platform for training physical AI skills for Flexiv robots."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -28,18 +28,20 @@ dev = [
 ]
 
 [project.scripts]
-flexiv-trainer-server = "flexiv_trainer.api.app:run"
-teleop = "flexiv_trainer.cli.teleop:main"
-record_data = "flexiv_trainer.cli.record_data:main"
-combine_episodes = "flexiv_trainer.cli.combine_episodes:main"
-train_policy = "flexiv_trainer.cli.train_policy:main"
+flexiv-trainer-server = "flexivtrainer.api.app:run"
+flexivtrainer-server = "flexivtrainer.api.app:run"
+flexivtrainer = "flexivtrainer.__main__:main"
+teleop = "flexivtrainer.cli.teleop:main"
+record_data = "flexivtrainer.cli.record_data:main"
+combine_episodes = "flexivtrainer.cli.combine_episodes:main"
+train_policy = "flexivtrainer.cli.train_policy:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend/src/flexiv_trainer"]
+packages = ["src/flexivtrainer"]
 
 [tool.hatch.build]
 include = [
-  "backend/src/flexiv_trainer/web/**/*",
+  "src/flexivtrainer/web/**/*",
 ]
 
 [tool.ruff]

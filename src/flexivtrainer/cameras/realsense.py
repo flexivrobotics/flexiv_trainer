@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from flexiv_trainer.config import AppSettings, CameraConfig
+from flexivtrainer.config import AppSettings, CameraConfig
 
 try:
     import pyrealsense2 as rs

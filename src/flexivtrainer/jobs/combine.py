@@ -6,7 +6,7 @@ from typing import Any
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from flexiv_trainer.data.lerobot_io import EpisodeManifest
+from flexivtrainer.data.lerobot_io import EpisodeManifest
 
 
 def _load_manifest(root: Path) -> EpisodeManifest:

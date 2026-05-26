@@ -8,9 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from flexiv_trainer.api.routes import datasets, system, teleop, training
-from flexiv_trainer.config import get_settings
-from flexiv_trainer.observability import banner, error, info, ok, section, warn
+from flexivtrainer.api.routes import datasets, system, teleop, training
+from flexivtrainer.config import get_settings
+from flexivtrainer.observability import banner, error, info, ok, section, warn
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 
@@ -61,7 +61,6 @@ app = create_app()
 
 def run() -> None:
     settings = get_settings()
-    print(settings.ui_url, flush=True)
     banner(
         "Flexiv Trainer Backend",
         f"UI      {settings.ui_url}",

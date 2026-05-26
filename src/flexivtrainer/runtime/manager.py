@@ -4,13 +4,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from flexiv_trainer.cameras.realsense import RealSenseService
-from flexiv_trainer.config import AppSettings, get_settings
-from flexiv_trainer.data.recording_service import RecordingService
-from flexiv_trainer.ddk.service import DDKService
-from flexiv_trainer.jobs.combine import combine_episode_datasets
-from flexiv_trainer.jobs.train import TrainingService
-from flexiv_trainer.teleop.service import TeleopService
+from flexivtrainer.cameras.realsense import RealSenseService
+from flexivtrainer.config import AppSettings, get_settings
+from flexivtrainer.data.recording_service import RecordingService
+from flexivtrainer.ddk.service import DDKService
+from flexivtrainer.jobs.combine import combine_episode_datasets
+from flexivtrainer.jobs.train import TrainingService
+from flexivtrainer.teleop.service import TeleopService
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 

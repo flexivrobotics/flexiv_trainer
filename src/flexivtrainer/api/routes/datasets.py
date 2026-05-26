@@ -5,8 +5,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from flexiv_trainer.observability import info, ok
-from flexiv_trainer.runtime.manager import RuntimeManager, get_runtime_manager
+from flexivtrainer.observability import info, ok
+from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 

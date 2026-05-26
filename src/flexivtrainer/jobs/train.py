@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -11,8 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flexiv_trainer.config import AppSettings
-from flexiv_trainer.observability import (
+from flexivtrainer.config import AppSettings
+from flexivtrainer.observability import (
     Pulse,
     error,
     format_elapsed,
@@ -42,6 +43,30 @@ POLICY_CATALOG = {
     },
 }
 
+TRACKER_KEY_MAP = {
+    "step": "step",
+    "smpl": "samples",
+    "ep": "episodes",
+    "epch": "epochs",
+    "loss": "loss",
+    "grdn": "grad_norm",
+    "lr": "lr",
+    "updt_s": "update_seconds",
+    "data_s": "data_seconds",
+}
+
+TRACKER_TOKEN_PATTERN = re.compile(
+    r"(?P<key>step|smpl|ep|epch|loss|grdn|lr|updt_s|data_s):(?P<value>[^\s]+)"
+)
+TOTAL_STEPS_PATTERN = re.compile(r"cfg\.steps=(?P<steps>\d+)")
+DATASET_FRAMES_PATTERN = re.compile(r"dataset\.num_frames=(?P<frames>\d+)")
+DATASET_EPISODES_PATTERN = re.compile(r"dataset\.num_episodes=(?P<episodes>\d+)")
+EFFECTIVE_BATCH_SIZE_PATTERN = re.compile(
+    r"effective batch size:\s*(?P<batch_size>\d+)", re.IGNORECASE
+)
+CHECKPOINT_STEP_PATTERN = re.compile(r"Checkpoint policy after step (?P<step>\d+)")
+EVAL_STEP_PATTERN = re.compile(r"Eval policy at step (?P<step>\d+)")
+
 
 @dataclass
 class TrainingJob:
@@ -56,9 +81,24 @@ class TrainingJob:
     return_code: int | None = None
     error: str | None = None
     started_at: float = field(default_factory=time.monotonic)
+    metrics: dict[str, int | float] = field(default_factory=dict)
+    total_steps: int | None = None
+    dataset_num_frames: int | None = None
+    dataset_num_episodes: int | None = None
+    effective_batch_size: int | None = None
+    last_checkpoint_step: int | None = None
+    last_eval_step: int | None = None
+    last_event: str | None = None
     pulse: Pulse | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> dict[str, Any]:
+        current_step = self.metrics.get("step")
+        progress = 100 if self.status == "completed" else 0
+        if self.total_steps and current_step is not None and self.status != "completed":
+            progress = min(
+                99, max(0, int((float(current_step) / self.total_steps) * 100))
+            )
+
         return {
             "job_id": self.job_id,
             "command": self.command,
@@ -71,7 +111,15 @@ class TrainingJob:
             "logs": self.logs[-200:],
             "elapsed": format_elapsed(time.monotonic() - self.started_at),
             "log_lines": len(self.logs),
-            "progress": 100 if self.status == "completed" else 0,
+            "progress": progress,
+            "metrics": self.metrics,
+            "total_steps": self.total_steps,
+            "dataset_num_frames": self.dataset_num_frames,
+            "dataset_num_episodes": self.dataset_num_episodes,
+            "effective_batch_size": self.effective_batch_size,
+            "last_checkpoint_step": self.last_checkpoint_step,
+            "last_eval_step": self.last_eval_step,
+            "last_event": self.last_event,
         }
 
 
@@ -86,6 +134,78 @@ class TrainingService:
             "default": self._settings.training.default_policy,
             "policies": POLICY_CATALOG,
         }
+
+    @staticmethod
+    def _parse_compact_number(raw: str) -> int | float:
+        suffix_scale = {
+            "K": 1_000,
+            "M": 1_000_000,
+            "B": 1_000_000_000,
+        }
+
+        token = raw.strip()
+        if token and token[-1].upper() in suffix_scale:
+            value = float(token[:-1]) * suffix_scale[token[-1].upper()]
+        else:
+            value = float(token)
+        return int(value) if value.is_integer() else value
+
+    def _update_job_from_log(self, job: TrainingJob, line: str) -> None:
+        tracker_matches = {
+            match.group("key"): match.group("value")
+            for match in TRACKER_TOKEN_PATTERN.finditer(line)
+        }
+        if tracker_matches and "step" in tracker_matches:
+            parsed_metrics: dict[str, int | float] = {}
+            for raw_key, raw_value in tracker_matches.items():
+                parsed_metrics[TRACKER_KEY_MAP[raw_key]] = self._parse_compact_number(
+                    raw_value
+                )
+            job.metrics.update(parsed_metrics)
+            job.last_event = "training_metrics"
+
+        if total_steps_match := TOTAL_STEPS_PATTERN.search(line):
+            job.total_steps = int(total_steps_match.group("steps"))
+            job.last_event = "config_loaded"
+
+        if dataset_frames_match := DATASET_FRAMES_PATTERN.search(line):
+            job.dataset_num_frames = int(dataset_frames_match.group("frames"))
+
+        if dataset_episodes_match := DATASET_EPISODES_PATTERN.search(line):
+            job.dataset_num_episodes = int(dataset_episodes_match.group("episodes"))
+
+        if batch_size_match := EFFECTIVE_BATCH_SIZE_PATTERN.search(line):
+            job.effective_batch_size = int(batch_size_match.group("batch_size"))
+            job.last_event = "training_started"
+
+        if checkpoint_match := CHECKPOINT_STEP_PATTERN.search(line):
+            job.last_checkpoint_step = int(checkpoint_match.group("step"))
+            job.last_event = "checkpoint_saved"
+
+        if eval_match := EVAL_STEP_PATTERN.search(line):
+            job.last_eval_step = int(eval_match.group("step"))
+            job.last_event = "evaluation_running"
+
+        if "End of training" in line:
+            job.last_event = "training_finished"
+
+    @staticmethod
+    def _pulse_detail(job: TrainingJob) -> str:
+        parts = [
+            f"job_id={job.job_id}",
+            f"elapsed={format_elapsed(time.monotonic() - job.started_at)}",
+        ]
+        if (step := job.metrics.get("step")) is not None:
+            total = job.total_steps if job.total_steps is not None else "?"
+            parts.append(f"step={int(step)}/{total}")
+        if (loss := job.metrics.get("loss")) is not None:
+            parts.append(f"loss={float(loss):.3f}")
+        if (grad_norm := job.metrics.get("grad_norm")) is not None:
+            parts.append(f"grdn={float(grad_norm):.3f}")
+        if (lr := job.metrics.get("lr")) is not None:
+            parts.append(f"lr={float(lr):.2e}")
+        parts.append(f"lines={len(job.logs)}")
+        return " ".join(parts)
 
     def _resolve_dataset(self, dataset_root: Path) -> tuple[str, Path]:
         combined_manifest = dataset_root / "combined.json"
@@ -167,10 +287,7 @@ class TrainingService:
             )
             job.pulse = Pulse(
                 "Training job running",
-                detail_factory=lambda: (
-                    f"job_id={job.job_id} elapsed={format_elapsed(time.monotonic() - job.started_at)} "
-                    f"lines={len(job.logs)} policy={job.policy_type}"
-                ),
+                detail_factory=lambda: self._pulse_detail(job),
                 interval_seconds=5.0,
             ).start()
             self._job = job
@@ -188,6 +305,7 @@ class TrainingService:
                 if not text:
                     continue
                 job.logs.append(text)
+                self._update_job_from_log(job, text)
                 stream("TRAIN", text, detail=f"job_id={job.job_id}")
             job.return_code = job.process.wait()
             job.status = "completed" if job.return_code == 0 else "failed"
