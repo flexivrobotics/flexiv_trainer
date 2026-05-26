@@ -29,6 +29,26 @@ const state = {
     timers: {
         robotConfigSave: null,
     },
+    telemetryHistory: {
+        left: [],
+        right: [],
+    },
+};
+
+const TELEMETRY_HISTORY_LIMIT = 90;
+const TELEMETRY_SERIES = {
+    force: {
+        title: "Cartesian Force",
+        units: "N",
+        labels: ["f_x", "f_y", "f_z"],
+        colors: ["#8de0ff", "#86e4a8", "#ffbf7a"],
+    },
+    moment: {
+        title: "Cartesian Moment",
+        units: "Nm",
+        labels: ["m_x", "m_y", "m_z"],
+        colors: ["#8de0ff", "#86e4a8", "#ffbf7a"],
+    },
 };
 
 function byId(id) {
@@ -291,39 +311,59 @@ function readVectorFromObject(source, keys) {
     return values.every((value) => value !== null) ? values : null;
 }
 
-function scoreForceKey(key) {
+function vectorFromArray(values, startIndex = 0) {
+    const vector = values
+        .slice(startIndex, startIndex + 3)
+        .map((value) => coerceFiniteNumber(value));
+    return vector.length === 3 && vector.every((value) => value !== null) ? vector : null;
+}
+
+function scoreVectorKey(key, kind) {
     const value = String(key || "").toLowerCase();
     let score = 0;
-    if (value.includes("force")) {
+    const preferred = kind === "force"
+        ? ["force", "wrench", "contact", "linear"]
+        : ["moment", "torque", "wrench", "angular"];
+    const discouraged = kind === "force"
+        ? ["moment", "torque", "angular"]
+        : ["force", "contact", "linear"];
+    preferred.forEach((token, index) => {
+        if (value.includes(token)) {
+            score += 8 - index;
+        }
+    });
+    discouraged.forEach((token, index) => {
+        if (value.includes(token)) {
+            score -= 5 - index;
+        }
+    });
+    if (kind === "force" && /^(f|force)[_xya-z]*$/.test(value)) {
         score += 4;
     }
-    if (value.includes("wrench")) {
-        score += 3;
-    }
-    if (value.includes("contact")) {
-        score += 2;
-    }
-    if (value.includes("torque")) {
-        score -= 2;
+    if (kind === "moment" && /^(m|moment|torque|tau)[_xya-z]*$/.test(value)) {
+        score += 4;
     }
     return score;
 }
 
-function extractForceVector(payload, keyHint = "") {
+function extractCartesianVector(payload, kind, keyHint = "") {
     if (payload === null || payload === undefined) {
         return null;
     }
 
     const hint = String(keyHint || "").toLowerCase();
     if (Array.isArray(payload)) {
-        if ((hint.includes("force") || hint.includes("wrench")) && payload.length >= 3) {
-            const values = payload.slice(0, 3).map((value) => coerceFiniteNumber(value));
-            if (values.every((value) => value !== null)) {
-                return values;
-            }
+        if (hint.includes("wrench") && payload.length >= 6) {
+            return kind === "force" ? vectorFromArray(payload, 0) : vectorFromArray(payload, 3);
+        }
+        if (kind === "force" && /(force|contact|linear)/.test(hint) && payload.length >= 3) {
+            return vectorFromArray(payload, 0);
+        }
+        if (kind === "moment" && /(moment|torque|angular)/.test(hint) && payload.length >= 3) {
+            return vectorFromArray(payload, 0);
         }
         for (const item of payload) {
-            const candidate = extractForceVector(item, hint);
+            const candidate = extractCartesianVector(item, kind, hint);
             if (candidate) {
                 return candidate;
             }
@@ -335,22 +375,71 @@ function extractForceVector(payload, keyHint = "") {
         return null;
     }
 
-    const directVector =
-        readVectorFromObject(payload, ["fx", "fy", "fz"])
-        || readVectorFromObject(payload, ["force_x", "force_y", "force_z"])
-        || (((hint.includes("force") || hint.includes("wrench")) && readVectorFromObject(payload, ["x", "y", "z"])) || null);
+    const directPatterns = kind === "force"
+        ? [
+            ["fx", "fy", "fz"],
+            ["f_x", "f_y", "f_z"],
+            ["force_x", "force_y", "force_z"],
+            ["forceX", "forceY", "forceZ"],
+            ["fX", "fY", "fZ"],
+        ]
+        : [
+            ["mx", "my", "mz"],
+            ["m_x", "m_y", "m_z"],
+            ["moment_x", "moment_y", "moment_z"],
+            ["momentX", "momentY", "momentZ"],
+            ["torque_x", "torque_y", "torque_z"],
+            ["torqueX", "torqueY", "torqueZ"],
+            ["tau_x", "tau_y", "tau_z"],
+            ["mX", "mY", "mZ"],
+        ];
+    let directVector = null;
+    for (const pattern of directPatterns) {
+        directVector = readVectorFromObject(payload, pattern);
+        if (directVector) {
+            break;
+        }
+    }
+    if (!directVector && kind === "force" && /(force|wrench|contact|linear)/.test(hint)) {
+        directVector = readVectorFromObject(payload, ["x", "y", "z"]);
+    }
+    if (!directVector && kind === "moment" && /(moment|torque|wrench|angular)/.test(hint)) {
+        directVector = readVectorFromObject(payload, ["x", "y", "z"])
+            || readVectorFromObject(payload, ["tx", "ty", "tz"]);
+    }
     if (directVector) {
         return directVector;
     }
 
-    const orderedKeys = Object.keys(payload).sort((left, right) => scoreForceKey(right) - scoreForceKey(left));
+    const preferredKeys = kind === "force"
+        ? ["force", "cartesian_force", "linear_force", "contact_force", "wrench"]
+        : ["moment", "cartesian_moment", "torque", "cartesian_torque", "angular", "wrench"];
+    for (const key of preferredKeys) {
+        if (payload[key] !== undefined) {
+            const candidate = extractCartesianVector(payload[key], kind, key);
+            if (candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    const orderedKeys = Object.keys(payload).sort((left, right) => scoreVectorKey(right, kind) - scoreVectorKey(left, kind));
     for (const key of orderedKeys) {
-        const candidate = extractForceVector(payload[key], key);
+        const candidate = extractCartesianVector(payload[key], kind, key);
         if (candidate) {
             return candidate;
         }
     }
     return null;
+}
+
+function readRobotTelemetry(robot) {
+    return {
+        force: extractCartesianVector(robot?.cartesian_state, "force", "cartesian_state")
+            || extractCartesianVector(robot?.cartesian_command, "force", "cartesian_command"),
+        moment: extractCartesianVector(robot?.cartesian_state, "moment", "cartesian_state")
+            || extractCartesianVector(robot?.cartesian_command, "moment", "cartesian_command"),
+    };
 }
 
 function getRobotTelemetryForSide(side, teleopStatus) {
@@ -368,60 +457,235 @@ function getRobotTelemetryForSide(side, teleopStatus) {
     return { serial: preferredSerial || null, robot: null };
 }
 
-function renderForceOverlay(side, robotEntry) {
-    const overlay = byId(`${side}-force-overlay`);
-    const shaft = overlay?.querySelector("[data-force-shaft]");
-    const head = overlay?.querySelector("[data-force-head]");
-    const label = byId(`${side}-force-label`);
-    if (!overlay || !shaft || !head || !label) {
-        return;
+function appendTelemetrySample(side, telemetry) {
+    const history = state.telemetryHistory[side] || (state.telemetryHistory[side] = []);
+    if (!telemetry.force && !telemetry.moment && !history.length) {
+        return history;
     }
+    history.push({
+        timestamp: Date.now(),
+        force: telemetry.force ? [...telemetry.force] : null,
+        moment: telemetry.moment ? [...telemetry.moment] : null,
+    });
+    if (history.length > TELEMETRY_HISTORY_LIMIT) {
+        history.splice(0, history.length - TELEMETRY_HISTORY_LIMIT);
+    }
+    return history;
+}
 
-    const baseX = side === "left" ? 18 : 78;
-    const baseY = 78;
-    let dx = side === "left" ? 18 : -18;
-    let dy = -20;
+function buildVectorGeometry(side, vector) {
+    const baseX = side === "left" ? 40 : 200;
+    const baseY = 118;
+    let dx = side === "left" ? 92 : -92;
+    let dy = -48;
     let magnitude = null;
 
-    const force = extractForceVector(robotEntry?.robot?.cartesian_state, "cartesian_state")
-        || extractForceVector(robotEntry?.robot?.cartesian_command, "cartesian_command");
-    if (force) {
-        const [fx, fy, fz] = force;
+    if (vector) {
+        const [fx, fy, fz] = vector;
         magnitude = Math.hypot(fx, fy, fz);
         const inwardX = side === "left" ? fx : -fx;
         const upwardY = -fy;
         const planarMagnitude = Math.hypot(inwardX, upwardY);
         if (planarMagnitude > 1e-6) {
-            const length = clamp(14 + Math.min(planarMagnitude, 25) * 0.9, 14, 38);
+            const length = clamp(42 + Math.min(planarMagnitude, 30) * 2.2, 42, 118);
             dx = (inwardX / planarMagnitude) * length;
             dy = (upwardY / planarMagnitude) * length;
         }
     }
 
-    const tipX = clamp(baseX + dx, 8, 88);
-    const tipY = clamp(baseY + dy, 8, 88);
+    const tipX = clamp(baseX + dx, 18, 222);
+    const tipY = clamp(baseY + dy, 18, 144);
     const angle = Math.atan2(tipY - baseY, tipX - baseX);
-    const headLength = 10;
-    const headWidth = 5.5;
+    const headLength = 20;
+    const headWidth = 12;
     const leftX = tipX - Math.cos(angle) * headLength + Math.sin(angle) * headWidth;
     const leftY = tipY - Math.sin(angle) * headLength - Math.cos(angle) * headWidth;
     const rightX = tipX - Math.cos(angle) * headLength - Math.sin(angle) * headWidth;
     const rightY = tipY - Math.sin(angle) * headLength + Math.cos(angle) * headWidth;
 
-    shaft.setAttribute("x1", String(baseX));
-    shaft.setAttribute("y1", String(baseY));
-    shaft.setAttribute("x2", String(tipX));
-    shaft.setAttribute("y2", String(tipY));
-    head.setAttribute(
-        "points",
-        `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`,
-    );
+    return {
+        magnitude,
+        baseX,
+        baseY,
+        tipX,
+        tipY,
+        points: `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`,
+    };
+}
 
-    overlay.classList.toggle("force-overlay--live", magnitude !== null);
-    overlay.title = robotEntry?.serial || `${side} robot`;
-    label.textContent = magnitude === null
-        ? `${side.toUpperCase()} FORCE`
-        : `${side.toUpperCase()} FORCE · ${magnitude.toFixed(1)} N`;
+function formatComponentChips(vector, kind) {
+    const meta = TELEMETRY_SERIES[kind];
+    return meta.labels.map((label, index) => `
+        <span class="telemetry-chip">
+            <strong>${label}</strong>
+            <span>${vector ? `${vector[index].toFixed(1)} ${meta.units}` : "--"}</span>
+        </span>
+    `).join("");
+}
+
+function renderForcePanel(side, robotEntry, telemetry) {
+    const panel = byId(`${side}-force-panel`);
+    if (!panel) {
+        return;
+    }
+
+    const geometry = buildVectorGeometry(side, telemetry.force);
+    const sideLabel = side.toUpperCase();
+    panel.innerHTML = `
+        <div class="telemetry-card__header">
+            <div>
+                <span class="eyebrow">${sideLabel} Robot</span>
+                <h3>Cartesian Force Vector</h3>
+            </div>
+            <strong class="telemetry-card__value">${geometry.magnitude === null ? "Awaiting data" : `${geometry.magnitude.toFixed(1)} N`}</strong>
+        </div>
+        <div class="vector-panel ${geometry.magnitude !== null ? "vector-panel--live" : ""}">
+            <svg class="vector-panel__svg" viewBox="0 0 240 160" aria-hidden="true">
+                <line class="vector-panel__shaft" x1="${geometry.baseX}" y1="${geometry.baseY}" x2="${geometry.tipX}" y2="${geometry.tipY}"></line>
+                <polygon class="vector-panel__head" points="${geometry.points}"></polygon>
+            </svg>
+            <div class="vector-panel__meta">
+                <span class="vector-panel__serial">${robotEntry?.serial || `${sideLabel} robot stream waiting`}</span>
+                <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
+            </div>
+        </div>
+    `;
+}
+
+function computeTelemetryScale(history, kind) {
+    const values = [];
+    history.forEach((sample) => {
+        if (!sample[kind]) {
+            return;
+        }
+        sample[kind].forEach((value) => {
+            if (Number.isFinite(value)) {
+                values.push(value);
+            }
+        });
+    });
+
+    if (!values.length) {
+        return { min: -1, max: 1, hasData: false };
+    }
+
+    let min = Math.min(...values);
+    let max = Math.max(...values);
+    if (Math.abs(max - min) < 1e-6) {
+        const pad = Math.max(1, Math.abs(max) * 0.12 || 1);
+        min -= pad;
+        max += pad;
+    } else {
+        const pad = (max - min) * 0.12;
+        min -= pad;
+        max += pad;
+    }
+
+    return { min, max, hasData: true };
+}
+
+function buildTrendGrid(scale) {
+    const width = 960;
+    const height = 540;
+    const left = 34;
+    const right = 18;
+    const top = 18;
+    const bottom = 24;
+    const innerWidth = width - left - right;
+    const innerHeight = height - top - bottom;
+    const lines = [];
+
+    for (let index = 0; index <= 5; index += 1) {
+        const x = left + (innerWidth * index) / 5;
+        lines.push(`<line class="trend-chart__grid-line" x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}"></line>`);
+    }
+    for (let index = 0; index <= 4; index += 1) {
+        const y = top + (innerHeight * index) / 4;
+        lines.push(`<line class="trend-chart__grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}"></line>`);
+    }
+    if (scale.hasData && scale.min < 0 && scale.max > 0) {
+        const zeroY = top + (1 - ((0 - scale.min) / (scale.max - scale.min))) * innerHeight;
+        lines.push(`<line class="trend-chart__zero" x1="${left}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}"></line>`);
+    }
+    return `<g>${lines.join("")}</g>`;
+}
+
+function buildTrendPath(history, kind, componentIndex, scale) {
+    if (!scale.hasData || !history.length) {
+        return "";
+    }
+
+    const width = 960;
+    const height = 540;
+    const left = 34;
+    const right = 18;
+    const top = 18;
+    const bottom = 24;
+    const innerWidth = width - left - right;
+    const innerHeight = height - top - bottom;
+    let drawing = false;
+    let path = "";
+
+    history.forEach((sample, index) => {
+        const vector = sample[kind];
+        const value = vector ? coerceFiniteNumber(vector[componentIndex]) : null;
+        if (value === null) {
+            drawing = false;
+            return;
+        }
+
+        const ratio = history.length === 1 ? 1 : index / (history.length - 1);
+        const x = left + ratio * innerWidth;
+        const y = top + (1 - ((value - scale.min) / (scale.max - scale.min))) * innerHeight;
+        path += `${drawing ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)} `;
+        drawing = true;
+    });
+
+    return path.trim();
+}
+
+function renderTrendGraph(side, kind, history, currentVector) {
+    const panel = byId(`${side}-${kind}-graph-panel`);
+    if (!panel) {
+        return;
+    }
+
+    const meta = TELEMETRY_SERIES[kind];
+    const sideLabel = side.toUpperCase();
+    const scale = computeTelemetryScale(history, kind);
+    const paths = meta.colors.map((color, index) => {
+        const d = buildTrendPath(history, kind, index, scale);
+        return d ? `<path class="trend-chart__line" style="--trend-color:${color}" d="${d}"></path>` : "";
+    }).join("");
+    const statusText = scale.hasData
+        ? `Auto scale ${scale.min.toFixed(1)} to ${scale.max.toFixed(1)} ${meta.units}`
+        : "Awaiting data";
+
+    panel.innerHTML = `
+        <div class="telemetry-card__header">
+            <div>
+                <span class="eyebrow">${sideLabel} Robot</span>
+                <h3>${meta.title}</h3>
+            </div>
+            <strong class="telemetry-card__value">${statusText}</strong>
+        </div>
+        <div class="trend-chart">
+            <svg class="trend-chart__svg" viewBox="0 0 960 540" aria-hidden="true">
+                ${buildTrendGrid(scale)}
+                ${paths}
+            </svg>
+            ${scale.hasData ? "" : `<div class="trend-chart__empty">Awaiting ${kind} telemetry</div>`}
+        </div>
+        <div class="trend-chart__legend">
+            ${meta.labels.map((label, index) => `
+                <span class="trend-chart__legend-item">
+                    <span class="trend-chart__swatch" style="--swatch:${meta.colors[index]}"></span>
+                    <strong>${label}</strong>
+                    <span>${currentVector ? `${currentVector[index].toFixed(1)} ${meta.units}` : "--"}</span>
+                </span>
+            `).join("")}
+        </div>
+    `;
 }
 
 async function controlHomeService(serviceName, action) {
@@ -455,8 +719,21 @@ function renderTeleop() {
     byId("ego-fps").textContent = `${Number(cameras.ego?.fps || 0).toFixed(1)} FPS`;
     byId("left-wrist-fps").textContent = `${Number(cameras.left_wrist?.fps || 0).toFixed(1)} FPS`;
     byId("right-wrist-fps").textContent = `${Number(cameras.right_wrist?.fps || 0).toFixed(1)} FPS`;
-    renderForceOverlay("left", getRobotTelemetryForSide("left", teleopStatus));
-    renderForceOverlay("right", getRobotTelemetryForSide("right", teleopStatus));
+
+    const leftRobotEntry = getRobotTelemetryForSide("left", teleopStatus);
+    const rightRobotEntry = getRobotTelemetryForSide("right", teleopStatus);
+    const leftTelemetry = readRobotTelemetry(leftRobotEntry.robot);
+    const rightTelemetry = readRobotTelemetry(rightRobotEntry.robot);
+    if (state.teleopStatus) {
+        appendTelemetrySample("left", leftTelemetry);
+        appendTelemetrySample("right", rightTelemetry);
+    }
+    renderForcePanel("left", leftRobotEntry, leftTelemetry);
+    renderForcePanel("right", rightRobotEntry, rightTelemetry);
+    renderTrendGraph("left", "force", state.telemetryHistory.left, leftTelemetry.force);
+    renderTrendGraph("left", "moment", state.telemetryHistory.left, leftTelemetry.moment);
+    renderTrendGraph("right", "force", state.telemetryHistory.right, rightTelemetry.force);
+    renderTrendGraph("right", "moment", state.telemetryHistory.right, rightTelemetry.moment);
 
     const grid = byId("teleop-status-grid");
     grid.innerHTML = "";

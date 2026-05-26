@@ -348,6 +348,12 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.wrist-column {
+    display: grid;
+    gap: 1rem;
+    align-content: start;
+}
+
 #teleop-cameras-wrap {
     display: grid;
     gap: 1rem;
@@ -368,13 +374,6 @@ button:disabled {
     min-height: 0;
 }
 
-.feed__viewport {
-    position: relative;
-    display: flex;
-    flex: 1;
-    min-height: 0;
-}
-
 .feed__placeholder,
 .progress-block {
     display: grid;
@@ -386,59 +385,151 @@ button:disabled {
     color: rgba(251, 247, 240, 0.78);
 }
 
-.force-overlay {
-    position: absolute;
-    bottom: 1rem;
+.telemetry-card {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 22px;
+    background: rgba(22, 35, 44, 0.98);
+    color: #fbf7f0;
+    padding: 1rem;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.telemetry-card__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.85rem;
+    margin-bottom: 0.85rem;
+}
+
+.telemetry-card__header h3 {
+    margin: 0.18rem 0 0;
+}
+
+.telemetry-card__value {
+    color: #d8f5ff;
+    font-size: 0.88rem;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.vector-panel {
     display: grid;
-    gap: 0.35rem;
-    pointer-events: none;
-    z-index: 1;
+    gap: 0.85rem;
 }
 
-.force-overlay--left {
-    left: 1rem;
-    justify-items: start;
-}
-
-.force-overlay--right {
-    right: 1rem;
-    justify-items: end;
-}
-
-.force-overlay__svg {
-    width: 88px;
-    height: 88px;
+.vector-panel__svg {
+    width: 100%;
+    min-height: 170px;
+    max-height: 240px;
     overflow: visible;
-    filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.32));
+    filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.28));
 }
 
-.force-overlay__shaft {
+.vector-panel__shaft {
     stroke: #8de0ff;
-    stroke-width: 5;
+    stroke-width: 10;
     stroke-linecap: round;
 }
 
-.force-overlay__head {
+.vector-panel__head {
     fill: #8de0ff;
 }
 
-.force-overlay__label {
-    display: inline-flex;
-    max-width: 160px;
-    border: 1px solid rgba(141, 224, 255, 0.34);
-    border-radius: 999px;
-    background: rgba(17, 28, 36, 0.8);
-    color: #d8f5ff;
-    padding: 0.28rem 0.55rem;
-    font-size: 0.74rem;
+.vector-panel__meta {
+    display: grid;
+    gap: 0.7rem;
+}
+
+.vector-panel__serial {
+    color: rgba(216, 245, 255, 0.72);
+    font-size: 0.78rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
 }
 
-.force-overlay:not(.force-overlay--live) .force-overlay__shaft,
-.force-overlay:not(.force-overlay--live) .force-overlay__head,
-.force-overlay:not(.force-overlay--live) .force-overlay__label {
+.telemetry-chip-row,
+.trend-chart__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+}
+
+.telemetry-chip,
+.trend-chart__legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.42rem;
+    border: 1px solid rgba(141, 224, 255, 0.18);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(251, 247, 240, 0.88);
+    padding: 0.38rem 0.65rem;
+    font-size: 0.79rem;
+}
+
+.telemetry-chip strong,
+.trend-chart__legend-item strong {
+    color: #d8f5ff;
+}
+
+.vector-panel:not(.vector-panel--live) .vector-panel__shaft,
+.vector-panel:not(.vector-panel--live) .vector-panel__head,
+.vector-panel:not(.vector-panel--live) .vector-panel__serial,
+.vector-panel:not(.vector-panel--live) .telemetry-chip {
     opacity: 0.72;
+}
+
+.trend-chart {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border-radius: 18px;
+    border: 1px solid rgba(141, 224, 255, 0.16);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02)),
+        rgba(11, 20, 26, 0.92);
+}
+
+.trend-chart__svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.trend-chart__grid-line {
+    stroke: rgba(216, 245, 255, 0.08);
+    stroke-width: 1;
+}
+
+.trend-chart__zero {
+    stroke: rgba(216, 245, 255, 0.16);
+    stroke-width: 1.5;
+    stroke-dasharray: 10 10;
+}
+
+.trend-chart__line {
+    fill: none;
+    stroke: var(--trend-color);
+    stroke-width: 5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.trend-chart__swatch {
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 999px;
+    background: var(--swatch);
+}
+
+.trend-chart__empty {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: rgba(216, 245, 255, 0.68);
+    font-size: 0.9rem;
 }
 
 .control-panel {
