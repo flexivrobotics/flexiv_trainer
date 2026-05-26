@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.136,<1.0",
+  "rich>=13.9,<14.0",
   "uvicorn>=0.48,<1.0",
   "pydantic-settings>=2.14,<3.0",
   "typer>=0.25,<1.0",
@@ -18,6 +19,12 @@ dependencies = [
   "flexivddk==1.4.0",
   "lerobot==0.5.1",
   "pyrealsense2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9.0",
+  "ruff>=0.12,<0.13",
 ]
 
 [project.scripts]
@@ -34,3 +41,10 @@ packages = ["backend/src/flexiv_trainer"]
 include = [
   "backend/src/flexiv_trainer/web/**/*",
 ]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

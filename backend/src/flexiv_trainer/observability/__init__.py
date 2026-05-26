@@ -1,4 +1,4 @@
-from flexiv_trainer.observability import (
+from flexiv_trainer.observability.console import (
     Pulse,
     banner,
     error,

@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from flexiv_trainer.api.routes import datasets, system, teleop, training
 from flexiv_trainer.config import get_settings
-from flexiv_trainer.terminal import banner, error, info, warn
+from flexiv_trainer.observability import banner, error, info, ok, section, warn
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 
@@ -69,7 +69,15 @@ def run() -> None:
         f"Listen  {settings.host}:{settings.port}",
         f"Data    {settings.storage.root}",
     )
+    section(
+        "Runtime",
+        "Python-first operator UI, typed services, and live console observability",
+    )
     info("Backend startup", f"robot_type={settings.robot_type}")
+    ok(
+        "Console observability ready",
+        "live request traces and styled training stream enabled",
+    )
     if not settings.teleop_robot_pairs:
         warn(
             "Teleoperation is not configured",

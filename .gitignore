@@ -6,12 +6,12 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.hypothesis/
 .venv/
 .env
+*.egg-info/
 
 .local/
 data/
 outputs/
-
-frontend/node_modules/
-frontend/dist/

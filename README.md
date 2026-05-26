@@ -21,6 +21,7 @@ serves the web UI directly.
 - LeRobot episode writer for local single-episode datasets.
 - Dataset combination and training job orchestration scaffolds.
 - Command-line entrypoints for teleoperation, recording, combining, and training.
+- Styled backend terminal observability with request traces, training pulse output, and streamed subprocess logs.
 
 ## Prerequisites
 
@@ -31,6 +32,7 @@ The runtime expects a Python environment with:
 - `lerobot==0.5.1`
 - `pyrealsense2`
 - `fastapi`, `uvicorn`, `pydantic-settings`, `typer`
+- `rich`
 
 These can be installed into a dedicated virtual environment or into an existing
 vendor-provided Flexiv environment.
@@ -38,6 +40,7 @@ vendor-provided Flexiv environment.
 ## Repository Layout
 
 - `backend/src/flexiv_trainer/`: backend package and API/CLI logic
+- `backend/src/flexiv_trainer/observability/`: console UX and long-running task telemetry
 - `backend/src/flexiv_trainer/web/`: packaged web UI served by the backend
 - `.local/episodes/`: saved single-episode LeRobot datasets
 - `.local/combined/`: combined datasets
@@ -55,6 +58,12 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+Optional maintainer tooling:
+
+```bash
+pip install -e ".[dev]"
+```
+
 If your Flexiv SDK packages are already installed in a different environment,
 activate that environment first and then run:
 
@@ -67,6 +76,12 @@ pip install -e .
 ```bash
 source .venv/bin/activate
 flexiv-trainer-server
+```
+
+Equivalent module entrypoint:
+
+```bash
+python -m flexiv_trainer
 ```
 
 After startup, the backend prints a single clickable URL. Open that URL in a
@@ -106,6 +121,6 @@ train_policy --help
 
 ## Maintainer Notes
 
-The repository also contains a separate `frontend/` workspace used for UI source
-maintenance and future packaging work. End users do not need Node.js or npm to
-run Flexiv Trainer in its packaged backend-served form.
+The packaged web UI source lives directly under `backend/src/flexiv_trainer/web/`,
+and backend observability lives under `backend/src/flexiv_trainer/observability/`.
+The repository is centered on the Python runtime path used in production.

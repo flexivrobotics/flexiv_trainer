@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from flexiv_trainer.observability import error, info, ok, warn
 from flexiv_trainer.runtime.manager import RuntimeManager, get_runtime_manager
-from flexiv_trainer.terminal import error, info, ok, warn
 
 router = APIRouter(prefix="/teleop", tags=["teleop"])
 
