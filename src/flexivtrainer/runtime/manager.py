@@ -6,12 +6,43 @@ from typing import Any
 
 from flexivtrainer.cameras.realsense import RealSenseService
 from flexivtrainer.config import AppSettings, get_settings
-from flexivtrainer.data.recording_service import RecordingService
 from flexivtrainer.ddk.service import DDKService
-from flexivtrainer.jobs.combine import combine_episode_datasets
 from flexivtrainer.jobs.train import TrainingService
 from flexivtrainer.teleop.service import TeleopService
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+
+def _optional_dependency_error(feature: str, exc: ImportError) -> str:
+    detail = str(exc).strip()
+    if detail:
+        return f"{feature} is unavailable: {detail}"
+    return f"{feature} is unavailable in the selected environment"
+
+
+class _UnavailableRecordingService:
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "active": False,
+            "awaiting_save": False,
+            "frames_captured": 0,
+            "episode_name": None,
+            "fps": None,
+            "error": self._reason,
+        }
+
+    def start(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
+    def stop(self) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
+    def save(self) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
+    def discard(self) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
 
 
 class RuntimeManager:
@@ -20,7 +51,14 @@ class RuntimeManager:
         self.teleop = TeleopService(settings)
         self.ddk = DDKService(settings)
         self.cameras = RealSenseService(settings)
-        self.recording = RecordingService(settings, self.ddk, self.cameras)
+        try:
+            from flexivtrainer.data.recording_service import RecordingService
+        except ImportError as exc:
+            self.recording = _UnavailableRecordingService(
+                _optional_dependency_error("Episode recording", exc)
+            )
+        else:
+            self.recording = RecordingService(settings, self.ddk, self.cameras)
         self.training = TrainingService(settings)
 
     def system_summary(self) -> dict[str, Any]:
@@ -132,12 +170,26 @@ class RuntimeManager:
     def combine_episodes(
         self, episode_paths: list[str], output_name: str
     ) -> dict[str, Any]:
+        try:
+            from flexivtrainer.jobs.combine import combine_episode_datasets
+        except ImportError as exc:
+            raise RuntimeError(
+                _optional_dependency_error("Dataset combination", exc)
+            ) from exc
+
         roots = [Path(path).resolve() for path in episode_paths]
         return combine_episode_datasets(
             roots, self.settings.storage.combined_root, output_name
         )
 
     def preview_dataset(self, dataset_path: Path) -> dict[str, Any]:
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError as exc:
+            raise RuntimeError(
+                _optional_dependency_error("Dataset preview", exc)
+            ) from exc
+
         dataset_path = dataset_path.resolve()
         manifest_path = dataset_path / "episode.json"
         if not manifest_path.exists():

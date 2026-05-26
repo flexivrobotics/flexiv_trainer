@@ -14,16 +14,43 @@ class StartRecordingRequest(BaseModel):
     fps: int | None = Field(default=None, ge=1, le=120)
 
 
+def _bootstrap_issue_detail(result: dict) -> str | None:
+    issues: list[str] = []
+
+    for stage in result.get("stages", []):
+        stage_name = stage.get("stage", "unknown")
+        detail = stage.get("detail") or {}
+        if stage_name == "teleop":
+            if detail.get("error"):
+                issues.append(f"teleop={detail['error']}")
+            if detail.get("fault"):
+                issues.append(f"fault={detail['fault']}")
+            continue
+
+        for key, value in (detail.get("errors") or {}).items():
+            issues.append(f"{stage_name}.{key}={value}")
+
+    recording = result.get("recording") or {}
+    if recording.get("error"):
+        issues.append(f"recording={recording['error']}")
+
+    return " | ".join(issues[:8]) or None
+
+
 @router.post("/bootstrap")
 def bootstrap(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     result = runtime.bootstrap_teleop_module()
     if result.get("ready"):
         ok("Teleoperation module bootstrapped")
     else:
+        issue_detail = _bootstrap_issue_detail(result)
         stage_names = ", ".join(
             stage.get("stage", "unknown") for stage in result.get("stages", [])
         )
-        warn("Teleoperation bootstrap completed with issues", stage_names)
+        warn(
+            "Teleoperation bootstrap completed with issues",
+            issue_detail or stage_names,
+        )
     return result
 
 

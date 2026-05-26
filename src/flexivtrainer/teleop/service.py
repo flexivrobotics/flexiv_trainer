@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from flexivtrainer.config import AppSettings
+from flexivtrainer.observability import describe_exception
 
 try:
     from flexivtdk import TransparentCartesianTeleopLAN
@@ -54,7 +55,7 @@ class TeleopService:
                 self._initialized = True
                 self._error = None
             except Exception as exc:  # pragma: no cover - hardware specific
-                self._error = str(exc)
+                self._error = describe_exception(exc)
                 self._controller = None
         return self.snapshot()
 
@@ -66,7 +67,7 @@ class TeleopService:
             self._controller.Start()
             self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
-            self._error = str(exc)
+            self._error = describe_exception(exc)
         return self.snapshot()
 
     def stop(self) -> TeleopSnapshot:
@@ -76,7 +77,7 @@ class TeleopService:
             self._controller.Stop()
             self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
-            self._error = str(exc)
+            self._error = describe_exception(exc)
         return self.snapshot()
 
     def reset_home(self) -> dict[str, Any]:
@@ -95,11 +96,11 @@ class TeleopService:
                         )
                     except Exception as exc:  # pragma: no cover - hardware specific
                         warnings.append(
-                            f"Leader home posture failed for pair {index}: {exc}"
+                            f"Leader home posture failed for pair {index}: {describe_exception(exc)}"
                         )
                 except Exception as exc:  # pragma: no cover - hardware specific
                     warnings.append(
-                        f"Leader home posture failed for pair {index}: {exc}"
+                        f"Leader home posture failed for pair {index}: {describe_exception(exc)}"
                     )
 
             if pair.follower_home_posture:
@@ -114,11 +115,11 @@ class TeleopService:
                         )
                     except Exception as exc:  # pragma: no cover - hardware specific
                         warnings.append(
-                            f"Follower home posture failed for pair {index}: {exc}"
+                            f"Follower home posture failed for pair {index}: {describe_exception(exc)}"
                         )
                 except Exception as exc:  # pragma: no cover - hardware specific
                     warnings.append(
-                        f"Follower home posture failed for pair {index}: {exc}"
+                        f"Follower home posture failed for pair {index}: {describe_exception(exc)}"
                     )
 
         return {"ok": not warnings, "warnings": warnings}

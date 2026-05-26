@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from flexivtrainer.config import AppSettings
+from flexivtrainer.observability import describe_exception
 
 try:
     from flexivddk import Client
@@ -58,7 +59,7 @@ class DDKService:
                 )
                 self._errors.pop(serial, None)
             except Exception as exc:  # pragma: no cover - hardware specific
-                self._errors[serial] = str(exc)
+                self._errors[serial] = describe_exception(exc)
 
         return self.status()
 
@@ -101,10 +102,10 @@ class DDKService:
                 }
                 self._errors.pop(serial, None)
             except Exception as exc:  # pragma: no cover - hardware specific
-                self._errors[serial] = str(exc)
+                self._errors[serial] = describe_exception(exc)
                 robots[serial] = {
                     "connected": False,
-                    "error": str(exc),
+                    "error": describe_exception(exc),
                 }
 
         return {

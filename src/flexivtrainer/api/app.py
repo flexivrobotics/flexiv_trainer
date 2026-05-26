@@ -10,7 +10,16 @@ from fastapi.staticfiles import StaticFiles
 
 from flexivtrainer.api.routes import datasets, system, teleop, training
 from flexivtrainer.config import get_settings
-from flexivtrainer.observability import banner, error, info, ok, section, warn
+from flexivtrainer.observability import (
+    banner,
+    describe_exception,
+    error,
+    info,
+    install_dependency_log_bridge,
+    ok,
+    section,
+    warn,
+)
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 
@@ -26,7 +35,7 @@ def create_app() -> FastAPI:
         except Exception as exc:
             error(
                 f"Unhandled request failure for {request.method} {request.url.path}",
-                str(exc),
+                describe_exception(exc),
             )
             raise
 
@@ -60,6 +69,7 @@ app = create_app()
 
 
 def run() -> None:
+    install_dependency_log_bridge()
     settings = get_settings()
     banner(
         "Flexiv Trainer Backend",

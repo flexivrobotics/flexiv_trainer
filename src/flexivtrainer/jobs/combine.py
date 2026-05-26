@@ -4,18 +4,18 @@ import json
 from pathlib import Path
 from typing import Any
 
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from flexivtrainer.data.lerobot_io import EpisodeManifest
+def _load_manifest(root: Path) -> Any:
+    from flexivtrainer.data.lerobot_io import EpisodeManifest
 
-
-def _load_manifest(root: Path) -> EpisodeManifest:
     return EpisodeManifest.from_path(root)
 
 
 def combine_episode_datasets(
     episode_roots: list[Path], output_root: Path, output_name: str
 ) -> dict[str, Any]:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
     if not episode_roots:
         raise ValueError("At least one episode dataset is required")
 

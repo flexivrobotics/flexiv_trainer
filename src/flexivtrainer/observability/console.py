@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import sys
@@ -41,6 +42,8 @@ RICH_LEVEL_STYLES = {
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 OUTPUT_LOCK = threading.RLock()
+DEPENDENCY_LOG_BRIDGE_LOCK = threading.RLock()
+DEPENDENCY_LOG_HANDLER: logging.Handler | None = None
 
 DetailFactory = Callable[[], str | None]
 
@@ -98,6 +101,56 @@ def format_elapsed(seconds: float) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{remaining:02d}"
     return f"{minutes:02d}:{remaining:02d}"
+
+
+def describe_exception(exc: BaseException) -> str:
+    message = str(exc).strip()
+    exception_name = type(exc).__name__
+    if not message:
+        return exception_name
+    return f"{exception_name}: {message}"
+
+
+def _record_detail(record: logging.LogRecord) -> str:
+    parts = [f"logger={record.name}"]
+    if record.pathname:
+        parts.append(f"source={os.path.basename(record.pathname)}:{record.lineno}")
+    if record.exc_info and record.exc_info[1] is not None:
+        parts.append(f"cause={describe_exception(record.exc_info[1])}")
+    return " ".join(parts)
+
+
+class _DependencyLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage().strip()
+            if not message:
+                return
+
+            if record.levelno >= logging.ERROR:
+                level = "ERROR"
+            elif record.levelno >= logging.WARNING:
+                level = "WARN"
+            else:
+                level = "INFO"
+
+            emit(level, message, _record_detail(record))
+        except Exception:
+            self.handleError(record)
+
+
+def install_dependency_log_bridge(level: int = logging.WARNING) -> None:
+    global DEPENDENCY_LOG_HANDLER
+
+    with DEPENDENCY_LOG_BRIDGE_LOCK:
+        if DEPENDENCY_LOG_HANDLER is not None:
+            return
+
+        handler = _DependencyLogHandler()
+        handler.setLevel(level)
+        logging.getLogger().addHandler(handler)
+        logging.captureWarnings(True)
+        DEPENDENCY_LOG_HANDLER = handler
 
 
 def emit(

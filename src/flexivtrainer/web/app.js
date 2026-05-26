@@ -46,10 +46,8 @@ async function api(path, init) {
 function showToast(message, isError = false) {
     const toast = byId("toast");
     toast.textContent = message;
-    toast.classList.remove("hidden", "toast--error");
-    if (isError) {
-        toast.classList.add("toast--error");
-    }
+    toast.classList.remove("hidden", "toast--error", "toast--success");
+    toast.classList.add(isError ? "toast--error" : "toast--success");
     window.clearTimeout(showToast._timer);
     showToast._timer = window.setTimeout(() => toast.classList.add("hidden"), 4000);
 }
@@ -62,6 +60,13 @@ function formatValue(value) {
         return "Not available";
     }
     return String(value);
+}
+
+function createStatusCard(label, value, tone = "neutral") {
+    const card = document.createElement("div");
+    card.className = `status-card status-card--${tone}`;
+    card.innerHTML = `<span class="eyebrow">${label}</span><h3>${formatValue(value)}</h3>`;
+    return card;
 }
 
 function setActiveView(view) {
@@ -114,16 +119,13 @@ function renderHome() {
     const status = byId("home-status");
     status.innerHTML = "";
     [
-        ["Teleop Config", state.summary.teleop.configured ? "Configured" : "Missing"],
-        ["DDK", state.summary.ddk.available ? "Available" : "Missing"],
-        ["Cameras", `${state.summary.cameras.devices.length} discovered`],
-        ["Calibration", state.summary.calibration.available_files.length ? "Present" : "Missing"],
-        ["Docs", `${state.summary.backend.ui_url}docs`],
-    ].forEach(([label, value]) => {
-        const card = document.createElement("div");
-        card.className = "status-card";
-        card.innerHTML = `<span class="eyebrow">${label}</span><h3>${formatValue(value)}</h3>`;
-        status.appendChild(card);
+        ["Teleop Config", state.summary.teleop.configured ? "Configured" : "Missing", state.summary.teleop.configured ? "ok" : "error"],
+        ["DDK", state.summary.ddk.available ? "Available" : "Missing", state.summary.ddk.available ? "ok" : "error"],
+        ["Cameras", `${state.summary.cameras.devices.length} discovered`, state.summary.cameras.devices.length ? "ok" : "error"],
+        ["Calibration", state.summary.calibration.available_files.length ? "Present" : "Missing", state.summary.calibration.available_files.length ? "ok" : "error"],
+        ["Docs", `${state.summary.backend.ui_url}docs`, "ok"],
+    ].forEach(([label, value, tone]) => {
+        status.appendChild(createStatusCard(label, value, tone));
     });
 }
 
@@ -139,16 +141,25 @@ function renderTeleop() {
 
     const grid = byId("teleop-status-grid");
     grid.innerHTML = "";
+    const ddkRobotCount = Object.keys(state.teleopStatus.ddk.robots || {}).length;
+    const ddkHasIssues = Object.keys(state.teleopStatus.ddk.errors || {}).length > 0;
+    const runningCameraCount = Object.values(cameras).filter((entry) => entry.started).length;
+    const cameraHasIssues = Object.keys(state.teleopStatus.cameras.errors || {}).length > 0;
     [
-        ["Teleoperation", state.teleopStatus.teleop.started ? "Running" : state.teleopStatus.teleop.initialized ? "Ready" : "Not ready"],
-        ["Recording", state.teleopStatus.recording.active ? `Recording (${state.teleopStatus.recording.frames_captured} frames)` : state.teleopStatus.recording.awaiting_save ? "Awaiting save or discard" : "Idle"],
-        ["DDK Robots", Object.keys(state.teleopStatus.ddk.robots || {}).length],
-        ["Camera Streams", Object.values(cameras).filter((entry) => entry.started).length],
-    ].forEach(([label, value]) => {
-        const card = document.createElement("div");
-        card.className = "status-card";
-        card.innerHTML = `<span class="eyebrow">${label}</span><h3>${formatValue(value)}</h3>`;
-        grid.appendChild(card);
+        [
+            "Teleoperation",
+            state.teleopStatus.teleop.started ? "Running" : state.teleopStatus.teleop.initialized ? "Ready" : "Not ready",
+            state.teleopStatus.teleop.started || state.teleopStatus.teleop.initialized ? "ok" : "error",
+        ],
+        [
+            "Recording",
+            state.teleopStatus.recording.active ? `Recording (${state.teleopStatus.recording.frames_captured} frames)` : state.teleopStatus.recording.awaiting_save ? "Awaiting save or discard" : "Idle",
+            state.teleopStatus.recording.active || state.teleopStatus.recording.awaiting_save ? "ok" : "neutral",
+        ],
+        ["DDK Robots", ddkRobotCount, ddkRobotCount ? "ok" : ddkHasIssues ? "error" : "neutral"],
+        ["Camera Streams", runningCameraCount, runningCameraCount ? "ok" : cameraHasIssues ? "error" : "neutral"],
+    ].forEach(([label, value, tone]) => {
+        grid.appendChild(createStatusCard(label, value, tone));
     });
 
     byId("record-save").classList.toggle("hidden", !state.teleopStatus.recording.awaiting_save);
@@ -163,8 +174,11 @@ function renderTeleop() {
     const message = byId("teleop-message");
     if (issues.length) {
         message.textContent = issues.join(" | ");
+        message.classList.remove("panel--ok");
+        message.classList.add("panel--issue");
         message.classList.remove("hidden");
     } else {
+        message.classList.remove("panel--issue", "panel--ok");
         message.classList.add("hidden");
     }
 }

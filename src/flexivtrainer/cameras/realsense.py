@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from flexivtrainer.config import AppSettings, CameraConfig
+from flexivtrainer.observability import describe_exception
 
 try:
     import pyrealsense2 as rs
@@ -93,7 +94,7 @@ class RealSenseService:
                 runtime.actual_serial = serial
                 self._errors.pop(runtime.config.name, None)
             except Exception as exc:  # pragma: no cover - hardware specific
-                self._errors[runtime.config.name] = str(exc)
+                self._errors[runtime.config.name] = describe_exception(exc)
 
         return self.status()
 
@@ -103,7 +104,7 @@ class RealSenseService:
                 try:
                     runtime.pipeline.stop()
                 except Exception as exc:  # pragma: no cover - hardware specific
-                    self._errors[runtime.config.name] = str(exc)
+                    self._errors[runtime.config.name] = describe_exception(exc)
             runtime.pipeline = None
             runtime.started = False
         return self.status()
@@ -164,7 +165,7 @@ class RealSenseService:
                     "height": image.shape[0],
                 }
             except Exception as exc:  # pragma: no cover - hardware specific
-                self._errors[name] = str(exc)
+                self._errors[name] = describe_exception(exc)
 
         self._last_frames.update(frames)
         return frames
