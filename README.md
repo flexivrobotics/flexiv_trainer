@@ -1,7 +1,6 @@
 # Flexiv Trainer
 
-Flexiv Trainer is a local-first platform for dual-arm Flexiv teleoperation,
-episode recording, dataset combination, and LeRobot policy training.
+Flexiv Trainer is a local-first platform for dual-arm Flexiv teleoperation, episode recording, dataset combination, and LeRobot policy training.
 
 ## What End Users Need To Do
 
@@ -9,8 +8,7 @@ episode recording, dataset combination, and LeRobot policy training.
 2. Start the backend with `flexiv-trainer-server`.
 3. Open the single URL printed by the backend.
 
-You do not need to start a separate frontend development server. The backend
-serves the web UI directly.
+You do not need to start a separate frontend development server. The backend serves the web UI directly.
 
 ## Current Product Scope
 
@@ -34,8 +32,7 @@ The runtime expects a Python environment with:
 - `fastapi`, `uvicorn`, `pydantic-settings`, `typer`
 - `rich`
 
-These can be installed into a dedicated virtual environment or into an existing
-vendor-provided Flexiv environment.
+These can be installed into a dedicated virtual environment or into an existing vendor-provided Flexiv environment.
 
 ## Repository Layout
 
@@ -49,8 +46,7 @@ vendor-provided Flexiv environment.
 
 ## Setup
 
-Create and activate a virtual environment, then install the package in editable
-mode:
+Create and activate a virtual environment, then install the package in editable mode:
 
 ```bash
 python -m venv .venv
@@ -64,8 +60,7 @@ Optional maintainer tooling:
 pip install -e ".[dev]"
 ```
 
-If your Flexiv SDK packages are already installed in a different environment,
-activate that environment first and then run:
+If your Flexiv SDK packages are already installed in a different environment, activate that environment first and then run:
 
 ```bash
 pip install -e .
@@ -91,8 +86,7 @@ Equivalent module entrypoint:
 python -m flexivtrainer
 ```
 
-After startup, the backend prints a single clickable URL. Open that URL in a
-browser to use the UI.
+After startup, the backend prints a single clickable URL. Open that URL in a browser to use the UI.
 
 By default this is:
 
@@ -100,8 +94,7 @@ By default this is:
 http://127.0.0.1:8000/
 ```
 
-If you want to open the UI from another device on the same LAN, set a public
-base URL before startup:
+If you want to open the UI from another device on the same LAN, set a public base URL before startup:
 
 ```bash
 export FLEXIV_TRAINER_PUBLIC_BASE_URL=http://<backend-host-ip>:8000
@@ -116,8 +109,7 @@ http://127.0.0.1:8000/docs
 
 ## Optional CLI Tools
 
-In addition to the browser UI, the following command-line entrypoints are
-available:
+In addition to the browser UI, the following command-line entrypoints are available:
 
 ```bash
 teleop --help
@@ -128,6 +120,4 @@ train_policy --help
 
 ## Maintainer Notes
 
-The packaged web UI source lives directly under `src/flexivtrainer/web/`, and
-backend observability lives under `src/flexivtrainer/observability/`. The
-repository is centered on the Python runtime path used in production.
+The packaged web UI source lives directly under `src/flexivtrainer/web/`, and backend observability lives under `src/flexivtrainer/observability/`. The repository is centered on the Python runtime path used in production.
