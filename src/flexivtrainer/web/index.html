@@ -128,8 +128,8 @@
                             <div class="component-wrapper" id="teleop-cameras-wrap">
                                 <div class="feed feed--hero">
                                     <div class="feed__header">
-                                        <span>Ego Camera</span>
-                                        <strong id="ego-fps">-- FPS</strong>
+                                        <span class="feed__title">Egocentric</span>
+                                        <strong class="feed__fps" id="ego-fps">0.0 FPS</strong>
                                     </div>
                                     <div class="feed__placeholder">Egocentric camera view placeholder</div>
                                 </div>
@@ -138,26 +138,32 @@
                                     <div class="wrist-column">
                                         <div class="feed">
                                             <div class="feed__header">
-                                                <span>Left Wrist</span>
-                                                <strong id="left-wrist-fps">-- FPS</strong>
+                                                <span class="feed__title">Left Wrist</span>
+                                                <strong class="feed__fps" id="left-wrist-fps">0.0 FPS</strong>
                                             </div>
                                             <div class="feed__placeholder">Left robot camera placeholder</div>
                                         </div>
-                                        <section class="telemetry-card telemetry-card--vector" id="left-force-panel"></section>
-                                        <section class="telemetry-card telemetry-card--chart" id="left-force-graph-panel"></section>
-                                        <section class="telemetry-card telemetry-card--chart" id="left-moment-graph-panel"></section>
+                                        <section class="telemetry-card telemetry-card--vector" id="left-force-panel">
+                                        </section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="left-force-graph-panel"></section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="left-moment-graph-panel"></section>
                                     </div>
                                     <div class="wrist-column">
                                         <div class="feed">
                                             <div class="feed__header">
-                                                <span>Right Wrist</span>
-                                                <strong id="right-wrist-fps">-- FPS</strong>
+                                                <span class="feed__title">Right Wrist</span>
+                                                <strong class="feed__fps" id="right-wrist-fps">0.0 FPS</strong>
                                             </div>
                                             <div class="feed__placeholder">Right robot camera placeholder</div>
                                         </div>
-                                        <section class="telemetry-card telemetry-card--vector" id="right-force-panel"></section>
-                                        <section class="telemetry-card telemetry-card--chart" id="right-force-graph-panel"></section>
-                                        <section class="telemetry-card telemetry-card--chart" id="right-moment-graph-panel"></section>
+                                        <section class="telemetry-card telemetry-card--vector" id="right-force-panel">
+                                        </section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="right-force-graph-panel"></section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="right-moment-graph-panel"></section>
                                     </div>
                                 </div>
                             </div>

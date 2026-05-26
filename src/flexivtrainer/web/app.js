@@ -40,13 +40,13 @@ const TELEMETRY_SERIES = {
     force: {
         title: "Cartesian Force",
         units: "N",
-        labels: ["f_x", "f_y", "f_z"],
+        labels: ["f<sub>x</sub>", "f<sub>y</sub>", "f<sub>z</sub>"],
         colors: ["#8de0ff", "#86e4a8", "#ffbf7a"],
     },
     moment: {
         title: "Cartesian Moment",
         units: "Nm",
-        labels: ["m_x", "m_y", "m_z"],
+        labels: ["m<sub>x</sub>", "m<sub>y</sub>", "m<sub>z</sub>"],
         colors: ["#8de0ff", "#86e4a8", "#ffbf7a"],
     },
 };
@@ -523,6 +523,25 @@ function formatComponentChips(vector, kind) {
     `).join("");
 }
 
+function renderCameraFps(elementId, camera) {
+    const element = byId(elementId);
+    if (!element) {
+        return;
+    }
+
+    const fps = Number(camera?.fps || 0);
+    const state = !camera?.started || fps <= 0
+        ? "offline"
+        : fps < 29
+            ? "warning"
+            : "ok";
+    element.className = `feed__fps feed__fps--${state}`;
+    element.innerHTML = `
+        <span class="feed__fps-dot" aria-hidden="true"></span>
+        <span>${fps.toFixed(1)} FPS</span>
+    `;
+}
+
 function renderForcePanel(side, robotEntry, telemetry) {
     const panel = byId(`${side}-force-panel`);
     if (!panel) {
@@ -530,14 +549,16 @@ function renderForcePanel(side, robotEntry, telemetry) {
     }
 
     const geometry = buildVectorGeometry(side, telemetry.force);
-    const sideLabel = side.toUpperCase();
+    const title = `${side.toUpperCase()} FORCE VECTOR`;
+    const valueClass = geometry.magnitude === null
+        ? "telemetry-card__value telemetry-card__value--pending"
+        : "telemetry-card__value";
     panel.innerHTML = `
         <div class="telemetry-card__header">
             <div>
-                <span class="eyebrow">${sideLabel} Robot</span>
-                <h3>Cartesian Force Vector</h3>
+                <span class="eyebrow">${title}</span>
             </div>
-            <strong class="telemetry-card__value">${geometry.magnitude === null ? "Awaiting data" : `${geometry.magnitude.toFixed(1)} N`}</strong>
+            <strong class="${valueClass}">${geometry.magnitude === null ? "Awaiting data" : `${geometry.magnitude.toFixed(1)} N`}</strong>
         </div>
         <div class="vector-panel ${geometry.magnitude !== null ? "vector-panel--live" : ""}">
             <svg class="vector-panel__svg" viewBox="0 0 240 160" aria-hidden="true">
@@ -545,7 +566,6 @@ function renderForcePanel(side, robotEntry, telemetry) {
                 <polygon class="vector-panel__head" points="${geometry.points}"></polygon>
             </svg>
             <div class="vector-panel__meta">
-                <span class="vector-panel__serial">${robotEntry?.serial || `${sideLabel} robot stream waiting`}</span>
                 <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
             </div>
         </div>
@@ -651,7 +671,7 @@ function renderTrendGraph(side, kind, history, currentVector) {
     }
 
     const meta = TELEMETRY_SERIES[kind];
-    const sideLabel = side.toUpperCase();
+    const title = `${side.toUpperCase()} ${kind === "force" ? "CARTESIAN FORCE" : "CARTESIAN MOMENT"}`;
     const scale = computeTelemetryScale(history, kind);
     const paths = meta.colors.map((color, index) => {
         const d = buildTrendPath(history, kind, index, scale);
@@ -660,21 +680,23 @@ function renderTrendGraph(side, kind, history, currentVector) {
     const statusText = scale.hasData
         ? `Auto scale ${scale.min.toFixed(1)} to ${scale.max.toFixed(1)} ${meta.units}`
         : "Awaiting data";
+    const valueClass = scale.hasData
+        ? "telemetry-card__value"
+        : "telemetry-card__value telemetry-card__value--pending";
 
     panel.innerHTML = `
         <div class="telemetry-card__header">
             <div>
-                <span class="eyebrow">${sideLabel} Robot</span>
-                <h3>${meta.title}</h3>
+                <span class="eyebrow">${title}</span>
             </div>
-            <strong class="telemetry-card__value">${statusText}</strong>
+            <strong class="${valueClass}">${statusText}</strong>
         </div>
         <div class="trend-chart">
             <svg class="trend-chart__svg" viewBox="0 0 960 540" aria-hidden="true">
                 ${buildTrendGrid(scale)}
                 ${paths}
             </svg>
-            ${scale.hasData ? "" : `<div class="trend-chart__empty">Awaiting ${kind} telemetry</div>`}
+            ${scale.hasData ? "" : `<div class="trend-chart__empty">Awaiting data</div>`}
         </div>
         <div class="trend-chart__legend">
             ${meta.labels.map((label, index) => `
@@ -716,9 +738,9 @@ function renderTeleop() {
     };
 
     const cameras = teleopStatus.cameras?.cameras || {};
-    byId("ego-fps").textContent = `${Number(cameras.ego?.fps || 0).toFixed(1)} FPS`;
-    byId("left-wrist-fps").textContent = `${Number(cameras.left_wrist?.fps || 0).toFixed(1)} FPS`;
-    byId("right-wrist-fps").textContent = `${Number(cameras.right_wrist?.fps || 0).toFixed(1)} FPS`;
+    renderCameraFps("ego-fps", cameras.ego);
+    renderCameraFps("left-wrist-fps", cameras.left_wrist);
+    renderCameraFps("right-wrist-fps", cameras.right_wrist);
 
     const leftRobotEntry = getRobotTelemetryForSide("left", teleopStatus);
     const rightRobotEntry = getRobotTelemetryForSide("right", teleopStatus);

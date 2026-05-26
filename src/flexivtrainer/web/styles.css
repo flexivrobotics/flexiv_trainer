@@ -16,6 +16,7 @@
     --error-soft: rgba(249, 220, 220, 0.9);
     --error-line: rgba(183, 101, 101, 0.28);
     --shadow: 0 24px 60px rgba(86, 109, 128, 0.16);
+    --teleop-surface: rgba(22, 35, 44, 0.98);
 }
 
 * {
@@ -365,13 +366,48 @@ button:disabled {
     display: flex;
     flex-direction: column;
     border-radius: 22px;
-    background: rgba(30, 45, 54, 0.96);
+    background: var(--teleop-surface);
     color: #fbf7f0;
     padding: 1rem;
 }
 
 .feed--hero {
     min-height: 0;
+}
+
+.feed__title {
+    color: var(--accent-strong);
+    font-size: 0.82rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.feed__fps {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: #fbf7f0;
+    font-size: 0.88rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.feed__fps-dot {
+    width: 0.62rem;
+    height: 0.62rem;
+    border-radius: 999px;
+    background: #d85f5f;
+    box-shadow: 0 0 0 3px rgba(216, 95, 95, 0.18);
+}
+
+.feed__fps--warning .feed__fps-dot {
+    background: #e4be62;
+    box-shadow: 0 0 0 3px rgba(228, 190, 98, 0.18);
+}
+
+.feed__fps--ok .feed__fps-dot {
+    background: #5fd58a;
+    box-shadow: 0 0 0 3px rgba(95, 213, 138, 0.18);
 }
 
 .feed__placeholder,
@@ -388,7 +424,7 @@ button:disabled {
 .telemetry-card {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 22px;
-    background: rgba(22, 35, 44, 0.98);
+    background: var(--teleop-surface);
     color: #fbf7f0;
     padding: 1rem;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
@@ -411,6 +447,10 @@ button:disabled {
     font-size: 0.88rem;
     text-align: right;
     white-space: nowrap;
+}
+
+.telemetry-card__value--pending {
+    color: #fbf7f0;
 }
 
 .vector-panel {
@@ -441,13 +481,6 @@ button:disabled {
     gap: 0.7rem;
 }
 
-.vector-panel__serial {
-    color: rgba(216, 245, 255, 0.72);
-    font-size: 0.78rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-}
-
 .telemetry-chip-row,
 .trend-chart__legend {
     display: flex;
@@ -473,9 +506,15 @@ button:disabled {
     color: #d8f5ff;
 }
 
+.telemetry-chip sub,
+.trend-chart__legend-item sub {
+    font-size: 0.68em;
+    vertical-align: sub;
+    line-height: 0;
+}
+
 .vector-panel:not(.vector-panel--live) .vector-panel__shaft,
 .vector-panel:not(.vector-panel--live) .vector-panel__head,
-.vector-panel:not(.vector-panel--live) .vector-panel__serial,
 .vector-panel:not(.vector-panel--live) .telemetry-chip {
     opacity: 0.72;
 }
@@ -528,7 +567,7 @@ button:disabled {
     inset: 0;
     display: grid;
     place-items: center;
-    color: rgba(216, 245, 255, 0.68);
+    color: #fbf7f0;
     font-size: 0.9rem;
 }
 
