@@ -361,6 +361,33 @@ class TrainingService:
             section("Training Failed", f"job_id={job.job_id}", style="red")
             error("Training log collection failed", job.error)
 
+    def shutdown(self) -> None:
+        with self._lock:
+            job = self._job
+
+        if job is None:
+            return
+
+        if job.process is not None and job.process.poll() is None:
+            info("Stopping training process", f"job_id={job.job_id}")
+            job.status = "stopped"
+            job.error = "Server shutdown"
+            job.process.terminate()
+            try:
+                job.process.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                job.process.kill()
+                job.process.wait(timeout=1.0)
+            job.return_code = job.process.returncode
+
+        if job.pulse is not None:
+            job.pulse.stop(
+                level="WARN",
+                message="Training job stopped",
+                detail=f"job_id={job.job_id} reason=server shutdown",
+            )
+            job.pulse = None
+
     def status(self) -> dict[str, Any]:
         if self._job is None:
             return {"status": "idle", "logs": [], "progress": 0}

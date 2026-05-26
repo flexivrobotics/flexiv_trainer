@@ -55,6 +55,10 @@ class StorageConfig(BaseModel):
     def cache_root(self) -> Path:
         return self.root / self.cache_dirname
 
+    @property
+    def runtime_config_path(self) -> Path:
+        return self.root / "robot_serials.json"
+
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.episodes_root.mkdir(parents=True, exist_ok=True)
@@ -69,6 +73,34 @@ class TrainingConfig(BaseModel):
     default_policy: str = "diffusion"
     default_device: str = "cuda"
     save_frequency: int = 5_000
+
+
+class RobotSerialConfig(BaseModel):
+    local_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
+    remote_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
+
+    @staticmethod
+    def _normalize_serials(values: list[str]) -> list[str]:
+        serials = [str(value).strip() for value in values[:2]]
+        serials.extend([""] * (2 - len(serials)))
+        return serials
+
+    def normalized(self) -> RobotSerialConfig:
+        return RobotSerialConfig(
+            local_robot_serials=self._normalize_serials(self.local_robot_serials),
+            remote_robot_serials=self._normalize_serials(self.remote_robot_serials),
+        )
+
+    @classmethod
+    def from_settings(cls, settings: AppSettings) -> RobotSerialConfig:
+        return cls(
+            local_robot_serials=[
+                pair.leader_serial for pair in settings.teleop_robot_pairs[:2]
+            ],
+            remote_robot_serials=[
+                pair.follower_serial for pair in settings.teleop_robot_pairs[:2]
+            ],
+        ).normalized()
 
 
 class AppSettings(BaseSettings):

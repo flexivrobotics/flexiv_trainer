@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Callable
 from typing import Any
 
 from flexivtrainer.config import AppSettings
@@ -32,8 +33,15 @@ def _serialize_value(value: Any) -> Any:
 
 
 class DDKService:
-    def __init__(self, settings: AppSettings) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        get_remote_robot_serials: Callable[[], list[str]] | None = None,
+    ) -> None:
         self._settings = settings
+        self._get_remote_robot_serials = get_remote_robot_serials or (
+            lambda: settings.remote_robot_serials
+        )
         self._clients: dict[str, Any] = {}
         self._errors: dict[str, str] = {}
 
@@ -41,14 +49,14 @@ class DDKService:
         if Client is None:
             return {
                 "available": False,
-                "configured": bool(self._settings.remote_robot_serials),
+                "configured": bool(self._get_remote_robot_serials()),
                 "errors": {
                     "import": "flexivddk is not importable in the selected environment"
                 },
                 "robots": {},
             }
 
-        for serial in self._settings.remote_robot_serials:
+        for serial in self._get_remote_robot_serials():
             if serial in self._clients:
                 continue
             try:
@@ -63,6 +71,26 @@ class DDKService:
 
         return self.status()
 
+    def shutdown(self) -> None:
+        for serial, client in list(self._clients.items()):
+            for method_name in (
+                "Close",
+                "close",
+                "Disconnect",
+                "disconnect",
+                "Stop",
+                "stop",
+            ):
+                method = getattr(client, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception as exc:  # pragma: no cover - hardware specific
+                        self._errors[serial] = describe_exception(exc)
+                    break
+        self._clients.clear()
+        self._errors.clear()
+
     def status(self) -> dict[str, Any]:
         robots = {}
         for serial, client in self._clients.items():
@@ -75,7 +103,7 @@ class DDKService:
 
         return {
             "available": Client is not None,
-            "configured": bool(self._settings.remote_robot_serials),
+            "configured": bool(self._get_remote_robot_serials()),
             "errors": dict(self._errors),
             "robots": robots,
         }

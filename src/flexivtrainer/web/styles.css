@@ -127,6 +127,11 @@ button:disabled {
     padding: 1.3rem 0 2.4rem;
 }
 
+.home-config-grid+.panel,
+.view[data-view="home"] .panel+.panel-grid {
+    margin-top: 1rem;
+}
+
 .view {
     display: none;
 }
@@ -144,14 +149,55 @@ button:disabled {
     padding: 1.25rem;
 }
 
-.hero-panel {
-    margin-bottom: 1rem;
-}
-
 .panel-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 1rem;
+}
+
+.home-config-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+}
+
+.robot-config-panel {
+    padding: 1.1rem 1.2rem;
+}
+
+.robot-input-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+}
+
+.robot-input-group {
+    display: grid;
+    gap: 0.35rem;
+}
+
+.robot-input-group span {
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.robot-input-group input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.78rem 0.9rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.95rem;
+}
+
+.robot-input-group input:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
 }
 
 .panel--wide {
@@ -216,6 +262,34 @@ button:disabled {
     background: rgba(255, 255, 255, 0.5);
     padding: 1rem;
     text-align: left;
+}
+
+.status-card--service {
+    display: flex;
+    flex-direction: column;
+    min-height: 195px;
+}
+
+.status-card__detail {
+    margin: 0.15rem 0 0;
+    min-height: 2.8rem;
+    color: currentColor;
+    opacity: 0.88;
+    font-size: 0.93rem;
+    line-height: 1.35;
+}
+
+.status-card__actions {
+    margin-top: auto;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+}
+
+.status-card__actions button {
+    width: 100%;
+    font-size: 0.86rem;
+    padding: 0.62rem 0.72rem;
 }
 
 .workflow-card h3,
@@ -339,6 +413,38 @@ button:disabled {
 
 #teleop-status-grid .status-card {
     padding: 0.8rem;
+}
+
+.recording-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.recording-live__dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 999px;
+    background: #e53935;
+    box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.4);
+    animation: recording-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+    0% {
+        opacity: 0.95;
+        box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.45);
+    }
+
+    70% {
+        opacity: 0.45;
+        box-shadow: 0 0 0 8px rgba(229, 57, 53, 0);
+    }
+
+    100% {
+        opacity: 0.95;
+        box-shadow: 0 0 0 0 rgba(229, 57, 53, 0);
+    }
 }
 
 .start-button:hover {
@@ -596,7 +702,9 @@ button:active {
 
     .panel-grid,
     .training-layout,
-    .feed-row {
+    .feed-row,
+    .home-config-grid,
+    .robot-input-grid {
         grid-template-columns: 1fr;
     }
 

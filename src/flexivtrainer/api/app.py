@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 
@@ -20,12 +21,20 @@ from flexivtrainer.observability import (
     section,
     warn,
 )
+from flexivtrainer.runtime.manager import get_runtime_manager
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Flexiv Trainer API", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        if get_runtime_manager.cache_info().currsize:
+            get_runtime_manager().shutdown()
+            get_runtime_manager.cache_clear()
+
+    app = FastAPI(title="Flexiv Trainer API", version="0.1.0", lifespan=lifespan)
 
     @app.middleware("http")
     async def terminal_request_log(request: Request, call_next):
@@ -98,4 +107,5 @@ def run() -> None:
         port=settings.port,
         log_level="warning",
         access_log=False,
+        timeout_graceful_shutdown=1,
     )

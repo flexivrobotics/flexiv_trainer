@@ -7,6 +7,8 @@ Flexiv Trainer is a local-first platform for dual-arm Flexiv teleoperation, epis
 1. Prepare a Python environment containing the required robot and runtime packages.
 2. Start the backend with `flexiv-trainer-server`.
 3. Open the single URL printed by the backend.
+4. On the Home page, enter the serial numbers for the two local robots and the two remote robots.
+5. Use the Home page service buttons to connect teleoperation, robot data, cameras, and calibration flows.
 
 You do not need to start a separate frontend development server. The backend serves the web UI directly.
 
@@ -18,7 +20,6 @@ You do not need to start a separate frontend development server. The backend ser
 - RealSense discovery and stream bootstrap service.
 - LeRobot episode writer for local single-episode datasets.
 - Dataset combination and training job orchestration scaffolds.
-- Command-line entrypoints for teleoperation, recording, combining, and training.
 - Styled backend terminal observability with request traces, training pulse output, and streamed subprocess logs.
 
 ## Prerequisites
@@ -68,16 +69,23 @@ pip install -e .
 
 ## Start Flexiv Trainer
 
+If the port still looks occupied after closing a previous backend terminal, clear lingering server processes first:
+
 ```bash
 source .venv/bin/activate
-flexivtrainer-server
+scripts/cleanup-server.sh
 ```
-
-Compatible legacy entrypoint:
 
 ```bash
 source .venv/bin/activate
 flexiv-trainer-server
+```
+
+Compatible alternate entrypoint:
+
+```bash
+source .venv/bin/activate
+flexivtrainer-server
 ```
 
 Equivalent module entrypoint:
@@ -107,16 +115,7 @@ The backend also exposes the API documentation at:
 http://127.0.0.1:8000/docs
 ```
 
-## Optional CLI Tools
-
-In addition to the browser UI, the following command-line entrypoints are available:
-
-```bash
-teleop --help
-record_data --help
-combine_episodes --help
-train_policy --help
-```
+Robot serial numbers for the local and remote robots are now managed from the Home page and saved as you type. The backend uses those saved serial numbers when connecting the teleoperation and robot data services.
 
 ## Maintainer Notes
 

@@ -30,11 +30,6 @@ dev = [
 [project.scripts]
 flexiv-trainer-server = "flexivtrainer.api.app:run"
 flexivtrainer-server = "flexivtrainer.api.app:run"
-flexivtrainer = "flexivtrainer.__main__:main"
-teleop = "flexivtrainer.cli.teleop:main"
-record_data = "flexivtrainer.cli.record_data:main"
-combine_episodes = "flexivtrainer.cli.combine_episodes:main"
-train_policy = "flexivtrainer.cli.train_policy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flexivtrainer"]

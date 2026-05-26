@@ -21,14 +21,25 @@
 
         <main class="page-shell">
             <section class="view view--active" data-view="home">
-                <section class="hero-panel">
-                    <p class="eyebrow">Home</p>
-                    <h1>Flexiv Trainer</h1>
-                    <p>
-                        Start the backend, open this page, and use the navigation bar to enter Teleoperation or
-                        Training.
-                        Each module initializes only when selected.
-                    </p>
+                <section class="home-config-grid">
+                    <section class="panel robot-config-panel">
+                        <div class="panel-header">
+                            <h2>Local Robots</h2>
+                        </div>
+                        <div class="robot-input-grid" id="home-local-robots"></div>
+                    </section>
+
+                    <section class="panel robot-config-panel">
+                        <div class="panel-header">
+                            <h2>Remote Robots</h2>
+                        </div>
+                        <div class="robot-input-grid" id="home-remote-robots"></div>
+                    </section>
+                </section>
+
+                <section class="panel">
+                    <h2>System Status</h2>
+                    <div class="status-grid" id="home-status"></div>
                 </section>
 
                 <section class="panel-grid">
@@ -82,10 +93,6 @@
                     </div>
                 </section>
 
-                <section class="panel panel--wide">
-                    <h2>System Status</h2>
-                    <div class="status-grid" id="home-status"></div>
-                </section>
             </section>
 
             <section class="view" data-view="teleoperation">

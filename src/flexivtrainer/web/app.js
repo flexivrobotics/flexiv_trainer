@@ -26,6 +26,9 @@ const state = {
         teleop: null,
         training: null,
     },
+    timers: {
+        robotConfigSave: null,
+    },
 };
 
 function byId(id) {
@@ -69,6 +72,84 @@ function createStatusCard(label, value, tone = "neutral") {
     return card;
 }
 
+function createServiceStatusCard(serviceKey, service) {
+    const card = document.createElement("div");
+    card.className = `status-card status-card--${service.tone || "neutral"} status-card--service`;
+    card.innerHTML = `
+        <span class="eyebrow">${service.label}</span>
+        <h3>${formatValue(service.state)}</h3>
+        <p class="status-card__detail">${service.detail || ""}</p>
+        <div class="status-card__actions"></div>
+    `;
+    const actions = card.querySelector(".status-card__actions");
+    const definitions = {
+        teleop_service: [
+            { label: "Connect", action: () => controlHomeService("teleop", "connect"), className: "start-button" },
+            { label: "Disconnect", action: () => controlHomeService("teleop", "disconnect"), className: "stop-button" },
+        ],
+        robot_data_service: [
+            { label: "Connect", action: () => controlHomeService("ddk", "connect"), className: "start-button" },
+            { label: "Disconnect", action: () => controlHomeService("ddk", "disconnect"), className: "stop-button" },
+        ],
+        cameras: [
+            { label: "Connect", action: () => controlHomeService("cameras", "connect"), className: "start-button" },
+            { label: "Disconnect", action: () => controlHomeService("cameras", "disconnect"), className: "stop-button" },
+        ],
+        calibration: [
+            { label: "Calibrate Egocentric", action: () => runCalibration("egocentric") },
+            { label: "Calibrate In-hand", action: () => runCalibration("in-hand") },
+        ],
+    };
+    (definitions[serviceKey] || []).forEach((definition) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = definition.label;
+        if (definition.className) {
+            button.classList.add(definition.className);
+        }
+        button.onclick = definition.action;
+        actions.appendChild(button);
+    });
+    return card;
+}
+
+function formatElapsed(seconds) {
+    const clamped = Math.max(0, Math.floor(Number(seconds) || 0));
+    const hh = Math.floor(clamped / 3600);
+    const mm = Math.floor((clamped % 3600) / 60);
+    const ss = clamped % 60;
+    if (hh > 0) {
+        return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    }
+    return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+function createRecordingCard(recording) {
+    const active = !!recording.active;
+    const awaitingSave = !!recording.awaiting_save;
+    const frames = Number(recording.frames_captured || 0);
+    const fps = Number(recording.fps || 0);
+    const seconds = fps > 0 ? frames / fps : 0;
+    const tone = active || awaitingSave ? "ok" : "neutral";
+
+    const card = document.createElement("div");
+    card.className = `status-card status-card--${tone}`;
+    if (active) {
+        card.innerHTML = `
+            <span class="eyebrow">Recording</span>
+            <h3 class="recording-live">
+                <span class="recording-live__dot" aria-hidden="true"></span>
+                <span>${formatElapsed(seconds)} · ${frames} frames</span>
+            </h3>
+        `;
+        return card;
+    }
+
+    const value = awaitingSave ? `${frames} frames captured` : "Idle";
+    card.innerHTML = `<span class="eyebrow">Recording</span><h3>${value}</h3>`;
+    return card;
+}
+
 function setActiveView(view) {
     state.activeView = view;
     document.querySelectorAll(".view").forEach((element) => {
@@ -106,7 +187,39 @@ function setComponentLoading(wrapperId, loading, label = "Initializing") {
     }
 }
 
-function renderHome() {
+function renderHomeRobotConfigInputs() {
+    if (!state.summary) {
+        return;
+    }
+    const robotConfig = state.summary.robot_config || {
+        local_robot_serials: ["", ""],
+        remote_robot_serials: ["", ""],
+    };
+    const configs = [
+        ["home-local-robots", "local_robot_serials", robotConfig.local_robot_serials || ["", ""]],
+        ["home-remote-robots", "remote_robot_serials", robotConfig.remote_robot_serials || ["", ""]],
+    ];
+    configs.forEach(([containerId, key, serials]) => {
+        const container = byId(containerId);
+        container.innerHTML = "";
+        serials.forEach((serial, index) => {
+            const field = document.createElement("label");
+            field.className = "robot-input-group";
+            field.innerHTML = `
+                <span>Robot ${index + 1}</span>
+                <input type="text" value="${serial}" placeholder="Enter serial number" />
+            `;
+            const input = field.querySelector("input");
+            input.oninput = () => {
+                state.summary.robot_config[key][index] = input.value;
+                queueRobotConfigSave();
+            };
+            container.appendChild(field);
+        });
+    });
+}
+
+function renderHomeStorage() {
     if (!state.summary) {
         return;
     }
@@ -123,18 +236,70 @@ function renderHome() {
         item.innerHTML = `<strong>${label}</strong><span>${formatValue(value)}</span>`;
         storage.appendChild(item);
     });
+}
 
+function renderHomeStatus() {
+    if (!state.summary) {
+        return;
+    }
     const status = byId("home-status");
     status.innerHTML = "";
-    [
-        ["Teleop Config", state.summary.teleop.configured ? "Configured" : "Missing", state.summary.teleop.configured ? "ok" : "error"],
-        ["DDK", state.summary.ddk.available ? "Available" : "Missing", state.summary.ddk.available ? "ok" : "error"],
-        ["Cameras", `${state.summary.cameras.devices.length} discovered`, state.summary.cameras.devices.length ? "ok" : "error"],
-        ["Calibration", state.summary.calibration.available_files.length ? "Present" : "Missing", state.summary.calibration.available_files.length ? "ok" : "error"],
-        ["Docs", `${state.summary.backend.ui_url}docs`, "ok"],
-    ].forEach(([label, value, tone]) => {
-        status.appendChild(createStatusCard(label, value, tone));
+    Object.entries(state.summary.services || {}).forEach(([key, service]) => {
+        status.appendChild(createServiceStatusCard(key, service));
     });
+}
+
+function renderHome() {
+    if (!state.summary) {
+        return;
+    }
+    renderHomeRobotConfigInputs();
+    renderHomeStatus();
+    renderHomeStorage();
+}
+
+async function refreshSummary() {
+    state.summary = await api("/system/summary");
+    renderHome();
+}
+
+function queueRobotConfigSave() {
+    window.clearTimeout(state.timers.robotConfigSave);
+    state.timers.robotConfigSave = window.setTimeout(async () => {
+        try {
+            const result = await api("/system/robot-config", {
+                method: "PUT",
+                body: JSON.stringify(state.summary.robot_config),
+            });
+            state.summary.robot_config = result.robot_config;
+            state.summary.services = result.services;
+            renderHomeStatus();
+        } catch (error) {
+            showToast(error.message, true);
+        }
+    }, 180);
+}
+
+async function controlHomeService(serviceName, action) {
+    const result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
+    state.summary.services = result.services;
+    renderHomeStatus();
+    if (state.activeView === "teleoperation") {
+        await refreshTeleopStatus();
+    }
+    const labels = {
+        teleop: "Teleop service",
+        ddk: "Robot data service",
+        cameras: "Cameras",
+    };
+    showToast(`${labels[serviceName] || serviceName} ${action === "connect" ? "connected" : "disconnected"}.`);
+}
+
+async function runCalibration(calibrationName) {
+    const result = await api(`/system/calibration/${calibrationName}`, { method: "POST" });
+    state.summary.services = result.services;
+    renderHomeStatus();
+    showToast(result.message, !result.ok);
 }
 
 function renderTeleop() {
@@ -166,16 +331,12 @@ function renderTeleop() {
             teleopStatus.teleop.started ? "Running" : teleopStatus.teleop.initialized ? "Ready" : "Initializing",
             teleopStatus.teleop.started || teleopStatus.teleop.initialized ? "ok" : "neutral",
         ],
-        [
-            "Recording",
-            teleopStatus.recording.active ? `Recording (${teleopStatus.recording.frames_captured} frames)` : teleopStatus.recording.awaiting_save ? "Awaiting save or discard" : "Idle",
-            teleopStatus.recording.active || teleopStatus.recording.awaiting_save ? "ok" : "neutral",
-        ],
         ["Robot Data Streams", ddkRobotCount, ddkRobotCount ? "ok" : ddkHasIssues ? "error" : "neutral"],
         ["Camera Feeds", runningCameraCount, runningCameraCount ? "ok" : cameraHasIssues ? "error" : "neutral"],
     ].forEach(([label, value, tone]) => {
         grid.appendChild(createStatusCard(label, value, tone));
     });
+    grid.insertBefore(createRecordingCard(teleopStatus.recording || {}), grid.children[1] || null);
 
     byId("record-save").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
     byId("record-discard").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
@@ -210,7 +371,6 @@ function renderTraining() {
         container.innerHTML = `
       <div class="panel-header">
         <div>
-          <p class="eyebrow">Training</p>
           <h2>Load Episode Datasets</h2>
         </div>
       </div>
@@ -346,7 +506,7 @@ function renderTraining() {
 
     if (state.trainingStep === 3) {
         container.innerHTML = `
-      <div class="panel-header"><div><p class="eyebrow">Training</p><h2>Combined Dataset</h2></div></div>
+            <div class="panel-header"><div><h2>Combined Dataset</h2></div></div>
       <div class="progress-block ${state.combinedPreview ? "hidden" : ""}"><div><div class="progress-bar"><span style="width: 72%"></span></div><p>Combining selected episodes...</p></div></div>
       <div class="${state.combinedPreview ? "" : "hidden"}" id="combined-preview-block">
         <div class="feed-row" id="combined-feed-row"></div>
@@ -375,7 +535,7 @@ function renderTraining() {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
         const policiesReady = !!state.trainingPolicies;
         container.innerHTML = `
-      <div class="panel-header"><div><p class="eyebrow">Training</p><h2>Choose Training Policy</h2></div></div>
+            <div class="panel-header"><div><h2>Choose Training Policy</h2></div></div>
       <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
         <div class="policy-grid" id="policy-grid"></div>
         ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
@@ -430,7 +590,7 @@ function renderTraining() {
     const done = status.status === "completed";
     const failed = status.status === "failed";
     container.innerHTML = `
-    <div class="panel-header"><div><p class="eyebrow">Training</p><h2>Training Run</h2></div></div>
+    <div class="panel-header"><div><h2>Training Run</h2></div></div>
     <div class="progress-bar"><span style="width: ${status.progress || 0}%"></span></div>
     <div class="result-pill ${done ? "result-pill--success" : failed ? "result-pill--error" : ""}">${done ? "Training completed" : failed ? formatValue(status.error || "Training failed") : formatValue(status.status)}</div>
     <pre class="log-pane">${(status.logs || []).join("\n") || "Training logs will appear here."}</pre>
@@ -658,8 +818,7 @@ function bindGlobalEvents() {
 
 async function init() {
     bindGlobalEvents();
-    state.summary = await api("/system/summary");
-    renderHome();
+    await refreshSummary();
     renderTeleop();
     renderTraining();
     setActiveView("home");
