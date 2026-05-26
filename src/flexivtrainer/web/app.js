@@ -138,47 +138,54 @@ function renderHome() {
 }
 
 function renderTeleop() {
-    if (!state.teleopStatus) {
-        return;
-    }
+    const teleopStatus = state.teleopStatus || {
+        teleop: { started: false, initialized: false, error: null },
+        ddk: { robots: {}, errors: {} },
+        cameras: { cameras: {}, errors: {} },
+        recording: {
+            active: false,
+            awaiting_save: false,
+            frames_captured: 0,
+        },
+    };
 
-    const cameras = state.teleopStatus.cameras?.cameras || {};
+    const cameras = teleopStatus.cameras?.cameras || {};
     byId("ego-fps").textContent = `${Number(cameras.ego?.fps || 0).toFixed(1)} FPS`;
     byId("left-wrist-fps").textContent = `${Number(cameras.left_wrist?.fps || 0).toFixed(1)} FPS`;
     byId("right-wrist-fps").textContent = `${Number(cameras.right_wrist?.fps || 0).toFixed(1)} FPS`;
 
     const grid = byId("teleop-status-grid");
     grid.innerHTML = "";
-    const ddkRobotCount = Object.keys(state.teleopStatus.ddk.robots || {}).length;
-    const ddkHasIssues = Object.keys(state.teleopStatus.ddk.errors || {}).length > 0;
+    const ddkRobotCount = Object.keys(teleopStatus.ddk.robots || {}).length;
+    const ddkHasIssues = Object.keys(teleopStatus.ddk.errors || {}).length > 0;
     const runningCameraCount = Object.values(cameras).filter((entry) => entry.started).length;
-    const cameraHasIssues = Object.keys(state.teleopStatus.cameras.errors || {}).length > 0;
+    const cameraHasIssues = Object.keys(teleopStatus.cameras.errors || {}).length > 0;
     [
         [
             "Teleoperation",
-            state.teleopStatus.teleop.started ? "Running" : state.teleopStatus.teleop.initialized ? "Ready" : "Not ready",
-            state.teleopStatus.teleop.started || state.teleopStatus.teleop.initialized ? "ok" : "error",
+            teleopStatus.teleop.started ? "Running" : teleopStatus.teleop.initialized ? "Ready" : "Initializing",
+            teleopStatus.teleop.started || teleopStatus.teleop.initialized ? "ok" : "neutral",
         ],
         [
             "Recording",
-            state.teleopStatus.recording.active ? `Recording (${state.teleopStatus.recording.frames_captured} frames)` : state.teleopStatus.recording.awaiting_save ? "Awaiting save or discard" : "Idle",
-            state.teleopStatus.recording.active || state.teleopStatus.recording.awaiting_save ? "ok" : "neutral",
+            teleopStatus.recording.active ? `Recording (${teleopStatus.recording.frames_captured} frames)` : teleopStatus.recording.awaiting_save ? "Awaiting save or discard" : "Idle",
+            teleopStatus.recording.active || teleopStatus.recording.awaiting_save ? "ok" : "neutral",
         ],
-        ["DDK Robots", ddkRobotCount, ddkRobotCount ? "ok" : ddkHasIssues ? "error" : "neutral"],
-        ["Camera Streams", runningCameraCount, runningCameraCount ? "ok" : cameraHasIssues ? "error" : "neutral"],
+        ["Robot Data Streams", ddkRobotCount, ddkRobotCount ? "ok" : ddkHasIssues ? "error" : "neutral"],
+        ["Camera Feeds", runningCameraCount, runningCameraCount ? "ok" : cameraHasIssues ? "error" : "neutral"],
     ].forEach(([label, value, tone]) => {
         grid.appendChild(createStatusCard(label, value, tone));
     });
 
-    byId("record-save").classList.toggle("hidden", !state.teleopStatus.recording.awaiting_save);
-    byId("record-discard").classList.toggle("hidden", !state.teleopStatus.recording.awaiting_save);
+    byId("record-save").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
+    byId("record-discard").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
 
     const issues = [];
-    if (state.teleopStatus.teleop.error) {
-        issues.push(state.teleopStatus.teleop.error);
+    if (teleopStatus.teleop.error) {
+        issues.push(teleopStatus.teleop.error);
     }
-    issues.push(...Object.values(state.teleopStatus.ddk.errors || {}));
-    issues.push(...Object.values(state.teleopStatus.cameras.errors || {}));
+    issues.push(...Object.values(teleopStatus.ddk.errors || {}));
+    issues.push(...Object.values(teleopStatus.cameras.errors || {}));
     const message = byId("teleop-message");
     if (issues.length) {
         message.textContent = issues.join(" | ");
@@ -653,6 +660,7 @@ async function init() {
     bindGlobalEvents();
     state.summary = await api("/system/summary");
     renderHome();
+    renderTeleop();
     renderTraining();
     setActiveView("home");
 }

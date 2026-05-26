@@ -14,6 +14,7 @@
             <button class="brand" data-nav="home" type="button">Flexiv Trainer</button>
             <nav>
                 <button class="nav-link" data-nav="teleoperation" type="button">Teleoperation</button>
+                <span class="nav-divider" aria-hidden="true">|</span>
                 <button class="nav-link" data-nav="training" type="button">Training</button>
             </nav>
         </header>
@@ -88,58 +89,76 @@
             </section>
 
             <section class="view" data-view="teleoperation">
-                <section class="panel panel--wide">
-                    <div class="teleop-layout">
-                        <div class="component-wrapper" id="teleop-cameras-wrap">
-                            <div class="feed feed--hero">
-                                <div class="feed__header">
-                                    <span>Ego Camera</span>
-                                    <strong id="ego-fps">-- FPS</strong>
-                                </div>
-                                <div class="feed__placeholder">Egocentric camera view and force overlay placeholder
-                                </div>
-                            </div>
-
-                            <div class="feed-row">
-                                <div class="feed">
-                                    <div class="feed__header">
-                                        <span>Left Wrist</span>
-                                        <strong id="left-wrist-fps">-- FPS</strong>
-                                    </div>
-                                    <div class="feed__placeholder">Left in-hand camera placeholder</div>
-                                </div>
-                                <div class="feed">
-                                    <div class="feed__header">
-                                        <span>Right Wrist</span>
-                                        <strong id="right-wrist-fps">-- FPS</strong>
-                                    </div>
-                                    <div class="feed__placeholder">Right in-hand camera placeholder</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="panel panel--soft">
+                <div class="teleop-shell panel--wide">
+                    <div class="teleop-sidebar teleop-sidebar--left">
+                        <section class="panel panel--soft control-panel">
                             <div class="panel-header">
-                                <h2>Module Status</h2>
-                                <button class="secondary-button" id="teleop-refresh" type="button">Refresh</button>
+                                <h2>Teleoperation Control</h2>
                             </div>
-                            <div class="status-grid" id="teleop-status-grid"></div>
-                        </div>
+                            <div class="control-stack">
+                                <button class="start-button" id="teleop-start" type="button">Start</button>
+                                <button class="stop-button" id="teleop-stop" type="button">Stop</button>
+                                <button id="teleop-home" type="button">Home All Robots</button>
+                            </div>
+                        </section>
 
-                        <div class="control-bar">
-                            <button id="teleop-start" type="button">Start Teleoperation</button>
-                            <button id="teleop-stop" type="button">Stop Teleoperation</button>
-                            <button id="teleop-home" type="button">Reset All Robots to Home</button>
-                            <button id="record-start" type="button">Start Recording</button>
-                            <button id="record-stop" type="button">Stop Recording</button>
-                            <button class="secondary-button hidden" id="record-save" type="button">Save Episode</button>
-                            <button class="secondary-button hidden" id="record-discard" type="button">Discard
-                                Episode</button>
-                        </div>
-
-                        <div class="panel panel--soft hidden" id="teleop-message"></div>
+                        <section class="panel panel--soft control-panel">
+                            <div class="panel-header">
+                                <h2>Episode Recording</h2>
+                            </div>
+                            <div class="control-stack">
+                                <button class="start-button" id="record-start" type="button">Start</button>
+                                <button class="stop-button" id="record-stop" type="button">Stop</button>
+                                <button class="secondary-button hidden" id="record-save" type="button">Save
+                                    Episode</button>
+                                <button class="secondary-button hidden" id="record-discard" type="button">Discard
+                                    Episode</button>
+                            </div>
+                        </section>
                     </div>
-                </section>
+
+                    <section class="panel teleop-main">
+                        <div class="teleop-layout">
+                            <div class="component-wrapper" id="teleop-cameras-wrap">
+                                <div class="feed feed--hero">
+                                    <div class="feed__header">
+                                        <span>Ego Camera</span>
+                                        <strong id="ego-fps">-- FPS</strong>
+                                    </div>
+                                    <div class="feed__placeholder">Egocentric camera view and force overlay placeholder
+                                    </div>
+                                </div>
+
+                                <div class="feed-row">
+                                    <div class="feed">
+                                        <div class="feed__header">
+                                            <span>Left Wrist</span>
+                                            <strong id="left-wrist-fps">-- FPS</strong>
+                                        </div>
+                                        <div class="feed__placeholder">Left in-hand camera placeholder</div>
+                                    </div>
+                                    <div class="feed">
+                                        <div class="feed__header">
+                                            <span>Right Wrist</span>
+                                            <strong id="right-wrist-fps">-- FPS</strong>
+                                        </div>
+                                        <div class="feed__placeholder">Right in-hand camera placeholder</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="panel panel--soft hidden" id="teleop-message"></div>
+                        </div>
+                    </section>
+
+                    <section class="panel panel--soft control-panel teleop-status-panel teleop-sidebar">
+                        <div class="panel-header">
+                            <h2>Module Status</h2>
+                            <button class="secondary-button" id="teleop-refresh" type="button">Refresh</button>
+                        </div>
+                        <div class="status-grid" id="teleop-status-grid"></div>
+                    </section>
+                </div>
             </section>
 
             <section class="view" data-view="training">

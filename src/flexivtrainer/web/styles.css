@@ -47,6 +47,7 @@ button {
     background: var(--panel);
     color: var(--ink);
     padding: 0.7rem 1.1rem;
+    transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, filter 0.14s ease, transform 0.08s ease;
 }
 
 button:hover {
@@ -87,12 +88,26 @@ button:disabled {
 
 .app-nav nav {
     display: flex;
-    gap: 0.8rem;
+    align-items: center;
+    gap: 0.7rem;
+}
+
+.nav-divider {
+    color: var(--muted);
+    opacity: 0.8;
+    font-size: 1rem;
+    line-height: 1;
+    user-select: none;
 }
 
 .brand,
 .nav-link {
     background: rgba(255, 255, 255, 0.62);
+}
+
+.nav-link {
+    font-size: 1.07rem;
+    padding: 0.74rem 1.28rem;
 }
 
 .brand {
@@ -233,12 +248,42 @@ button:disabled {
     gap: 1rem;
 }
 
+.teleop-shell {
+    display: grid;
+    grid-template-columns: minmax(176px, 216px) minmax(0, 1fr) minmax(190px, 236px);
+    align-items: start;
+    gap: 0.85rem;
+}
+
+.teleop-main {
+    margin: 0;
+}
+
+.teleop-sidebar {
+    position: sticky;
+    top: 5.25rem;
+    align-self: start;
+}
+
+.teleop-sidebar--left {
+    display: grid;
+    gap: 0.85rem;
+}
+
 .feed-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+#teleop-cameras-wrap {
+    display: grid;
+    gap: 1rem;
+}
+
 .feed {
-    min-height: 220px;
+    min-height: 0;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    flex-direction: column;
     border-radius: 22px;
     background: rgba(30, 45, 54, 0.96);
     color: #fbf7f0;
@@ -246,17 +291,71 @@ button:disabled {
 }
 
 .feed--hero {
-    min-height: 360px;
+    min-height: 0;
 }
 
 .feed__placeholder,
 .progress-block {
     display: grid;
     place-items: center;
-    min-height: 160px;
+    min-height: 0;
+    flex: 1;
     border-radius: 18px;
     border: 1px dashed rgba(255, 255, 255, 0.24);
     color: rgba(251, 247, 240, 0.78);
+}
+
+.control-panel {
+    margin: 0;
+    padding: 1rem;
+}
+
+.control-panel .panel-header h2,
+.teleop-status-panel .panel-header h2 {
+    font-size: 0.96rem;
+    margin: 0;
+}
+
+.control-panel .panel-header,
+.teleop-status-panel .panel-header {
+    margin-bottom: 0.65rem;
+}
+
+.control-stack {
+    display: grid;
+    gap: 0.55rem;
+}
+
+.control-stack button {
+    width: 100%;
+    font-size: 1rem;
+    padding: 0.58rem 0.9rem;
+}
+
+#teleop-status-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+}
+
+#teleop-status-grid .status-card {
+    padding: 0.8rem;
+}
+
+.start-button:hover {
+    background: #2fcf78;
+    border-color: #1fa85e;
+    color: #ffffff;
+}
+
+.stop-button:hover {
+    background: #e14a4a;
+    border-color: #bf3131;
+    color: #ffffff;
+}
+
+button:active {
+    filter: brightness(0.88) contrast(1.06);
+    transform: translateY(1px) scale(0.992);
 }
 
 .dialog-backdrop {
@@ -411,6 +510,33 @@ button:disabled {
     gap: 1rem;
 }
 
+#training-content {
+    display: grid;
+    gap: 0.95rem;
+}
+
+#training-content .panel-header h2,
+#training-content .panel h3 {
+    margin: 0.1rem 0 0;
+}
+
+#training-content .episode-list {
+    margin-top: 0.7rem;
+}
+
+#training-content .control-bar {
+    margin-top: 0.2rem;
+}
+
+#training-content .feed-row,
+#combined-preview-block {
+    margin-top: 0.2rem;
+}
+
+#training-content .output-picker {
+    margin-top: 0.75rem;
+}
+
 .legend-chip {
     display: inline-flex;
     padding: 0.45rem 0.75rem;
@@ -474,12 +600,27 @@ button:disabled {
         grid-template-columns: 1fr;
     }
 
+    .teleop-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .teleop-sidebar,
+    .app-nav nav {
+        position: static;
+        left: auto;
+        transform: none;
+        top: auto;
+    }
+
     .app-nav {
         flex-direction: column;
         align-items: flex-start;
     }
 
     .app-nav nav {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
         flex-wrap: wrap;
     }
 }
