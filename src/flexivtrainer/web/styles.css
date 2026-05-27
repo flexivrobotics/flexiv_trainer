@@ -84,6 +84,30 @@ button:disabled {
     background: transparent;
 }
 
+.button-with-icon .button-content {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    width: 100%;
+}
+
+.button-icon {
+    width: 0.95rem;
+    height: 0.95rem;
+    flex: 0 0 auto;
+}
+
+.button-icon--play,
+.button-icon--save {
+    color: #2f9d64;
+}
+
+.button-icon--stop,
+.button-icon--discard {
+    color: #ce4949;
+}
+
 .hidden {
     display: none !important;
 }
@@ -664,6 +688,7 @@ button:disabled {
 }
 
 .control-panel {
+    --control-section-gap: 0.58rem;
     margin: 0;
     padding: 1rem;
 }
@@ -676,7 +701,7 @@ button:disabled {
 
 .control-panel .panel-header,
 .teleop-status-panel .panel-header {
-    margin-bottom: 0.65rem;
+    margin-bottom: var(--control-section-gap);
 }
 
 .control-stack {
@@ -687,7 +712,7 @@ button:disabled {
 .recording-option-list {
     display: grid;
     gap: 0.48rem;
-    margin-bottom: 0.85rem;
+    margin-top: 0;
 }
 
 .recording-option {
@@ -728,15 +753,15 @@ button:disabled {
 
 .recording-divider {
     border-top: 2px solid rgba(72, 103, 125, 0.2);
-    margin: 0.05rem 0 0.7rem;
+    margin: var(--control-section-gap) 0;
 }
 
 .recording-status {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 0.62rem;
-    min-height: 1.55rem;
-    margin-bottom: 0.8rem;
+    min-height: 0;
+    margin-bottom: var(--control-section-gap);
     color: var(--ink);
 }
 
@@ -765,15 +790,41 @@ button:disabled {
     color: #e53935;
 }
 
+.recording-status__icon--stopped {
+    color: #e53935;
+}
+
 .recording-status__text {
+    display: block;
     font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
     font-size: 0.92rem;
     line-height: 1.28;
 }
 
+.recording-status__text--stacked {
+    display: grid;
+    gap: 0.05rem;
+}
+
+.recording-status__line {
+    display: block;
+}
+
+.recording-status__line--secondary {
+    opacity: 0.9;
+}
+
 .recording-status__dot {
     width: 0.58rem;
     height: 0.58rem;
+}
+
+.recording-status__stop-square {
+    width: 0.58rem;
+    height: 0.58rem;
+    border-radius: 2px;
+    background: currentColor;
+    display: inline-block;
 }
 
 .loading-wheel {
@@ -826,6 +877,32 @@ button:disabled {
     width: 100%;
     font-size: 1rem;
     padding: 0.58rem 0.9rem;
+}
+
+.record-save-button--progress {
+    position: relative;
+    overflow: hidden;
+    border-color: rgba(105, 185, 232, 0.42);
+    background: rgba(255, 255, 255, 0.8);
+}
+
+.record-save-button__track {
+    position: absolute;
+    inset: 0;
+    background: rgba(105, 185, 232, 0.16);
+}
+
+.record-save-button__fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, #90d2f5, #3c9fd5);
+    transition: width 0.2s ease;
+}
+
+.record-save-button__label {
+    position: relative;
+    z-index: 1;
 }
 
 .icon-button {

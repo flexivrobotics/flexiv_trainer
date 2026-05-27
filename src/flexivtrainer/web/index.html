@@ -122,11 +122,27 @@ limitations under the License.
 
                         <section class="panel panel--soft control-panel">
                             <div class="panel-header">
-                                <h2>Data Collection Control</h2>
+                                <h2>Teleoperation Control</h2>
                             </div>
                             <div class="control-stack">
-                                <button class="start-button" id="teleop-start" type="button">Start</button>
-                                <button class="stop-button" id="teleop-stop" type="button">Stop</button>
+                                <button class="start-button button-with-icon" id="teleop-start" type="button">
+                                    <span class="button-content">
+                                        <svg class="button-icon button-icon--play" viewBox="0 0 24 24"
+                                            aria-hidden="true">
+                                            <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+                                        </svg>
+                                        <span>Start</span>
+                                    </span>
+                                </button>
+                                <button class="stop-button button-with-icon" id="teleop-stop" type="button">
+                                    <span class="button-content">
+                                        <svg class="button-icon button-icon--stop" viewBox="0 0 24 24"
+                                            aria-hidden="true">
+                                            <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect>
+                                        </svg>
+                                        <span>Stop</span>
+                                    </span>
+                                </button>
                                 <button id="teleop-home" type="button">Home All Robots</button>
                             </div>
                         </section>
@@ -186,17 +202,48 @@ limitations under the License.
                         <div class="panel-header">
                             <h2>Episode Recording</h2>
                         </div>
-                        <div class="recording-option-list" id="recording-options"></div>
-                        <div class="recording-divider" aria-hidden="true"></div>
                         <div class="recording-status" id="recording-status"></div>
                         <div class="control-stack">
-                            <button class="start-button" id="record-start" type="button">Start</button>
-                            <button class="stop-button" id="record-stop" type="button">Stop</button>
-                            <button class="secondary-button hidden" id="record-save" type="button">Save
-                                Episode</button>
-                            <button class="secondary-button hidden" id="record-discard" type="button">Discard
-                                Episode</button>
+                            <button class="start-button button-with-icon" id="record-start" type="button">
+                                <span class="button-content">
+                                    <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+                                    </svg>
+                                    <span>Start</span>
+                                </span>
+                            </button>
+                            <button class="stop-button button-with-icon" id="record-stop" type="button">
+                                <span class="button-content">
+                                    <svg class="button-icon button-icon--stop" viewBox="0 0 24 24" aria-hidden="true">
+                                        <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect>
+                                    </svg>
+                                    <span>Stop</span>
+                                </span>
+                            </button>
+                            <button class="secondary-button button-with-icon hidden" id="record-save" type="button">
+                                <span class="button-content">
+                                    <svg class="button-icon button-icon--save" viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M5 12.5 9.2 16.7 19 7.4" fill="none" stroke="currentColor"
+                                            stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                                    </svg>
+                                    <span>Save Episode</span>
+                                </span>
+                            </button>
+                            <button class="secondary-button button-with-icon hidden" id="record-discard" type="button">
+                                <span class="button-content">
+                                    <svg class="button-icon button-icon--discard" viewBox="0 0 24 24"
+                                        aria-hidden="true">
+                                        <path d="M7 7 17 17" fill="none" stroke="currentColor" stroke-linecap="round"
+                                            stroke-linejoin="round" stroke-width="2"></path>
+                                        <path d="M17 7 7 17" fill="none" stroke="currentColor" stroke-linecap="round"
+                                            stroke-linejoin="round" stroke-width="2"></path>
+                                    </svg>
+                                    <span>Discard Episode</span>
+                                </span>
+                            </button>
                         </div>
+                        <div class="recording-divider" aria-hidden="true"></div>
+                        <div class="recording-option-list" id="recording-options"></div>
                     </section>
                 </div>
             </section>
@@ -251,7 +298,7 @@ limitations under the License.
         </section>
     </div>
 
-    <script type="module" src="/static/app.js?v=20260527-6"></script>
+    <script type="module" src="/static/app.js?v=20260527-10"></script>
 </body>
 
 </html>

@@ -39,6 +39,7 @@ const state = {
     intervals: {
         teleop: null,
         training: null,
+        recordingSave: null,
     },
     timers: {
         robotConfigSave: null,
@@ -48,6 +49,8 @@ const state = {
         teleopBootstrapBusy: false,
         teleopHomeBusy: false,
         recordingStartBusy: false,
+        recordingSaveBusy: false,
+        recordingSaveProgress: 0,
         serviceResetBusy: {
             teleop_service: false,
             robot_data_service: false,
@@ -162,6 +165,26 @@ const CHECK_ICON_SVG = `
     <svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 12.5 9.2 16.7 19 7.4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
     </svg>
+`;
+const STOP_SQUARE_ICON_SVG = `
+    <span class="recording-status__stop-square" aria-hidden="true"></span>
+`;
+const RECORD_SAVE_DEFAULT_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--save" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12.5 9.2 16.7 19 7.4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+        </svg>
+        <span>Save Episode</span>
+    </span>
+`;
+const RECORD_DISCARD_DEFAULT_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--discard" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 7 17 17" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+            <path d="M17 7 7 17" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+        </svg>
+        <span>Discard Episode</span>
+    </span>
 `;
 const LOADING_WHEEL_SEGMENTS = Array.from(
     { length: 12 },
@@ -304,7 +327,9 @@ async function api(path, init, options = {}) {
             signal: init?.signal || controller?.signal,
         });
         if (!response.ok) {
-            throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+            const detail = await readErrorDetail(response);
+            const baseMessage = `Request failed: ${response.status} ${response.statusText}`;
+            throw new Error(detail ? `${baseMessage} - ${detail}` : baseMessage);
         }
         return response.json();
     } catch (error) {
@@ -316,6 +341,42 @@ async function api(path, init, options = {}) {
         if (timer !== null) {
             window.clearTimeout(timer);
         }
+    }
+}
+
+async function readErrorDetail(response) {
+    try {
+        const contentType = (response.headers.get("content-type") || "").toLowerCase();
+        if (contentType.includes("application/json")) {
+            const payload = await response.json();
+            const detail = payload?.detail;
+            if (typeof detail === "string" && detail.trim()) {
+                return detail.trim();
+            }
+            if (Array.isArray(detail)) {
+                return detail.map((entry) => {
+                    if (typeof entry === "string") {
+                        return entry;
+                    }
+                    if (entry && typeof entry === "object") {
+                        return entry.msg || JSON.stringify(entry);
+                    }
+                    return String(entry);
+                }).join(" | ");
+            }
+            if (typeof payload?.message === "string" && payload.message.trim()) {
+                return payload.message.trim();
+            }
+            if (payload && typeof payload === "object" && Object.keys(payload).length > 0) {
+                return JSON.stringify(payload);
+            }
+            return "";
+        }
+
+        const text = (await response.text()).trim();
+        return text;
+    } catch (_) {
+        return "";
     }
 }
 
@@ -361,6 +422,16 @@ function setRecordingStartBusy(busy) {
     }
 }
 
+function setRecordingSaveBusy(busy) {
+    state.ui.recordingSaveBusy = busy;
+    if (!busy) {
+        state.ui.recordingSaveProgress = 0;
+    }
+    if (state.activeView === "teleoperation") {
+        renderTeleop();
+    }
+}
+
 function setServiceResetBusy(serviceKey, busy) {
     state.ui.serviceResetBusy[serviceKey] = busy;
     if (state.activeView === "teleoperation") {
@@ -393,6 +464,7 @@ function stopTeleopPolling() {
         window.clearInterval(state.intervals.teleop);
         state.intervals.teleop = null;
     }
+    stopRecordingSavePolling();
 }
 
 function startTeleopPolling() {
@@ -410,6 +482,45 @@ function startTeleopPolling() {
             showToast(error.message, true);
         });
     }, 1500);
+}
+
+function normalizePercent(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return 0;
+    }
+    return Math.max(0, Math.min(100, Math.round(numeric)));
+}
+
+function stopRecordingSavePolling() {
+    if (state.intervals.recordingSave !== null) {
+        window.clearInterval(state.intervals.recordingSave);
+        state.intervals.recordingSave = null;
+    }
+}
+
+async function pollRecordingSaveProgressOnce() {
+    const nextStatus = await api("/teleop/status");
+    state.teleopStatus = nextStatus;
+    const backendProgress = normalizePercent(nextStatus?.recording?.save_progress || 0);
+    state.ui.recordingSaveProgress = Math.max(state.ui.recordingSaveProgress, backendProgress);
+    if (state.summary) {
+        state.summary.services = nextStatus.services || state.summary.services;
+        renderHomeStatus();
+    }
+    renderTeleop();
+}
+
+function startRecordingSavePolling() {
+    stopRecordingSavePolling();
+    pollRecordingSaveProgressOnce().catch(() => {
+        // Ignore transient polling failures while save is in progress
+    });
+    state.intervals.recordingSave = window.setInterval(() => {
+        pollRecordingSaveProgressOnce().catch(() => {
+            // Ignore transient polling failures while save is in progress
+        });
+    }, 250);
 }
 
 function hasActiveTeleopServices(teleopStatus) {
@@ -1067,8 +1178,27 @@ function renderRecordingOptions(recording = {}) {
 
     const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
     container.innerHTML = "";
+    const selected = new Set(state.recordingEntries);
+    const allSelected = DEFAULT_RECORDING_ENTRY_IDS.every((entryId) => selected.has(entryId));
+
+    const selectAllLabel = document.createElement("label");
+    selectAllLabel.className = `recording-option ${locked ? "recording-option--disabled" : ""}`;
+    selectAllLabel.innerHTML = `
+        <input type="checkbox" ${allSelected ? "checked" : ""} ${locked ? "disabled" : ""} />
+        <span class="recording-option__text">
+            <span class="recording-option__label">Select All</span>
+        </span>
+    `;
+    const selectAllInput = selectAllLabel.querySelector("input");
+    selectAllInput.onchange = () => {
+        state.recordingEntries = selectAllInput.checked ? [...DEFAULT_RECORDING_ENTRY_IDS] : [];
+        renderRecordingOptions(recording);
+        renderRecordingStatusPanel(state.teleopStatus);
+    };
+    container.appendChild(selectAllLabel);
+
     RECORDING_ENTRY_OPTIONS.forEach((option) => {
-        const checked = state.recordingEntries.includes(option.id);
+        const checked = selected.has(option.id);
         const label = document.createElement("label");
         label.className = `recording-option ${locked ? "recording-option--disabled" : ""}`;
         label.innerHTML = `
@@ -1079,11 +1209,14 @@ function renderRecordingOptions(recording = {}) {
         `;
         const input = label.querySelector("input");
         input.onchange = () => {
+            const nextSelected = new Set(state.recordingEntries);
             if (input.checked) {
-                state.recordingEntries = [...state.recordingEntries, option.id];
+                nextSelected.add(option.id);
             } else {
-                state.recordingEntries = state.recordingEntries.filter((entry) => entry !== option.id);
+                nextSelected.delete(option.id);
             }
+            state.recordingEntries = DEFAULT_RECORDING_ENTRY_IDS.filter((entryId) => nextSelected.has(entryId));
+            renderRecordingOptions(recording);
             renderRecordingStatusPanel(state.teleopStatus);
         };
         container.appendChild(label);
@@ -1132,13 +1265,20 @@ function areSelectedRecordingEntriesAvailable(teleopStatus) {
 }
 
 function recordingStatusIconMarkup(kind) {
-    if (kind === "ready" || kind === "awaiting-save") {
+    if (kind === "ready") {
         return `<span class="recording-status__icon recording-status__icon--ready" aria-hidden="true">${CHECK_ICON_SVG}</span>`;
     }
     if (kind === "recording") {
         return `
             <span class="recording-status__icon recording-status__icon--recording" aria-hidden="true">
                 <span class="recording-live__dot recording-status__dot"></span>
+            </span>
+        `;
+    }
+    if (kind === "stopped") {
+        return `
+            <span class="recording-status__icon recording-status__icon--stopped" aria-hidden="true">
+                ${STOP_SQUARE_ICON_SVG}
             </span>
         `;
     }
@@ -1155,12 +1295,16 @@ function buildRecordingStatusModel(teleopStatus) {
     const awaitingSave = !!recording.awaiting_save;
     const frames = Number(recording.frames_captured || 0);
     const fps = Number(recording.fps || 0);
-    const seconds = fps > 0 ? frames / fps : 0;
+    const elapsedCandidate = Number(recording.elapsed_s);
+    const seconds = Number.isFinite(elapsedCandidate)
+        ? Math.max(0, elapsedCandidate)
+        : (fps > 0 ? frames / fps : 0);
 
     if (active) {
         return {
             kind: "recording",
-            text: `${formatElapsed(seconds)} · ${frames} frames captured`,
+            line1: formatElapsed(seconds),
+            line2: `${frames} frames captured`,
             animated: false,
             canStart: false,
             canStop: true,
@@ -1169,8 +1313,9 @@ function buildRecordingStatusModel(teleopStatus) {
 
     if (awaitingSave) {
         return {
-            kind: "awaiting-save",
-            text: `Awaiting save · ${formatElapsed(seconds)} · ${frames} frames captured`,
+            kind: "stopped",
+            line1: formatElapsed(seconds),
+            line2: `${frames} frames captured`,
             animated: false,
             canStart: false,
             canStop: false,
@@ -1180,7 +1325,8 @@ function buildRecordingStatusModel(teleopStatus) {
     if (state.ui.recordingStartBusy || state.ui.teleopBootstrapBusy || !state.teleopBootstrapped || !teleopStatus) {
         return {
             kind: "initializing",
-            text: "Initializing recorder",
+            line1: "Initializing recorder",
+            line2: null,
             animated: true,
             canStart: false,
             canStop: false,
@@ -1190,7 +1336,8 @@ function buildRecordingStatusModel(teleopStatus) {
     if (state.recordingEntries.length > 0 && areSelectedRecordingEntriesAvailable(teleopStatus)) {
         return {
             kind: "ready",
-            text: "Ready to record",
+            line1: "Ready to record",
+            line2: null,
             animated: false,
             canStart: true,
             canStop: false,
@@ -1199,7 +1346,8 @@ function buildRecordingStatusModel(teleopStatus) {
 
     return {
         kind: "awaiting-data",
-        text: "Awaiting data",
+        line1: "Awaiting data",
+        line2: null,
         animated: true,
         canStart: false,
         canStop: false,
@@ -1217,17 +1365,64 @@ function renderRecordingStatusPanel(teleopStatus) {
     if (status.className !== nextClassName) {
         status.className = nextClassName;
     }
+    const textMarkup = model.line2
+        ? `
+            <span class="recording-status__text recording-status__text--stacked">
+                <span class="recording-status__line">${model.line1}</span>
+                <span class="recording-status__line recording-status__line--secondary">${model.line2}</span>
+            </span>
+        `
+        : `<span class="recording-status__text">${model.line1}</span>`;
     setMarkupIfChanged(
         status,
-        `${model.kind}:${model.text}:${model.animated ? "animated" : "static"}`,
+        `${model.kind}:${model.line1}:${model.line2 || ""}:${model.animated ? "animated" : "static"}`,
         `
             ${recordingStatusIconMarkup(model.kind)}
-            <span class="recording-status__text">${model.text}</span>
+            ${textMarkup}
         `,
     );
 
     byId("record-start").disabled = !model.canStart;
     byId("record-stop").disabled = !model.canStop;
+}
+
+function renderRecordingActionButtons(recording = {}) {
+    const saveButton = byId("record-save");
+    const discardButton = byId("record-discard");
+    if (!saveButton || !discardButton) {
+        return;
+    }
+
+    const backendBusy = !!recording.save_in_progress;
+    const backendProgress = normalizePercent(recording.save_progress || 0);
+    if (backendBusy) {
+        state.ui.recordingSaveProgress = Math.max(state.ui.recordingSaveProgress, backendProgress);
+    }
+
+    const busy = state.ui.recordingSaveBusy || backendBusy;
+    const progress = normalizePercent(Math.max(state.ui.recordingSaveProgress, backendProgress));
+
+    saveButton.disabled = busy;
+    discardButton.disabled = busy;
+
+    if (busy) {
+        saveButton.classList.add("record-save-button--progress");
+        setMarkupIfChanged(
+            saveButton,
+            `save-progress:${progress}`,
+            `
+                <span class="record-save-button__track" aria-hidden="true">
+                    <span class="record-save-button__fill" style="width: ${progress}%"></span>
+                </span>
+                <span class="record-save-button__label">Saving ${progress}%</span>
+            `,
+        );
+    } else {
+        saveButton.classList.remove("record-save-button--progress");
+        setMarkupIfChanged(saveButton, "save-default", RECORD_SAVE_DEFAULT_MARKUP);
+    }
+
+    setMarkupIfChanged(discardButton, "discard-default", RECORD_DISCARD_DEFAULT_MARKUP);
 }
 
 function updateTeleopControlButtons(teleopStatus) {
@@ -1548,10 +1743,12 @@ function renderTeleop() {
     });
 
     renderRecordingStatusPanel(teleopStatus);
+    renderRecordingActionButtons(teleopStatus.recording || {});
     updateTeleopControlButtons(teleopStatus);
 
-    byId("record-save").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
-    byId("record-discard").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
+    const showRecordingSaveButtons = !!teleopStatus.recording.awaiting_save || !!state.ui.recordingSaveBusy || !!teleopStatus.recording.save_in_progress;
+    byId("record-save").classList.toggle("hidden", !showRecordingSaveButtons);
+    byId("record-discard").classList.toggle("hidden", !showRecordingSaveButtons);
 
     const issues = [];
     if (teleopStatus.teleop.error) {
@@ -2094,15 +2291,34 @@ function bindGlobalEvents() {
         }
     };
     byId("record-save").onclick = async () => {
+        if (state.ui.recordingSaveBusy) {
+            return;
+        }
         try {
+            setRecordingSaveBusy(true);
+            state.ui.recordingSaveProgress = 0;
+            startRecordingSavePolling();
             const result = await api("/teleop/recording/save", { method: "POST" });
+            state.ui.recordingSaveProgress = 100;
+            renderTeleop();
             showToast(`Saved ${result.episode_name}`);
-            await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);
+        } finally {
+            stopRecordingSavePolling();
+            try {
+                await refreshTeleopStatus();
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            setRecordingSaveBusy(false);
         }
     };
     byId("record-discard").onclick = async () => {
+        const confirmed = window.confirm("Discard this recording? This cannot be undone.");
+        if (!confirmed) {
+            return;
+        }
         try {
             const result = await api("/teleop/recording/discard", { method: "POST" });
             showToast(`Discarded ${result.episode_name}`);

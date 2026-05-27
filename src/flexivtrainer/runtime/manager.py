@@ -51,6 +51,9 @@ class _UnavailableRecordingService:
             "episode_name": None,
             "fps": None,
             "error": self._reason,
+            "save_in_progress": False,
+            "save_progress": 0,
+            "elapsed_s": 0.0,
         }
 
     def start(self, *args: Any, **kwargs: Any) -> dict[str, Any]:

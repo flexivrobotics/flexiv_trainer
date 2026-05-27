@@ -194,11 +194,14 @@ def start_recording(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    result = runtime.recording.start(
-        task=request.task,
-        fps=request.fps,
-        recording_entries=recording_entries,
-    )
+    try:
+        result = runtime.recording.start(
+            task=request.task,
+            fps=request.fps,
+            recording_entries=recording_entries,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     ok(
         "Recording started",
         " ".join(
@@ -215,7 +218,10 @@ def start_recording(
 
 @router.post("/recording/stop")
 def stop_recording(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    result = runtime.recording.stop()
+    try:
+        result = runtime.recording.stop()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     info(
         "Recording stopped",
         " ".join(
@@ -230,13 +236,19 @@ def stop_recording(runtime: RuntimeManager = Depends(get_runtime_manager)) -> di
 
 @router.post("/recording/save")
 def save_recording(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    result = runtime.recording.save()
+    try:
+        result = runtime.recording.save()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     ok("Recording saved", f"episode={result.get('episode_name', 'unknown')}")
     return result
 
 
 @router.post("/recording/discard")
 def discard_recording(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    result = runtime.recording.discard()
+    try:
+        result = runtime.recording.discard()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     warn("Recording discarded", f"episode={result.get('episode_name', 'unknown')}")
     return result
