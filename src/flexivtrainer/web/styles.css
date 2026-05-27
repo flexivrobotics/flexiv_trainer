@@ -12,6 +12,9 @@
     --success: #3d8f67;
     --success-soft: rgba(210, 240, 218, 0.84);
     --success-line: rgba(61, 143, 103, 0.28);
+    --working: #9b7621;
+    --working-soft: rgba(249, 234, 191, 0.92);
+    --working-line: rgba(155, 118, 33, 0.28);
     --error: #b76565;
     --error-soft: rgba(249, 220, 220, 0.9);
     --error-line: rgba(183, 101, 101, 0.28);
@@ -351,6 +354,11 @@ button:disabled {
     gap: 0.85rem;
 }
 
+.teleop-sidebar--right {
+    display: grid;
+    gap: 0.85rem;
+}
+
 .feed-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -427,6 +435,10 @@ button:disabled {
     color: rgba(251, 247, 240, 0.78);
 }
 
+.feed__placeholder--awaiting {
+    color: #fbf7f0;
+}
+
 .telemetry-card {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 22px;
@@ -462,6 +474,14 @@ button:disabled {
 .vector-panel {
     display: grid;
     gap: 0.85rem;
+}
+
+.vector-panel--empty {
+    min-height: 248px;
+    place-items: center;
+    border: 1px solid rgba(141, 224, 255, 0.16);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.03);
 }
 
 .vector-panel__svg {
@@ -577,6 +597,30 @@ button:disabled {
     font-size: 0.9rem;
 }
 
+.telemetry-empty-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.68rem;
+    text-align: center;
+}
+
+.telemetry-empty-state--breathing {
+    animation: note-breathe 2.4s ease-in-out infinite;
+}
+
+.telemetry-empty-state__icon {
+    width: 1rem;
+    height: 1rem;
+}
+
+.telemetry-empty-state__text {
+    color: #fbf7f0;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.9rem;
+    line-height: 1.28;
+}
+
 .control-panel {
     margin: 0;
     padding: 1rem;
@@ -640,6 +684,102 @@ button:disabled {
     opacity: 0.58;
 }
 
+.recording-divider {
+    border-top: 2px solid rgba(72, 103, 125, 0.2);
+    margin: 0.05rem 0 0.7rem;
+}
+
+.recording-status {
+    display: flex;
+    align-items: center;
+    gap: 0.62rem;
+    min-height: 1.55rem;
+    margin-bottom: 0.8rem;
+    color: var(--ink);
+}
+
+.recording-status--breathing {
+    animation: note-breathe 2.4s ease-in-out infinite;
+}
+
+.recording-status__icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1rem;
+    height: 1rem;
+    flex: 0 0 auto;
+}
+
+.recording-status__icon--ready {
+    color: var(--success);
+}
+
+.recording-status__icon--loading {
+    color: var(--muted);
+}
+
+.recording-status__icon--recording {
+    color: #e53935;
+}
+
+.recording-status__text {
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.92rem;
+    line-height: 1.28;
+}
+
+.recording-status__dot {
+    width: 0.58rem;
+    height: 0.58rem;
+}
+
+.loading-wheel {
+    position: relative;
+    width: 1rem;
+    height: 1rem;
+    display: inline-block;
+}
+
+.loading-wheel span {
+    position: absolute;
+    left: calc(50% - 0.075rem);
+    top: 0.04rem;
+    width: 0.15rem;
+    height: 0.32rem;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.16;
+    transform-origin: 50% 0.46rem;
+    transform: rotate(calc(var(--spinner-index) * 30deg));
+    animation: loading-wheel-fade 1.8s linear infinite;
+    animation-delay: calc(var(--spinner-index) * -0.15s);
+}
+
+@keyframes loading-wheel-fade {
+    0% {
+        opacity: 1;
+    }
+
+    100% {
+        opacity: 0.12;
+    }
+}
+
+@keyframes note-breathe {
+    0% {
+        opacity: 0.62;
+    }
+
+    50% {
+        opacity: 1;
+    }
+
+    100% {
+        opacity: 0.62;
+    }
+}
+
 .control-stack button {
     width: 100%;
     font-size: 1rem;
@@ -660,7 +800,14 @@ button:disabled {
     height: 1.1rem;
 }
 
-.icon-button--spinning .icon-refresh {
+.icon-reset,
+.icon-check {
+    width: 1rem;
+    height: 1rem;
+}
+
+.icon-button--spinning .icon-refresh,
+.icon-button--spinning .icon-reset {
     animation: icon-spin 0.8s linear infinite;
 }
 
@@ -676,11 +823,63 @@ button:disabled {
 
 #teleop-status-grid {
     grid-template-columns: 1fr;
+    gap: 0.58rem;
+}
+
+.teleop-system-card {
+    padding: 0.72rem 0.8rem;
+    border-radius: 18px;
+    min-height: 0;
+    box-shadow: none;
+    background: rgba(255, 255, 255, 0.88);
+}
+
+.teleop-system-card__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 0.75rem;
 }
 
-#teleop-status-grid .status-card {
-    padding: 0.8rem;
+.teleop-system-card__title {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.teleop-system-card__label {
+    margin: 0;
+    color: var(--ink);
+}
+
+.teleop-system-card__dot {
+    width: 0.72rem;
+    height: 0.72rem;
+    border-radius: 999px;
+    flex: 0 0 auto;
+    cursor: help;
+}
+
+.teleop-system-card__dot--ready {
+    background: #5fd58a;
+    box-shadow: 0 0 0 3px rgba(95, 213, 138, 0.16);
+}
+
+.teleop-system-card__dot--error {
+    background: #d85f5f;
+    box-shadow: 0 0 0 3px rgba(216, 95, 95, 0.16);
+}
+
+.teleop-system-card__reset {
+    width: 2.15rem;
+    min-width: 2.15rem;
+    height: 2.15rem;
+    flex: 0 0 2.15rem;
+    aspect-ratio: 1 / 1;
+    padding: 0;
+    border-radius: 999px;
+    color: var(--muted);
 }
 
 .recording-live {
@@ -852,6 +1051,12 @@ button:active {
     border-color: var(--success-line);
     background: var(--success-soft);
     color: var(--success);
+}
+
+.status-card--working {
+    border-color: var(--working-line);
+    background: var(--working-soft);
+    color: var(--working);
 }
 
 .status-card--error,

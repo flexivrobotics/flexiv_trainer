@@ -209,12 +209,18 @@ class RuntimeManager:
         elif (
             configured_camera_count and started_camera_count == configured_camera_count
         ):
-            camera_state = "Connected"
+            camera_state = f"{started_camera_count}/{configured_camera_count} connected"
             camera_tone = "ok"
-            camera_detail = f"{started_camera_count} feeds active."
+            camera_detail = "All camera feeds are active."
+        elif started_camera_count > 0:
+            camera_state = f"{started_camera_count}/{configured_camera_count} connected"
+            camera_tone = "working"
+            camera_detail = self._service_message(
+                camera_errors, "Some camera feeds are active."
+            )
         else:
-            camera_state = "Not connected"
-            camera_tone = "error" if camera_errors else "neutral"
+            camera_state = f"0/{configured_camera_count} connected"
+            camera_tone = "error"
             camera_detail = self._service_message(
                 camera_errors, "Press Connect to start the camera feeds."
             )

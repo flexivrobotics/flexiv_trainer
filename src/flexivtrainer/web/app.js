@@ -31,6 +31,14 @@ const state = {
     },
     ui: {
         teleopRefreshBusy: false,
+        teleopBootstrapBusy: false,
+        teleopHomeBusy: false,
+        recordingStartBusy: false,
+        serviceResetBusy: {
+            teleop_service: false,
+            robot_data_service: false,
+            cameras: false,
+        },
     },
     telemetryHistory: {
         left: [],
@@ -40,45 +48,97 @@ const state = {
 };
 
 const TELEMETRY_HISTORY_LIMIT = 90;
+const TELEMETRY_FPS_OK_MIN = 0.55;
 const RECORDING_ENTRY_OPTIONS = [
     {
         id: "observation.images.ego",
         label: "observation.images.ego",
+        bucket: "image",
+        sourceField: "ego",
     },
     {
         id: "observation.images.left_wrist",
         label: "observation.images.left_wrist",
+        bucket: "image",
+        sourceField: "left_wrist",
     },
     {
         id: "observation.images.right_wrist",
         label: "observation.images.right_wrist",
+        bucket: "image",
+        sourceField: "right_wrist",
     },
     {
         id: "observation.state.tcp_pose",
         label: "observation.state.tcp_pose",
+        bucket: "observation",
+        payload: "cartesian_state",
+        sourceField: "tcp_pose",
     },
     {
         id: "observation.state.tcp_twist",
         label: "observation.state.tcp_twist",
+        bucket: "observation",
+        payload: "cartesian_state",
+        sourceField: "tcp_vel",
     },
     {
         id: "observation.state.tcp_wrench",
         label: "observation.state.tcp_wrench",
+        bucket: "observation",
+        payload: "cartesian_state",
+        sourceField: "ext_wrench_in_world",
     },
     {
         id: "action.tcp_pose",
         label: "action.tcp_pose",
+        bucket: "action",
+        payload: "cartesian_command",
+        sourceField: "tcp_pose_des",
     },
     {
         id: "action.tcp_twist",
         label: "action.tcp_twist",
+        bucket: "action",
+        payload: "cartesian_command",
+        sourceField: "tcp_vel_des",
     },
     {
         id: "action.tcp_wrench",
         label: "action.tcp_wrench",
+        bucket: "action",
+        payload: "cartesian_command",
+        sourceField: "wrench_des_in_ctrl_frame",
     },
 ];
 const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
+const SERVICE_RESET_TARGETS = {
+    teleop_service: "teleop",
+    robot_data_service: "ddk",
+    cameras: "cameras",
+};
+const SERVICE_RESET_MESSAGES = {
+    teleop_service: "Reconnect teleoperation service",
+    robot_data_service: "Reconnect robot data service",
+    cameras: "Reconnect cameras",
+};
+const RESET_ICON_SVG = `
+    <svg class="icon-reset" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 7a6.5 6.5 0 0 1 10.4 1.1" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        <path d="M18.5 8.5 17.2 5 13.7 6.3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        <path d="M17 17a6.5 6.5 0 0 1-10.4-1.1" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        <path d="M5.5 15.5 6.8 19l3.5-1.3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+    </svg>
+`;
+const CHECK_ICON_SVG = `
+    <svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 12.5 9.2 16.7 19 7.4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+    </svg>
+`;
+const LOADING_WHEEL_SEGMENTS = Array.from(
+    { length: 12 },
+    (_, index) => `<span style="--spinner-index:${index}"></span>`,
+).join("");
 state.recordingEntries = [...DEFAULT_RECORDING_ENTRY_IDS];
 
 const TELEMETRY_SERIES = {
@@ -137,6 +197,78 @@ function createStatusCard(label, value, tone = "neutral") {
     return card;
 }
 
+function setTeleopBootstrapBusy(busy) {
+    state.ui.teleopBootstrapBusy = busy;
+    if (state.activeView === "teleoperation") {
+        renderTeleop();
+    }
+}
+
+function setTeleopHomeBusy(busy) {
+    state.ui.teleopHomeBusy = busy;
+    if (state.activeView === "teleoperation") {
+        renderTeleop();
+    }
+}
+
+function setRecordingStartBusy(busy) {
+    state.ui.recordingStartBusy = busy;
+    if (state.activeView === "teleoperation") {
+        renderTeleop();
+    }
+}
+
+function setServiceResetBusy(serviceKey, busy) {
+    state.ui.serviceResetBusy[serviceKey] = busy;
+    if (state.activeView === "teleoperation") {
+        renderTeleop();
+    }
+}
+
+async function resetTeleopSystemService(serviceKey) {
+    const serviceName = SERVICE_RESET_TARGETS[serviceKey];
+    if (!serviceName || state.ui.serviceResetBusy[serviceKey]) {
+        return;
+    }
+
+    const label = state.teleopStatus?.services?.[serviceKey]?.label
+        || state.summary?.services?.[serviceKey]?.label
+        || serviceKey;
+
+    setServiceResetBusy(serviceKey, true);
+    try {
+        await controlHomeService(serviceName, "disconnect", { silentToast: true });
+        await controlHomeService(serviceName, "connect", { silentToast: true });
+        showToast(`${label} reset.`);
+    } finally {
+        setServiceResetBusy(serviceKey, false);
+    }
+}
+
+function createTeleopSystemCard(serviceKey, service = {}) {
+    const ready = service.tone === "ok";
+    const resetBusy = !!state.ui.serviceResetBusy[serviceKey];
+    const serviceState = formatValue(service.state);
+    const reconnectMessage = SERVICE_RESET_MESSAGES[serviceKey] || `Reconnect ${service.label || serviceKey}`;
+    const card = document.createElement("div");
+    card.className = "status-card teleop-system-card";
+    card.innerHTML = `
+        <div class="teleop-system-card__header">
+            <div class="teleop-system-card__title">
+                <span class="teleop-system-card__dot teleop-system-card__dot--${ready ? "ready" : "error"}" role="img" aria-label="${serviceState}" title="${serviceState}"></span>
+                <span class="eyebrow teleop-system-card__label">${service.label || serviceKey}</span>
+            </div>
+            <button class="secondary-button icon-button teleop-system-card__reset ${resetBusy ? "icon-button--spinning" : ""}" type="button" aria-label="${reconnectMessage}" title="${reconnectMessage}" ${resetBusy ? "disabled" : ""}>
+                ${RESET_ICON_SVG}
+            </button>
+        </div>
+    `;
+
+    const resetButton = card.querySelector("button");
+    resetButton.onclick = () => resetTeleopSystemService(serviceKey).catch((error) => showToast(error.message, true));
+    return card;
+}
+
 function createServiceStatusCard(serviceKey, service) {
     const card = document.createElement("div");
     card.className = `status-card status-card--${service.tone || "neutral"} status-card--service`;
@@ -183,32 +315,6 @@ function formatElapsed(seconds) {
         return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
     }
     return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
-}
-
-function createRecordingCard(recording) {
-    const active = !!recording.active;
-    const awaitingSave = !!recording.awaiting_save;
-    const frames = Number(recording.frames_captured || 0);
-    const fps = Number(recording.fps || 0);
-    const seconds = fps > 0 ? frames / fps : 0;
-    const tone = active || awaitingSave ? "ok" : "neutral";
-
-    const card = document.createElement("div");
-    card.className = `status-card status-card--${tone}`;
-    if (active) {
-        card.innerHTML = `
-            <span class="eyebrow">Recording</span>
-            <h3 class="recording-live">
-                <span class="recording-live__dot" aria-hidden="true"></span>
-                <span>${formatElapsed(seconds)} · ${frames} frames</span>
-            </h3>
-        `;
-        return card;
-    }
-
-    const value = awaitingSave ? `${frames} frames captured` : "Idle";
-    card.innerHTML = `<span class="eyebrow">Recording</span><h3>${value}</h3>`;
-    return card;
 }
 
 function setTeleopRefreshBusy(busy) {
@@ -578,6 +684,75 @@ function formatComponentChips(vector, kind) {
     `).join("");
 }
 
+function resolveFpsTone(fps, okMin) {
+    if (!Number.isFinite(fps) || fps <= 0) {
+        return "offline";
+    }
+    return fps < okMin ? "warning" : "ok";
+}
+
+function setFpsBadge(element, fps, okMin) {
+    if (!element) {
+        return;
+    }
+    const safeFps = Number.isFinite(fps) && fps > 0 ? fps : 0;
+    const tone = resolveFpsTone(safeFps, okMin);
+    element.className = `feed__fps feed__fps--${tone}`;
+    element.innerHTML = `
+        <span class="feed__fps-dot" aria-hidden="true"></span>
+        <span>${safeFps.toFixed(1)} FPS</span>
+    `;
+}
+
+function buildFpsBadgeMarkup(fps, okMin) {
+    const safeFps = Number.isFinite(fps) && fps > 0 ? fps : 0;
+    const tone = resolveFpsTone(safeFps, okMin);
+    return `
+        <strong class="feed__fps feed__fps--${tone}">
+            <span class="feed__fps-dot" aria-hidden="true"></span>
+            <span>${safeFps.toFixed(1)} FPS</span>
+        </strong>
+    `;
+}
+
+function buildAwaitingDataMarkup() {
+    return `
+        <div class="telemetry-empty-state telemetry-empty-state--breathing">
+            <span class="telemetry-empty-state__icon recording-status__icon recording-status__icon--loading" aria-hidden="true">
+                <span class="loading-wheel">${LOADING_WHEEL_SEGMENTS}</span>
+            </span>
+            <span class="telemetry-empty-state__text">Awaiting data</span>
+        </div>
+    `;
+}
+
+function computeTelemetryStreamFps(history, kind, currentVector) {
+    if (!Array.isArray(currentVector)) {
+        return 0;
+    }
+
+    const validSamples = history.filter((sample) => Array.isArray(sample[kind]));
+    if (validSamples.length < 2) {
+        return 0;
+    }
+
+    const recentSamples = validSamples.slice(-6);
+    const deltas = [];
+    for (let index = 1; index < recentSamples.length; index += 1) {
+        const delta = recentSamples[index].timestamp - recentSamples[index - 1].timestamp;
+        if (delta > 0) {
+            deltas.push(delta);
+        }
+    }
+
+    if (!deltas.length) {
+        return 0;
+    }
+
+    const averageDeltaMs = deltas.reduce((sum, value) => sum + value, 0) / deltas.length;
+    return averageDeltaMs > 0 ? 1000 / averageDeltaMs : 0;
+}
+
 function renderCameraFps(elementId, camera) {
     const element = byId(elementId);
     if (!element) {
@@ -585,16 +760,22 @@ function renderCameraFps(elementId, camera) {
     }
 
     const fps = Number(camera?.fps || 0);
-    const state = !camera?.started || fps <= 0
-        ? "offline"
-        : fps < 29
-            ? "warning"
-            : "ok";
-    element.className = `feed__fps feed__fps--${state}`;
-    element.innerHTML = `
-        <span class="feed__fps-dot" aria-hidden="true"></span>
-        <span>${fps.toFixed(1)} FPS</span>
-    `;
+    const hasData = !!camera?.started && fps > 0;
+    setFpsBadge(element, fps, 29);
+
+    const placeholder = element.closest(".feed")?.querySelector(".feed__placeholder");
+    if (!placeholder) {
+        return;
+    }
+
+    if (!placeholder.dataset.defaultContent) {
+        placeholder.dataset.defaultContent = placeholder.innerHTML;
+    }
+
+    placeholder.classList.toggle("feed__placeholder--awaiting", !hasData);
+    placeholder.innerHTML = hasData
+        ? placeholder.dataset.defaultContent
+        : buildAwaitingDataMarkup();
 }
 
 function renderRecordingOptions(recording = {}) {
@@ -603,7 +784,7 @@ function renderRecordingOptions(recording = {}) {
         return;
     }
 
-    const locked = !!recording.active || !!recording.awaiting_save;
+    const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
     container.innerHTML = "";
     RECORDING_ENTRY_OPTIONS.forEach((option) => {
         const checked = state.recordingEntries.includes(option.id);
@@ -622,14 +803,159 @@ function renderRecordingOptions(recording = {}) {
             } else {
                 state.recordingEntries = state.recordingEntries.filter((entry) => entry !== option.id);
             }
-            byId("record-start").disabled = state.recordingEntries.length === 0;
+            renderRecordingStatusPanel(state.teleopStatus);
         };
         container.appendChild(label);
     });
-    byId("record-start").disabled = state.recordingEntries.length === 0;
 }
 
-function renderForcePanel(side, robotEntry, telemetry) {
+function hasRecordingPayload(value) {
+    if (Array.isArray(value)) {
+        return value.some((item) => item !== null && item !== undefined);
+    }
+    if (value && typeof value === "object") {
+        return Object.keys(value).length > 0;
+    }
+    return value !== null && value !== undefined;
+}
+
+function getConfiguredRemoteSerials() {
+    return (state.summary?.robot_config?.remote_robot_serials || [])
+        .map((serial) => String(serial || "").trim())
+        .filter(Boolean);
+}
+
+function areSelectedRecordingEntriesAvailable(teleopStatus) {
+    const selectedOptions = RECORDING_ENTRY_OPTIONS.filter((option) => state.recordingEntries.includes(option.id));
+    if (!selectedOptions.length) {
+        return false;
+    }
+
+    const configuredRemoteSerials = getConfiguredRemoteSerials();
+    return selectedOptions.every((option) => {
+        if (option.bucket === "image") {
+            const camera = teleopStatus?.cameras?.cameras?.[option.sourceField];
+            return !!camera?.started && Number(camera?.fps || 0) > 0;
+        }
+
+        if (!configuredRemoteSerials.length) {
+            return false;
+        }
+
+        return configuredRemoteSerials.every((serial) => {
+            const robot = teleopStatus?.ddk?.robots?.[serial];
+            const payload = robot?.[option.payload];
+            return hasRecordingPayload(payload?.[option.sourceField]);
+        });
+    });
+}
+
+function recordingStatusIconMarkup(kind) {
+    if (kind === "ready" || kind === "awaiting-save") {
+        return `<span class="recording-status__icon recording-status__icon--ready" aria-hidden="true">${CHECK_ICON_SVG}</span>`;
+    }
+    if (kind === "recording") {
+        return `
+            <span class="recording-status__icon recording-status__icon--recording" aria-hidden="true">
+                <span class="recording-live__dot recording-status__dot"></span>
+            </span>
+        `;
+    }
+    return `
+        <span class="recording-status__icon recording-status__icon--loading" aria-hidden="true">
+            <span class="loading-wheel">${LOADING_WHEEL_SEGMENTS}</span>
+        </span>
+    `;
+}
+
+function buildRecordingStatusModel(teleopStatus) {
+    const recording = teleopStatus?.recording || {};
+    const active = !!recording.active;
+    const awaitingSave = !!recording.awaiting_save;
+    const frames = Number(recording.frames_captured || 0);
+    const fps = Number(recording.fps || 0);
+    const seconds = fps > 0 ? frames / fps : 0;
+
+    if (active) {
+        return {
+            kind: "recording",
+            text: `${formatElapsed(seconds)} · ${frames} frames captured`,
+            animated: false,
+            canStart: false,
+            canStop: true,
+        };
+    }
+
+    if (awaitingSave) {
+        return {
+            kind: "awaiting-save",
+            text: `Awaiting save · ${formatElapsed(seconds)} · ${frames} frames captured`,
+            animated: false,
+            canStart: false,
+            canStop: false,
+        };
+    }
+
+    if (state.ui.recordingStartBusy || state.ui.teleopBootstrapBusy || !state.teleopBootstrapped || !teleopStatus) {
+        return {
+            kind: "initializing",
+            text: "Initializing recorder",
+            animated: true,
+            canStart: false,
+            canStop: false,
+        };
+    }
+
+    if (state.recordingEntries.length > 0 && areSelectedRecordingEntriesAvailable(teleopStatus)) {
+        return {
+            kind: "ready",
+            text: "Ready to record",
+            animated: false,
+            canStart: true,
+            canStop: false,
+        };
+    }
+
+    return {
+        kind: "awaiting-data",
+        text: "Awaiting data",
+        animated: true,
+        canStart: false,
+        canStop: false,
+    };
+}
+
+function renderRecordingStatusPanel(teleopStatus) {
+    const status = byId("recording-status");
+    if (!status) {
+        return;
+    }
+
+    const model = buildRecordingStatusModel(teleopStatus);
+    status.className = `recording-status ${model.animated ? "recording-status--breathing" : ""}`.trim();
+    status.innerHTML = `
+        ${recordingStatusIconMarkup(model.kind)}
+        <span class="recording-status__text">${model.text}</span>
+    `;
+
+    byId("record-start").disabled = !model.canStart;
+    byId("record-stop").disabled = !model.canStop;
+}
+
+function updateTeleopControlButtons(teleopStatus) {
+    const teleop = teleopStatus?.teleop || {};
+    const teleopReady = !!teleop.initialized && !teleop.started && !teleop.error && !teleop.fault;
+    const teleopResetBusy = !!state.ui.serviceResetBusy.teleop_service;
+    const canStart = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
+    const canStop = !!teleop.started || state.ui.teleopHomeBusy;
+    const canHome = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
+
+    byId("teleop-start").disabled = !canStart;
+    byId("teleop-stop").disabled = !canStop;
+    byId("teleop-home").disabled = !canHome;
+}
+
+function renderForcePanel(side, robotEntry, telemetry, history) {
     const panel = byId(`${side}-force-panel`);
     if (!panel) {
         return;
@@ -637,24 +963,27 @@ function renderForcePanel(side, robotEntry, telemetry) {
 
     const geometry = buildVectorGeometry(side, telemetry.force);
     const title = `${side.toUpperCase()} FORCE VECTOR`;
-    const valueClass = geometry.magnitude === null
-        ? "telemetry-card__value telemetry-card__value--pending"
-        : "telemetry-card__value";
+    const fpsMarkup = buildFpsBadgeMarkup(
+        computeTelemetryStreamFps(history, "force", telemetry.force),
+        TELEMETRY_FPS_OK_MIN,
+    );
     panel.innerHTML = `
         <div class="telemetry-card__header">
             <div>
                 <span class="eyebrow">${title}</span>
             </div>
-            <strong class="${valueClass}">${geometry.magnitude === null ? "Awaiting data" : `${geometry.magnitude.toFixed(1)} N`}</strong>
+            ${fpsMarkup}
         </div>
-        <div class="vector-panel ${geometry.magnitude !== null ? "vector-panel--live" : ""}">
-            <svg class="vector-panel__svg" viewBox="0 0 240 160" aria-hidden="true">
-                <line class="vector-panel__shaft" x1="${geometry.baseX}" y1="${geometry.baseY}" x2="${geometry.tipX}" y2="${geometry.tipY}"></line>
-                <polygon class="vector-panel__head" points="${geometry.points}"></polygon>
-            </svg>
-            <div class="vector-panel__meta">
-                <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
-            </div>
+        <div class="vector-panel ${geometry.magnitude !== null ? "vector-panel--live" : "vector-panel--empty"}">
+            ${geometry.magnitude === null ? buildAwaitingDataMarkup() : `
+                <svg class="vector-panel__svg" viewBox="0 0 240 160" aria-hidden="true">
+                    <line class="vector-panel__shaft" x1="${geometry.baseX}" y1="${geometry.baseY}" x2="${geometry.tipX}" y2="${geometry.tipY}"></line>
+                    <polygon class="vector-panel__head" points="${geometry.points}"></polygon>
+                </svg>
+                <div class="vector-panel__meta">
+                    <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
+                </div>
+            `}
         </div>
     `;
 }
@@ -759,31 +1088,32 @@ function renderTrendGraph(side, kind, history, currentVector) {
 
     const meta = TELEMETRY_SERIES[kind];
     const title = `${side.toUpperCase()} ${kind === "force" ? "CARTESIAN FORCE" : "CARTESIAN MOMENT"}`;
-    const scale = computeTelemetryScale(history, kind);
+    const hasLiveData = Array.isArray(currentVector);
+    const scale = hasLiveData
+        ? computeTelemetryScale(history, kind)
+        : { min: -1, max: 1, hasData: false };
     const paths = meta.colors.map((color, index) => {
         const d = buildTrendPath(history, kind, index, scale);
         return d ? `<path class="trend-chart__line" style="--trend-color:${color}" d="${d}"></path>` : "";
     }).join("");
-    const statusText = scale.hasData
-        ? `Auto scale ${scale.min.toFixed(1)} to ${scale.max.toFixed(1)} ${meta.units}`
-        : "Awaiting data";
-    const valueClass = scale.hasData
-        ? "telemetry-card__value"
-        : "telemetry-card__value telemetry-card__value--pending";
+    const fpsMarkup = buildFpsBadgeMarkup(
+        computeTelemetryStreamFps(history, kind, currentVector),
+        TELEMETRY_FPS_OK_MIN,
+    );
 
     panel.innerHTML = `
         <div class="telemetry-card__header">
             <div>
                 <span class="eyebrow">${title}</span>
             </div>
-            <strong class="${valueClass}">${statusText}</strong>
+            ${fpsMarkup}
         </div>
         <div class="trend-chart">
             <svg class="trend-chart__svg" viewBox="0 0 960 540" aria-hidden="true">
                 ${buildTrendGrid(scale)}
                 ${paths}
             </svg>
-            ${scale.hasData ? "" : `<div class="trend-chart__empty">Awaiting data</div>`}
+            ${scale.hasData ? "" : `<div class="trend-chart__empty">${buildAwaitingDataMarkup()}</div>`}
         </div>
         <div class="trend-chart__legend">
             ${meta.labels.map((label, index) => `
@@ -797,7 +1127,7 @@ function renderTrendGraph(side, kind, history, currentVector) {
     `;
 }
 
-async function controlHomeService(serviceName, action) {
+async function controlHomeService(serviceName, action, options = {}) {
     const result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
     state.summary.services = result.services;
     renderHomeStatus();
@@ -809,7 +1139,9 @@ async function controlHomeService(serviceName, action) {
         ddk: "Robot data service",
         cameras: "Cameras",
     };
-    showToast(`${labels[serviceName] || serviceName} ${action === "connect" ? "connected" : "disconnected"}.`);
+    if (!options.silentToast) {
+        showToast(`${labels[serviceName] || serviceName} ${action === "connect" ? "connected" : "disconnected"}.`);
+    }
 }
 
 function renderTeleop() {
@@ -817,6 +1149,7 @@ function renderTeleop() {
         teleop: { started: false, initialized: false, error: null },
         ddk: { robots: {}, errors: {} },
         cameras: { cameras: {}, errors: {} },
+        services: state.summary?.services || {},
         recording: {
             active: false,
             awaiting_save: false,
@@ -839,8 +1172,8 @@ function renderTeleop() {
         appendTelemetrySample("left", leftTelemetry);
         appendTelemetrySample("right", rightTelemetry);
     }
-    renderForcePanel("left", leftRobotEntry, leftTelemetry);
-    renderForcePanel("right", rightRobotEntry, rightTelemetry);
+    renderForcePanel("left", leftRobotEntry, leftTelemetry, state.telemetryHistory.left);
+    renderForcePanel("right", rightRobotEntry, rightTelemetry, state.telemetryHistory.right);
     renderTrendGraph("left", "force", state.telemetryHistory.left, leftTelemetry.force);
     renderTrendGraph("left", "moment", state.telemetryHistory.left, leftTelemetry.moment);
     renderTrendGraph("right", "force", state.telemetryHistory.right, rightTelemetry.force);
@@ -848,22 +1181,13 @@ function renderTeleop() {
 
     const grid = byId("teleop-status-grid");
     grid.innerHTML = "";
-    const ddkRobotCount = Object.keys(teleopStatus.ddk.robots || {}).length;
-    const ddkHasIssues = Object.keys(teleopStatus.ddk.errors || {}).length > 0;
-    const runningCameraCount = Object.values(cameras).filter((entry) => entry.started).length;
-    const cameraHasIssues = Object.keys(teleopStatus.cameras.errors || {}).length > 0;
-    [
-        [
-            "Teleoperation",
-            teleopStatus.teleop.started ? "Running" : teleopStatus.teleop.initialized ? "Ready" : "Initializing",
-            teleopStatus.teleop.started || teleopStatus.teleop.initialized ? "ok" : "neutral",
-        ],
-        ["Robot Data Streams", ddkRobotCount, ddkRobotCount ? "ok" : ddkHasIssues ? "error" : "neutral"],
-        ["Camera Feeds", runningCameraCount, runningCameraCount ? "ok" : cameraHasIssues ? "error" : "neutral"],
-    ].forEach(([label, value, tone]) => {
-        grid.appendChild(createStatusCard(label, value, tone));
+    const services = teleopStatus.services || state.summary?.services || {};
+    ["teleop_service", "robot_data_service", "cameras"].forEach((serviceKey) => {
+        grid.appendChild(createTeleopSystemCard(serviceKey, services[serviceKey] || {}));
     });
-    grid.insertBefore(createRecordingCard(teleopStatus.recording || {}), grid.children[1] || null);
+
+    renderRecordingStatusPanel(teleopStatus);
+    updateTeleopControlButtons(teleopStatus);
 
     byId("record-save").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
     byId("record-discard").classList.toggle("hidden", !teleopStatus.recording.awaiting_save);
@@ -1219,14 +1543,16 @@ async function bootstrapTeleoperation() {
     if (state.teleopBootstrapped) {
         return;
     }
+    setTeleopBootstrapBusy(true);
     setComponentLoading("teleop-cameras-wrap", true, "Initializing cameras");
     try {
         await api("/teleop/bootstrap", { method: "POST" });
         state.teleopBootstrapped = true;
+        await refreshTeleopStatus();
     } finally {
         setComponentLoading("teleop-cameras-wrap", false);
+        setTeleopBootstrapBusy(false);
     }
-    await refreshTeleopStatus();
     window.clearInterval(state.intervals.teleop);
     state.intervals.teleop = window.setInterval(() => {
         if (state.activeView === "teleoperation") {
@@ -1265,7 +1591,10 @@ function bindGlobalEvents() {
         });
     });
 
-    byId("teleop-refresh").onclick = () => refreshTeleopStatusWithIndicator().catch((error) => showToast(error.message, true));
+    const refreshButton = byId("teleop-refresh");
+    if (refreshButton) {
+        refreshButton.onclick = () => refreshTeleopStatusWithIndicator().catch((error) => showToast(error.message, true));
+    }
     byId("teleop-start").onclick = async () => {
         try {
             await api("/teleop/start", { method: "POST" });
@@ -1284,6 +1613,7 @@ function bindGlobalEvents() {
     };
     byId("teleop-home").onclick = async () => {
         try {
+            setTeleopHomeBusy(true);
             const result = await api("/teleop/home", { method: "POST" });
             if (result.warnings?.length) {
                 showToast(result.warnings.join(" | "), true);
@@ -1292,6 +1622,13 @@ function bindGlobalEvents() {
             }
         } catch (error) {
             showToast(error.message, true);
+        } finally {
+            try {
+                await refreshTeleopStatus();
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            setTeleopHomeBusy(false);
         }
     };
     byId("record-start").onclick = async () => {
@@ -1300,6 +1637,7 @@ function bindGlobalEvents() {
                 showToast("Select at least one recording entry.", true);
                 return;
             }
+            setRecordingStartBusy(true);
             await api("/teleop/recording/start", {
                 method: "POST",
                 body: JSON.stringify({
@@ -1307,9 +1645,15 @@ function bindGlobalEvents() {
                     recording_entries: state.recordingEntries,
                 }),
             });
-            await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);
+        } finally {
+            try {
+                await refreshTeleopStatus();
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            setRecordingStartBusy(false);
         }
     };
     byId("record-stop").onclick = async () => {

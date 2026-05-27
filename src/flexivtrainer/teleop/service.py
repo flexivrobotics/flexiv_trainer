@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 from typing import Any
+from typing import Callable
+import time
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.observability import describe_exception
 
 try:
-    from flexivtdk import TransparentCartesianTeleopLAN
+    import flexivtdk
 except (
     ImportError
 ):  # pragma: no cover - dependency availability is environment-specific
-    TransparentCartesianTeleopLAN = None
+    flexivtdk = None
+
+TransparentCartesianTeleopLAN = (
+    getattr(flexivtdk, "TransparentCartesianTeleopLAN", None)
+    if flexivtdk is not None
+    else None
+)
 
 
 @dataclass
@@ -38,6 +45,120 @@ class TeleopService:
         self._error: str | None = None
         self._initialized = False
 
+    def _instance_provider_results(self, provider: Any) -> list[Any]:
+        if not callable(provider):
+            return []
+
+        try:
+            result = provider()
+        except TypeError:
+            result = None
+        except Exception:
+            result = None
+        else:
+            return [result]
+
+        results: list[Any] = []
+        for index in range(8):
+            try:
+                result = provider(index)
+            except TypeError:
+                break
+            except Exception:
+                break
+
+            results.append(result)
+        return results
+
+    def _extract_robot_handles(self, value: Any) -> list[Any]:
+        handles: list[Any] = []
+        stack = [value]
+        seen: set[int] = set()
+
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+
+            if callable(getattr(current, "ExecutePrimitive", None)):
+                handles.append(current)
+                continue
+
+            if isinstance(current, dict):
+                stack.extend(current.values())
+                continue
+
+            if isinstance(current, (list, tuple, set)):
+                stack.extend(current)
+                continue
+
+            for attr_name in (
+                "robot",
+                "robots",
+                "leader",
+                "follower",
+                "leader_robot",
+                "follower_robot",
+                "rdk_robot",
+                "rdk_robots",
+            ):
+                if hasattr(current, attr_name):
+                    stack.append(getattr(current, attr_name))
+
+        return handles
+
+    def _home_robot_handles(self) -> list[Any]:
+        if self._controller is None:
+            return []
+
+        provider_results: list[Any] = [self._controller]
+        provider_results.extend(
+            self._instance_provider_results(
+                getattr(self._controller, "instances", None)
+            )
+        )
+
+        class_provider = getattr(TransparentCartesianTeleopLAN, "instances", None)
+        if class_provider is not None:
+            provider_results.extend(self._instance_provider_results(class_provider))
+
+        robots = self._extract_robot_handles(provider_results)
+        deduped: list[Any] = []
+        seen: set[int] = set()
+        for robot in robots:
+            marker = id(robot)
+            if marker in seen:
+                continue
+            deduped.append(robot)
+            seen.add(marker)
+        return deduped
+
+    def _wait_for_home_completion(self, robot: Any, timeout_s: float = 60.0) -> None:
+        states_reader = getattr(robot, "primitive_states", None) or getattr(
+            robot, "primitiveStates", None
+        )
+        if not callable(states_reader):
+            return
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            states = states_reader()
+            reached_target = (
+                states.get("reachedTarget") if isinstance(states, dict) else None
+            )
+            if isinstance(reached_target, list):
+                reached_target = reached_target[0] if reached_target else False
+            if reached_target:
+                return
+            time.sleep(0.2)
+
+        raise TimeoutError("Timed out while waiting for Home primitive to finish")
+
     def initialize(self) -> TeleopSnapshot:
         robot_pairs_config = self._get_robot_pairs()
         if TransparentCartesianTeleopLAN is None:
@@ -59,8 +180,9 @@ class TeleopService:
                     robot_pairs_sn=robot_pairs,
                     network_interface_whitelist=self._settings.network_interface_whitelist,
                 )
-                if hasattr(self._controller, "Init"):
-                    self._controller.Init()
+                init_method = getattr(self._controller, "Init", None)
+                if callable(init_method):
+                    init_method()
                 self._initialized = True
                 self._error = None
             except Exception as exc:  # pragma: no cover - hardware specific
@@ -122,43 +244,43 @@ class TeleopService:
         if self._controller is None:
             return {"ok": False, "error": "Teleoperation controller is not initialized"}
 
-        warnings: list[str] = []
-        for index, pair in enumerate(self._get_robot_pairs()):
-            if pair.leader_home_posture:
-                try:
-                    self._controller.SetLeaderNullSpacePosture(pair.leader_home_posture)
-                except TypeError:
-                    try:
-                        self._controller.SetLeaderNullSpacePosture(
-                            index, pair.leader_home_posture
-                        )
-                    except Exception as exc:  # pragma: no cover - hardware specific
-                        warnings.append(
-                            f"Leader home posture failed for pair {index}: {describe_exception(exc)}"
-                        )
-                except Exception as exc:  # pragma: no cover - hardware specific
-                    warnings.append(
-                        f"Leader home posture failed for pair {index}: {describe_exception(exc)}"
-                    )
+        robots = self._home_robot_handles()
+        if not robots:
+            return {
+                "ok": False,
+                "error": "Unable to access robot instances from TransparentCartesianTeleopLAN.instances()",
+            }
 
-            if pair.follower_home_posture:
+        warnings: list[str] = []
+        for index, robot in enumerate(robots):
+            primitive_sent = False
+            last_error: Exception | None = None
+            for primitive_name in ("Home", "Home()"):
                 try:
-                    self._controller.SetFollowerNullSpacePosture(
-                        pair.follower_home_posture
-                    )
+                    robot.ExecutePrimitive(primitive_name, dict())
+                    primitive_sent = True
+                    break
                 except TypeError:
                     try:
-                        self._controller.SetFollowerNullSpacePosture(
-                            index, pair.follower_home_posture
-                        )
+                        robot.ExecutePrimitive(primitive_name)
+                        primitive_sent = True
+                        break
                     except Exception as exc:  # pragma: no cover - hardware specific
-                        warnings.append(
-                            f"Follower home posture failed for pair {index}: {describe_exception(exc)}"
-                        )
+                        last_error = exc
                 except Exception as exc:  # pragma: no cover - hardware specific
-                    warnings.append(
-                        f"Follower home posture failed for pair {index}: {describe_exception(exc)}"
-                    )
+                    last_error = exc
+            if not primitive_sent:
+                warnings.append(
+                    f"Home primitive failed for robot {index}: {describe_exception(last_error or RuntimeError('Home primitive invocation failed'))}"
+                )
+                continue
+
+            try:
+                self._wait_for_home_completion(robot)
+            except Exception as exc:  # pragma: no cover - hardware specific
+                warnings.append(
+                    f"Home completion failed for robot {index}: {describe_exception(exc)}"
+                )
 
         return {"ok": not warnings, "warnings": warnings}
 

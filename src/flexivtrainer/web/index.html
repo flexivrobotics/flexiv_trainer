@@ -97,6 +97,13 @@
             <section class="view" data-view="teleoperation">
                 <div class="teleop-shell panel--wide">
                     <div class="teleop-sidebar teleop-sidebar--left">
+                        <section class="panel panel--soft control-panel teleop-status-panel">
+                            <div class="panel-header">
+                                <h2>System Status</h2>
+                            </div>
+                            <div class="status-grid" id="teleop-status-grid"></div>
+                        </section>
+
                         <section class="panel panel--soft control-panel">
                             <div class="panel-header">
                                 <h2>Teleoperation Control</h2>
@@ -108,20 +115,6 @@
                             </div>
                         </section>
 
-                        <section class="panel panel--soft control-panel">
-                            <div class="panel-header">
-                                <h2>Episode Recording</h2>
-                            </div>
-                            <div class="recording-option-list" id="recording-options"></div>
-                            <div class="control-stack">
-                                <button class="start-button" id="record-start" type="button">Start</button>
-                                <button class="stop-button" id="record-stop" type="button">Stop</button>
-                                <button class="secondary-button hidden" id="record-save" type="button">Save
-                                    Episode</button>
-                                <button class="secondary-button hidden" id="record-discard" type="button">Discard
-                                    Episode</button>
-                            </div>
-                        </section>
                     </div>
 
                     <section class="panel teleop-main">
@@ -173,20 +166,21 @@
                         </div>
                     </section>
 
-                    <section class="panel panel--soft control-panel teleop-status-panel teleop-sidebar">
+                    <section class="panel panel--soft control-panel teleop-sidebar teleop-sidebar--right">
                         <div class="panel-header">
-                            <h2>Module Status</h2>
-                            <button class="secondary-button icon-button" id="teleop-refresh" type="button"
-                                aria-label="Refresh module status" title="Refresh module status">
-                                <svg class="icon-refresh" viewBox="0 0 24 24" aria-hidden="true">
-                                    <path d="M19 8a7 7 0 1 0 1.5 6.9" fill="none" stroke="currentColor"
-                                        stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9"></path>
-                                    <path d="M19 4v4h-4" fill="none" stroke="currentColor" stroke-linecap="round"
-                                        stroke-linejoin="round" stroke-width="1.9"></path>
-                                </svg>
-                            </button>
+                            <h2>Episode Recording</h2>
                         </div>
-                        <div class="status-grid" id="teleop-status-grid"></div>
+                        <div class="recording-option-list" id="recording-options"></div>
+                        <div class="recording-divider" aria-hidden="true"></div>
+                        <div class="recording-status" id="recording-status"></div>
+                        <div class="control-stack">
+                            <button class="start-button" id="record-start" type="button">Start</button>
+                            <button class="stop-button" id="record-stop" type="button">Stop</button>
+                            <button class="secondary-button hidden" id="record-save" type="button">Save
+                                Episode</button>
+                            <button class="secondary-button hidden" id="record-discard" type="button">Discard
+                                Episode</button>
+                        </div>
                     </section>
                 </div>
             </section>

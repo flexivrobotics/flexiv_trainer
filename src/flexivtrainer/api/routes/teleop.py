@@ -68,6 +68,7 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
         "ddk": runtime.ddk.snapshot(initialize=False),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
+        "services": runtime.service_summary(),
     }
 
 
