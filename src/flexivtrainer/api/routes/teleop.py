@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from flexivtrainer.data.lerobot_io import (
+    DEFAULT_RECORDING_ENTRY_KEYS,
+    resolve_recording_entries,
+)
 from flexivtrainer.observability import error, info, ok, warn
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
@@ -12,6 +16,9 @@ router = APIRouter(prefix="/teleop", tags=["teleop"])
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
+    recording_entries: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_RECORDING_ENTRY_KEYS)
+    )
 
 
 def _bootstrap_issue_detail(result: dict) -> str | None:
@@ -106,7 +113,16 @@ def start_recording(
     request: StartRecordingRequest,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
-    result = runtime.recording.start(task=request.task, fps=request.fps)
+    try:
+        recording_entries = resolve_recording_entries(request.recording_entries)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result = runtime.recording.start(
+        task=request.task,
+        fps=request.fps,
+        recording_entries=recording_entries,
+    )
     ok(
         "Recording started",
         " ".join(
@@ -114,6 +130,7 @@ def start_recording(
                 f"episode={result.get('episode_name', 'unknown')}",
                 f"fps={result.get('fps', 'unknown')}",
                 f"task={request.task}",
+                f"entries={len(recording_entries)}",
             ]
         ),
     )

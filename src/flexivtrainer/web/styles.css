@@ -224,6 +224,12 @@ button:disabled {
     color: var(--muted);
 }
 
+.view[data-view="home"] .panel>h2,
+.view[data-view="home"] .panel-header h2,
+#training-content .panel-header h2 {
+    font-size: 1.18rem;
+}
+
 .kv-list {
     display: grid;
     gap: 0.8rem;
@@ -467,13 +473,13 @@ button:disabled {
 }
 
 .vector-panel__shaft {
-    stroke: #8de0ff;
-    stroke-width: 10;
+    stroke: #f0b97d;
+    stroke-width: 7;
     stroke-linecap: round;
 }
 
 .vector-panel__head {
-    fill: #8de0ff;
+    fill: #f0b97d;
 }
 
 .vector-panel__meta {
@@ -578,7 +584,7 @@ button:disabled {
 
 .control-panel .panel-header h2,
 .teleop-status-panel .panel-header h2 {
-    font-size: 0.96rem;
+    font-size: 1.08rem;
     margin: 0;
 }
 
@@ -592,10 +598,80 @@ button:disabled {
     gap: 0.55rem;
 }
 
+.recording-option-list {
+    display: grid;
+    gap: 0.48rem;
+    margin-bottom: 0.85rem;
+}
+
+.recording-option {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: start;
+    gap: 0.6rem;
+    border: 1px solid rgba(72, 103, 125, 0.14);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.42);
+    padding: 0.6rem 0.72rem;
+}
+
+.recording-option input {
+    margin: 0.14rem 0 0;
+}
+
+.recording-option__text {
+    display: grid;
+    gap: 0.18rem;
+}
+
+.recording-option__label {
+    font-size: 0.79rem;
+    line-height: 1.32;
+    word-break: break-word;
+}
+
+.recording-option__hint {
+    color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.28;
+}
+
+.recording-option--disabled {
+    opacity: 0.58;
+}
+
 .control-stack button {
     width: 100%;
     font-size: 1rem;
     padding: 0.58rem 0.9rem;
+}
+
+.icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.8rem;
+    height: 2.8rem;
+    padding: 0;
+}
+
+.icon-refresh {
+    width: 1.1rem;
+    height: 1.1rem;
+}
+
+.icon-button--spinning .icon-refresh {
+    animation: icon-spin 0.8s linear infinite;
+}
+
+@keyframes icon-spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 #teleop-status-grid {

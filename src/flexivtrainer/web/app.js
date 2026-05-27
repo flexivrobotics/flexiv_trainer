@@ -29,13 +29,58 @@ const state = {
     timers: {
         robotConfigSave: null,
     },
+    ui: {
+        teleopRefreshBusy: false,
+    },
     telemetryHistory: {
         left: [],
         right: [],
     },
+    recordingEntries: [],
 };
 
 const TELEMETRY_HISTORY_LIMIT = 90;
+const RECORDING_ENTRY_OPTIONS = [
+    {
+        id: "observation.images.ego",
+        label: "observation.images.ego",
+    },
+    {
+        id: "observation.images.left_wrist",
+        label: "observation.images.left_wrist",
+    },
+    {
+        id: "observation.images.right_wrist",
+        label: "observation.images.right_wrist",
+    },
+    {
+        id: "observation.state.tcp_pose",
+        label: "observation.state.tcp_pose",
+    },
+    {
+        id: "observation.state.tcp_twist",
+        label: "observation.state.tcp_twist",
+    },
+    {
+        id: "observation.state.tcp_wrench",
+        label: "observation.state.tcp_wrench",
+    },
+    {
+        id: "action.tcp_pose",
+        label: "action.tcp_pose",
+    },
+    {
+        id: "action.tcp_twist",
+        label: "action.tcp_twist",
+    },
+    {
+        id: "action.tcp_wrench",
+        label: "action.tcp_wrench",
+    },
+];
+const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
+state.recordingEntries = [...DEFAULT_RECORDING_ENTRY_IDS];
+
 const TELEMETRY_SERIES = {
     force: {
         title: "Cartesian Force",
@@ -164,6 +209,16 @@ function createRecordingCard(recording) {
     const value = awaitingSave ? `${frames} frames captured` : "Idle";
     card.innerHTML = `<span class="eyebrow">Recording</span><h3>${value}</h3>`;
     return card;
+}
+
+function setTeleopRefreshBusy(busy) {
+    state.ui.teleopRefreshBusy = busy;
+    const button = byId("teleop-refresh");
+    if (!button) {
+        return;
+    }
+    button.classList.toggle("icon-button--spinning", busy);
+    button.setAttribute("aria-busy", busy ? "true" : "false");
 }
 
 function setActiveView(view) {
@@ -542,6 +597,38 @@ function renderCameraFps(elementId, camera) {
     `;
 }
 
+function renderRecordingOptions(recording = {}) {
+    const container = byId("recording-options");
+    if (!container) {
+        return;
+    }
+
+    const locked = !!recording.active || !!recording.awaiting_save;
+    container.innerHTML = "";
+    RECORDING_ENTRY_OPTIONS.forEach((option) => {
+        const checked = state.recordingEntries.includes(option.id);
+        const label = document.createElement("label");
+        label.className = `recording-option ${locked ? "recording-option--disabled" : ""}`;
+        label.innerHTML = `
+            <input type="checkbox" ${checked ? "checked" : ""} ${locked ? "disabled" : ""} />
+            <span class="recording-option__text">
+                <span class="recording-option__label">${option.label}</span>
+            </span>
+        `;
+        const input = label.querySelector("input");
+        input.onchange = () => {
+            if (input.checked) {
+                state.recordingEntries = [...state.recordingEntries, option.id];
+            } else {
+                state.recordingEntries = state.recordingEntries.filter((entry) => entry !== option.id);
+            }
+            byId("record-start").disabled = state.recordingEntries.length === 0;
+        };
+        container.appendChild(label);
+    });
+    byId("record-start").disabled = state.recordingEntries.length === 0;
+}
+
 function renderForcePanel(side, robotEntry, telemetry) {
     const panel = byId(`${side}-force-panel`);
     if (!panel) {
@@ -737,6 +824,8 @@ function renderTeleop() {
         },
     };
 
+    renderRecordingOptions(teleopStatus.recording || {});
+
     const cameras = teleopStatus.cameras?.cameras || {};
     renderCameraFps("ego-fps", cameras.ego);
     renderCameraFps("left-wrist-fps", cameras.left_wrist);
@@ -800,6 +889,15 @@ function renderTeleop() {
 async function refreshTeleopStatus() {
     state.teleopStatus = await api("/teleop/status");
     renderTeleop();
+}
+
+async function refreshTeleopStatusWithIndicator() {
+    setTeleopRefreshBusy(true);
+    try {
+        await refreshTeleopStatus();
+    } finally {
+        setTeleopRefreshBusy(false);
+    }
 }
 
 function renderTraining() {
@@ -1167,7 +1265,7 @@ function bindGlobalEvents() {
         });
     });
 
-    byId("teleop-refresh").onclick = () => refreshTeleopStatus().catch((error) => showToast(error.message, true));
+    byId("teleop-refresh").onclick = () => refreshTeleopStatusWithIndicator().catch((error) => showToast(error.message, true));
     byId("teleop-start").onclick = async () => {
         try {
             await api("/teleop/start", { method: "POST" });
@@ -1198,7 +1296,17 @@ function bindGlobalEvents() {
     };
     byId("record-start").onclick = async () => {
         try {
-            await api("/teleop/recording/start", { method: "POST", body: JSON.stringify({ task: "Dual-arm Flexiv teleoperation demonstration" }) });
+            if (!state.recordingEntries.length) {
+                showToast("Select at least one recording entry.", true);
+                return;
+            }
+            await api("/teleop/recording/start", {
+                method: "POST",
+                body: JSON.stringify({
+                    task: "Dual-arm Flexiv teleoperation demonstration",
+                    recording_entries: state.recordingEntries,
+                }),
+            });
             await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);

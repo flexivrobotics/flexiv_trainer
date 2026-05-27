@@ -112,6 +112,7 @@
                             <div class="panel-header">
                                 <h2>Episode Recording</h2>
                             </div>
+                            <div class="recording-option-list" id="recording-options"></div>
                             <div class="control-stack">
                                 <button class="start-button" id="record-start" type="button">Start</button>
                                 <button class="stop-button" id="record-stop" type="button">Stop</button>
@@ -175,7 +176,15 @@
                     <section class="panel panel--soft control-panel teleop-status-panel teleop-sidebar">
                         <div class="panel-header">
                             <h2>Module Status</h2>
-                            <button class="secondary-button" id="teleop-refresh" type="button">Refresh</button>
+                            <button class="secondary-button icon-button" id="teleop-refresh" type="button"
+                                aria-label="Refresh module status" title="Refresh module status">
+                                <svg class="icon-refresh" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M19 8a7 7 0 1 0 1.5 6.9" fill="none" stroke="currentColor"
+                                        stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9"></path>
+                                    <path d="M19 4v4h-4" fill="none" stroke="currentColor" stroke-linecap="round"
+                                        stroke-linejoin="round" stroke-width="1.9"></path>
+                                </svg>
+                            </button>
                         </div>
                         <div class="status-grid" id="teleop-status-grid"></div>
                     </section>
