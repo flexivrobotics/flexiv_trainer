@@ -327,10 +327,30 @@ class RuntimeManager:
         }
         stages.append({"stage": "force_overlay", "progress": 100, "detail": overlay})
 
+        ddk_robots = ddk.get("robots") or {}
+        camera_states = cameras.get("cameras") or {}
+        teleop_ready = (
+            bool(teleop.get("available"))
+            and bool(teleop.get("initialized"))
+            and not teleop.get("error")
+            and not teleop.get("fault")
+        )
+        ddk_ready = (
+            bool(ddk.get("available"))
+            and bool(ddk.get("configured"))
+            and bool(ddk_robots)
+            and not ddk.get("errors")
+            and all(bool(robot.get("connected")) for robot in ddk_robots.values())
+        )
+        cameras_ready = (
+            bool(cameras.get("available"))
+            and bool(camera_states)
+            and not cameras.get("errors")
+            and all(bool(camera.get("started")) for camera in camera_states.values())
+        )
+
         return {
-            "ready": not teleop.get("error")
-            and not ddk["errors"]
-            and self.cameras.available(),
+            "ready": teleop_ready and ddk_ready and cameras_ready,
             "stages": stages,
             "recording": self.recording.status(),
         }

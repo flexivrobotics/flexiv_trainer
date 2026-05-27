@@ -87,14 +87,37 @@ class RealSenseService:
         runtime.last_frame_time = None
         runtime.fps = 0.0
 
+    def _resolve_runtime_serial(
+        self, runtime: CameraRuntime, available_serials: list[str]
+    ) -> str | None:
+        serial = runtime.config.device_serial or runtime.actual_serial
+        if serial:
+            if serial in available_serials:
+                available_serials.remove(serial)
+                return serial
+            runtime.actual_serial = serial
+            self._errors[runtime.config.name] = (
+                f"Camera serial {serial} is not detected"
+            )
+            return None
+
+        if not available_serials:
+            runtime.actual_serial = None
+            self._errors[runtime.config.name] = (
+                "No RealSense camera is available for this stream"
+            )
+            return None
+
+        return available_serials.pop(0)
+
     def _start_runtime(
         self, runtime: CameraRuntime, available_serials: list[str]
     ) -> None:
-        serial = runtime.config.device_serial or runtime.actual_serial
-        if serial and serial in available_serials:
-            available_serials.remove(serial)
-        elif not serial and available_serials:
-            serial = available_serials.pop(0)
+        serial = self._resolve_runtime_serial(runtime, available_serials)
+        if serial is None:
+            runtime.pipeline = None
+            runtime.started = False
+            return
 
         pipeline = rs.pipeline()
         config = rs.config()

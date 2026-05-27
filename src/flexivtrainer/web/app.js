@@ -56,6 +56,7 @@ const state = {
 
 const TELEMETRY_HISTORY_LIMIT = 90;
 const TELEMETRY_FPS_OK_MIN = 0.55;
+const TELEOP_BOOTSTRAP_TIMEOUT_MS = 4000;
 const RECORDING_ENTRY_OPTIONS = [
     {
         id: "observation.images.ego",
@@ -122,6 +123,11 @@ const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => opti
 const SERVICE_RESET_TARGETS = {
     teleop_service: "teleop",
     robot_data_service: "ddk",
+    cameras: "cameras",
+};
+const SERVICE_NAME_TO_KEY = {
+    teleop: "teleop_service",
+    ddk: "robot_data_service",
     cameras: "cameras",
 };
 const SERVICE_RESET_MESSAGES = {
@@ -262,15 +268,34 @@ function pushNotification(message, level = "info") {
     renderNotificationCenter();
 }
 
-async function api(path, init) {
-    const response = await fetch(path, {
-        headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
-        ...init,
-    });
-    if (!response.ok) {
-        throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+async function api(path, init, options = {}) {
+    const timeoutMs = Number(options.timeoutMs || 0);
+    const timeoutMessage = options.timeoutMessage || "Request timed out";
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const timer = controller
+        ? window.setTimeout(() => controller.abort(), timeoutMs)
+        : null;
+
+    try {
+        const response = await fetch(path, {
+            headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+            ...init,
+            signal: init?.signal || controller?.signal,
+        });
+        if (!response.ok) {
+            throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+        }
+        return response.json();
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            throw new Error(timeoutMessage);
+        }
+        throw error;
+    } finally {
+        if (timer !== null) {
+            window.clearTimeout(timer);
+        }
     }
-    return response.json();
 }
 
 function showToast(message, isError = false) {
@@ -340,6 +365,30 @@ async function resetTeleopSystemService(serviceKey) {
     } finally {
         setServiceResetBusy(serviceKey, false);
     }
+}
+
+function stopTeleopPolling() {
+    if (state.intervals.teleop !== null) {
+        window.clearInterval(state.intervals.teleop);
+        state.intervals.teleop = null;
+    }
+}
+
+function startTeleopPolling() {
+    if (state.intervals.teleop !== null) {
+        return;
+    }
+
+    state.intervals.teleop = window.setInterval(() => {
+        if (state.activeView !== "teleoperation") {
+            return;
+        }
+
+        refreshTeleopStatus().catch((error) => {
+            stopTeleopPolling();
+            showToast(error.message, true);
+        });
+    }, 1500);
 }
 
 function createTeleopSystemCard(serviceKey, service = {}) {
@@ -1294,8 +1343,18 @@ async function controlHomeService(serviceName, action, options = {}) {
     const result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
     state.summary.services = result.services;
     renderHomeStatus();
+    const serviceKey = SERVICE_NAME_TO_KEY[serviceName];
+    const serviceStatus = serviceKey ? result.services?.[serviceKey] : null;
+    const connectSucceeded = action !== "connect" || serviceStatus?.tone === "ok";
     if (state.activeView === "teleoperation") {
         await refreshTeleopStatus();
+        if (action === "connect") {
+            if (connectSucceeded) {
+                startTeleopPolling();
+            } else {
+                stopTeleopPolling();
+            }
+        }
     }
     const labels = {
         teleop: "Teleop service",
@@ -1303,7 +1362,11 @@ async function controlHomeService(serviceName, action, options = {}) {
         cameras: "Cameras",
     };
     if (!options.silentToast) {
-        showToast(`${labels[serviceName] || serviceName} ${action === "connect" ? "connected" : "disconnected"}.`);
+        if (action === "connect" && !connectSucceeded) {
+            showToast(serviceStatus?.detail || `${labels[serviceName] || serviceName} connection failed.`, true);
+        } else {
+            showToast(`${labels[serviceName] || serviceName} ${action === "connect" ? "connected" : "disconnected"}.`);
+        }
     }
 }
 
@@ -1719,25 +1782,32 @@ function openOutputBrowser() {
 }
 
 async function bootstrapTeleoperation() {
-    if (state.teleopBootstrapped) {
+    if (state.teleopBootstrapped || state.ui.teleopBootstrapBusy) {
         return;
     }
     setTeleopBootstrapBusy(true);
-    setComponentLoading("teleop-cameras-wrap", true, "Initializing cameras");
+    setComponentLoading("teleop-cameras-wrap", true, "Initializing modules");
+    stopTeleopPolling();
+    let bootstrapResult = null;
     try {
-        await api("/teleop/bootstrap", { method: "POST" });
+        bootstrapResult = await api(
+            "/teleop/bootstrap",
+            { method: "POST" },
+            {
+                timeoutMs: TELEOP_BOOTSTRAP_TIMEOUT_MS,
+                timeoutMessage: "Automatic teleoperation initialization timed out. Use the Connect buttons after the hardware is ready.",
+            },
+        );
         state.teleopBootstrapped = true;
         await refreshTeleopStatus();
+        if (bootstrapResult.ready) {
+            startTeleopPolling();
+        }
     } finally {
+        state.teleopBootstrapped = true;
         setComponentLoading("teleop-cameras-wrap", false);
         setTeleopBootstrapBusy(false);
     }
-    window.clearInterval(state.intervals.teleop);
-    state.intervals.teleop = window.setInterval(() => {
-        if (state.activeView === "teleoperation") {
-            refreshTeleopStatus().catch((error) => showToast(error.message, true));
-        }
-    }, 1500);
 }
 
 async function bootstrapTraining() {

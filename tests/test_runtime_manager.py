@@ -62,3 +62,50 @@ def test_service_summary_reports_camera_count_and_tone(
 
     assert summary["cameras"]["state"] == expected_state
     assert summary["cameras"]["tone"] == expected_tone
+
+
+def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) -> None:
+    manager = RuntimeManager.__new__(RuntimeManager)
+    manager.settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    manager._robot_config = RobotSerialConfig(
+        local_robot_serials=["LOCAL_A", "LOCAL_B"],
+        remote_robot_serials=["REMOTE_A", "REMOTE_B"],
+    ).normalized()
+    manager.teleop = SimpleNamespace(
+        initialize=lambda: SimpleNamespace(
+            configured=True,
+            available=True,
+            initialized=True,
+            started=False,
+            stopped=True,
+            fault=None,
+            error=None,
+        )
+    )
+    manager.ddk = SimpleNamespace(
+        initialize=lambda: {
+            "available": True,
+            "configured": True,
+            "errors": {},
+            "robots": {
+                "REMOTE_A": {"connected": True},
+                "REMOTE_B": {"connected": True},
+            },
+        }
+    )
+    manager.cameras = SimpleNamespace(
+        start_streams=lambda: {
+            "available": True,
+            "errors": {"ego": "No RealSense camera is available for this stream"},
+            "cameras": {
+                "ego": {"started": False},
+                "left_wrist": {"started": False},
+                "right_wrist": {"started": False},
+            },
+        }
+    )
+    manager.recording = SimpleNamespace(status=lambda: {"active": False})
+
+    result = manager.bootstrap_teleop_module()
+
+    assert result["ready"] is False
