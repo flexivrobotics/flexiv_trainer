@@ -5,7 +5,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260527-2" />
 </head>
 
 <body>
@@ -13,9 +13,9 @@
         <header class="app-nav">
             <button class="brand" data-nav="home" type="button">Flexiv Trainer</button>
             <nav>
-                <button class="nav-link" data-nav="teleoperation" type="button">Teleoperation</button>
+                <button class="nav-link" data-nav="teleoperation" type="button">Data Collection</button>
                 <span class="nav-divider" aria-hidden="true">|</span>
-                <button class="nav-link" data-nav="training" type="button">Training</button>
+                <button class="nav-link" data-nav="training" type="button">Skill Training</button>
             </nav>
         </header>
 
@@ -47,9 +47,9 @@
                         <h2>Quick Start</h2>
                         <ol class="number-list">
                             <li>Confirm robots, cameras, and network are ready.</li>
-                            <li>Open Teleoperation and verify module health.</li>
+                            <li>Open Data Collection and verify module health.</li>
                             <li>Record and save one or more episodes.</li>
-                            <li>Open Training to load, combine, and train.</li>
+                            <li>Open Skill Training to load, combine, and train.</li>
                         </ol>
                     </section>
 
@@ -77,17 +77,17 @@
                         <button class="workflow-card" data-nav="teleoperation" type="button">
                             <span class="workflow-card__badge">Example</span>
                             <h3>Record a New Episode</h3>
-                            <p>Open Teleoperation, start teleop, and record a saved episode.</p>
+                            <p>Open Data Collection, start teleop, and record a saved episode.</p>
                         </button>
                         <button class="workflow-card" data-nav="training" type="button">
                             <span class="workflow-card__badge">Example</span>
                             <h3>Review or Combine Episodes</h3>
-                            <p>Open Training, load saved datasets, and combine selected episodes.</p>
+                            <p>Open Skill Training, load saved datasets, and combine selected episodes.</p>
                         </button>
                         <button class="workflow-card" data-nav="training" type="button">
                             <span class="workflow-card__badge">Example</span>
                             <h3>Train a Policy</h3>
-                            <p>Choose a policy, select an output directory, and start training.</p>
+                            <p>Choose a policy, select an output directory, and start skill training.</p>
                         </button>
                     </div>
                 </section>
@@ -106,7 +106,7 @@
 
                         <section class="panel panel--soft control-panel">
                             <div class="panel-header">
-                                <h2>Teleoperation Control</h2>
+                                <h2>Data Collection Control</h2>
                             </div>
                             <div class="control-stack">
                                 <button class="start-button" id="teleop-start" type="button">Start</button>
@@ -235,7 +235,7 @@
         </section>
     </div>
 
-    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/app.js?v=20260527-2"></script>
 </body>
 
 </html>

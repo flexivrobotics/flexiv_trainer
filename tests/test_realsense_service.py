@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import numpy as np
+
 from flexivtrainer.cameras import realsense as realsense_module
 from flexivtrainer.cameras.realsense import RealSenseService
 from flexivtrainer.config import AppSettings, CameraConfig, StorageConfig
@@ -84,3 +86,47 @@ def test_start_streams_fast_fails_when_configured_serial_is_missing(
     assert start_calls == []
     assert "MISSING" in status["errors"]["ego"]
     assert status["cameras"]["ego"]["started"] is False
+
+
+def test_capture_frame_reads_only_requested_camera(tmp_path) -> None:
+    service = RealSenseService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    payload = {
+        "image": np.zeros((2, 3, 3), dtype=np.uint8),
+        "timestamp_ms": 12.3,
+        "fps": 30.0,
+        "width": 3,
+        "height": 2,
+    }
+    service._runtimes["ego"].started = True
+    service._runtimes["ego"].pipeline = object()
+
+    def fake_read_frames(*, block, timeout_ms, camera_names):
+        assert block is True
+        assert timeout_ms == 350
+        assert camera_names == ["ego"]
+        return {"ego": payload}
+
+    service.read_frames = fake_read_frames
+
+    frame = service.capture_frame("ego")
+
+    assert frame is payload
+
+
+def test_capture_frame_falls_back_to_cached_frame(tmp_path) -> None:
+    service = RealSenseService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    cached_payload = {
+        "image": np.zeros((2, 2, 3), dtype=np.uint8),
+        "timestamp_ms": 1.0,
+        "fps": 0.0,
+        "width": 2,
+        "height": 2,
+    }
+    service._runtimes["ego"].started = True
+    service._runtimes["ego"].pipeline = object()
+    service._last_frames["ego"] = cached_payload
+    service.read_frames = lambda *, block, timeout_ms, camera_names: {}
+
+    frame = service.capture_frame("ego")
+
+    assert frame is cached_payload

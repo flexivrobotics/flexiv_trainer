@@ -44,6 +44,7 @@ const state = {
         left: [],
         right: [],
     },
+    cameraFeeds: {},
     recordingEntries: [],
     notifications: {
         items: [],
@@ -176,6 +177,12 @@ function byId(id) {
     return document.getElementById(id);
 }
 
+function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 function setMarkupIfChanged(element, renderKey, markup) {
     if (!element) {
         return false;
@@ -220,12 +227,12 @@ function renderNotificationCenter() {
     }
 
     list.innerHTML = state.notifications.items.map((item) => `
-        <article class="notification-item notification-item--${item.level}">
+        <article class="notification-item notification-item--${escapeHtml(item.level)}">
             <div class="notification-item__row">
-                <span class="notification-item__pill">${item.level.toUpperCase()}</span>
+                <span class="notification-item__pill">${escapeHtml(item.level.toUpperCase())}</span>
                 <time class="notification-item__time">${formatNotificationTimestamp(item.timestamp)}</time>
             </div>
-            <p class="notification-item__message">${item.message}</p>
+            <p class="notification-item__message">${escapeHtml(item.message)}</p>
             ${item.count > 1 ? `<span class="notification-item__count">x${item.count}</span>` : ""}
         </article>
     `).join("");
@@ -391,8 +398,32 @@ function startTeleopPolling() {
     }, 1500);
 }
 
+function hasActiveTeleopServices(teleopStatus) {
+    if (!teleopStatus) {
+        return false;
+    }
+
+    const teleop = teleopStatus.teleop || {};
+    if (teleop.initialized || teleop.started) {
+        return true;
+    }
+
+    const robots = Object.values(teleopStatus.ddk?.robots || {});
+    if (robots.some((robot) => !!robot?.connected)) {
+        return true;
+    }
+
+    const cameras = Object.values(teleopStatus.cameras?.cameras || {});
+    if (cameras.some((camera) => !!camera?.started)) {
+        return true;
+    }
+
+    const recording = teleopStatus.recording || {};
+    return !!recording.active || !!recording.awaiting_save;
+}
+
 function createTeleopSystemCard(serviceKey, service = {}) {
-    const ready = service.tone === "ok";
+    const tone = service.tone || "neutral";
     const resetBusy = !!state.ui.serviceResetBusy[serviceKey];
     const serviceState = formatValue(service.state);
     const reconnectMessage = SERVICE_RESET_MESSAGES[serviceKey] || `Reconnect ${service.label || serviceKey}`;
@@ -401,7 +432,7 @@ function createTeleopSystemCard(serviceKey, service = {}) {
     card.innerHTML = `
         <div class="teleop-system-card__header">
             <div class="teleop-system-card__title">
-                <span class="teleop-system-card__dot teleop-system-card__dot--${ready ? "ready" : "error"}" role="img" aria-label="${serviceState}" title="${serviceState}"></span>
+                <span class="teleop-system-card__dot teleop-system-card__dot--${tone}" role="img" aria-label="${serviceState}" title="${serviceState}"></span>
                 <span class="eyebrow teleop-system-card__label">${service.label || serviceKey}</span>
             </div>
             <button class="secondary-button icon-button teleop-system-card__reset ${resetBusy ? "icon-button--spinning" : ""}" type="button" aria-label="${reconnectMessage}" title="${reconnectMessage}" ${resetBusy ? "disabled" : ""}>
@@ -475,6 +506,9 @@ function setTeleopRefreshBusy(busy) {
 
 function setActiveView(view) {
     state.activeView = view;
+    if (view !== "teleoperation") {
+        stopAllCameraFeeds();
+    }
     document.querySelectorAll(".view").forEach((element) => {
         element.classList.toggle("view--active", element.dataset.view === view);
     });
@@ -484,6 +518,9 @@ function setActiveView(view) {
         element.classList.toggle("nav-link--active", active && !isBrand);
         element.classList.toggle("brand--active", active && isBrand);
     });
+    if (view === "teleoperation" && state.teleopStatus) {
+        renderTeleop();
+    }
 }
 
 function setComponentLoading(wrapperId, loading, label = "Initializing") {
@@ -872,6 +909,78 @@ function buildAwaitingDataMarkup() {
     `;
 }
 
+function buildCameraFrameUrl(cameraName) {
+    return `/teleop/cameras/${encodeURIComponent(cameraName)}/frame?ts=${Date.now()}`;
+}
+
+function stopCameraFeed(cameraName) {
+    const feed = state.cameraFeeds[cameraName];
+    if (feed) {
+        feed.stopped = true;
+        if (feed.retryTimer) {
+            window.clearTimeout(feed.retryTimer);
+        }
+    }
+    delete state.cameraFeeds[cameraName];
+}
+
+function stopAllCameraFeeds() {
+    Object.keys(state.cameraFeeds).forEach((name) => stopCameraFeed(name));
+}
+
+function restoreAwaitingCameraPlaceholder(placeholder) {
+    if (!placeholder) {
+        return;
+    }
+    placeholder.classList.add("feed__placeholder--awaiting");
+    placeholder.dataset.renderMode = "awaiting";
+    delete placeholder.dataset.cameraName;
+    placeholder.innerHTML = buildAwaitingDataMarkup();
+}
+
+function startCameraFeedPump(cameraName, image) {
+    const feed = state.cameraFeeds[cameraName];
+    if (!feed || feed.stopped) {
+        return;
+    }
+
+    const nextUrl = buildCameraFrameUrl(cameraName);
+    feed.lastUrl = nextUrl;
+
+    image.onload = () => {
+        if (feed.stopped || state.cameraFeeds[cameraName] !== feed) {
+            return;
+        }
+        feed.failed = false;
+        // Pump: request next frame immediately; actual FPS is limited by server response time
+        window.setTimeout(() => startCameraFeedPump(cameraName, image), 0);
+    };
+
+    image.onerror = () => {
+        if (feed.stopped || state.cameraFeeds[cameraName] !== feed) {
+            return;
+        }
+        feed.failed = true;
+        // Retry after a short delay — do NOT destroy the img element
+        feed.retryTimer = window.setTimeout(() => startCameraFeedPump(cameraName, image), 1000);
+    };
+
+    image.src = nextUrl;
+}
+
+function ensureCameraFeedRunning(cameraName, image) {
+    const existing = state.cameraFeeds[cameraName];
+    if (existing && !existing.stopped && existing.image === image) {
+        // Pump is already running for this image element
+        return;
+    }
+    // Stop old feed if any
+    stopCameraFeed(cameraName);
+    const feed = { lastUrl: "", failed: false, stopped: false, retryTimer: null, image };
+    state.cameraFeeds[cameraName] = feed;
+    startCameraFeedPump(cameraName, image);
+}
+
 function computeTelemetryStreamFps(history, kind, currentVector) {
     if (!Array.isArray(currentVector)) {
         return 0;
@@ -899,32 +1008,40 @@ function computeTelemetryStreamFps(history, kind, currentVector) {
     return averageDeltaMs > 0 ? 1000 / averageDeltaMs : 0;
 }
 
-function renderCameraFps(elementId, camera) {
+function renderCameraFps(elementId, cameraName, camera) {
     const element = byId(elementId);
     if (!element) {
         return;
     }
 
     const fps = Number(camera?.fps || 0);
-    const hasData = !!camera?.started && fps > 0;
     setFpsBadge(element, fps, 29);
 
-    const placeholder = element.closest(".feed")?.querySelector(".feed__placeholder");
+    const feed = element.closest(".feed");
+    const placeholder = feed?.querySelector(".feed__placeholder");
     if (!placeholder) {
         return;
     }
 
-    if (!placeholder.dataset.defaultContent) {
-        placeholder.dataset.defaultContent = placeholder.innerHTML;
+    if (!camera?.started) {
+        stopCameraFeed(cameraName);
+        if (placeholder.dataset.renderMode !== "awaiting") {
+            restoreAwaitingCameraPlaceholder(placeholder);
+        }
+        return;
     }
 
-    placeholder.classList.toggle("feed__placeholder--awaiting", !hasData);
-    const renderMode = hasData ? "default" : "awaiting";
-    if (placeholder.dataset.renderMode !== renderMode) {
-        placeholder.innerHTML = hasData
-            ? placeholder.dataset.defaultContent
-            : buildAwaitingDataMarkup();
-        placeholder.dataset.renderMode = renderMode;
+    placeholder.classList.remove("feed__placeholder--awaiting");
+    const cameraTitle = feed?.querySelector(".feed__title")?.textContent?.trim() || cameraName;
+    if (placeholder.dataset.renderMode !== "live" || placeholder.dataset.cameraName !== cameraName) {
+        placeholder.innerHTML = `<img class="feed__image" alt="${cameraTitle} live feed" />`;
+        placeholder.dataset.renderMode = "live";
+        placeholder.dataset.cameraName = cameraName;
+    }
+
+    const image = placeholder.querySelector(".feed__image");
+    if (image) {
+        ensureCameraFeedRunning(cameraName, image);
     }
 }
 
@@ -985,7 +1102,7 @@ function areSelectedRecordingEntriesAvailable(teleopStatus) {
     return selectedOptions.every((option) => {
         if (option.bucket === "image") {
             const camera = teleopStatus?.cameras?.cameras?.[option.sourceField];
-            return !!camera?.started && Number(camera?.fps || 0) > 0;
+            return !!camera?.started;
         }
 
         if (!configuredRemoteSerials.length) {
@@ -1336,6 +1453,10 @@ function renderTrendGraph(side, kind, history, currentVector) {
 
 async function fetchAndRenderTeleopStatus() {
     state.teleopStatus = await api("/teleop/status");
+    if (state.summary) {
+        state.summary.services = state.teleopStatus.services || state.summary.services;
+        renderHomeStatus();
+    }
     renderTeleop();
 }
 
@@ -1386,9 +1507,9 @@ function renderTeleop() {
     renderRecordingOptions(teleopStatus.recording || {});
 
     const cameras = teleopStatus.cameras?.cameras || {};
-    renderCameraFps("ego-fps", cameras.ego);
-    renderCameraFps("left-wrist-fps", cameras.left_wrist);
-    renderCameraFps("right-wrist-fps", cameras.right_wrist);
+    renderCameraFps("ego-fps", "ego", cameras.ego);
+    renderCameraFps("left-wrist-fps", "left_wrist", cameras.left_wrist);
+    renderCameraFps("right-wrist-fps", "right_wrist", cameras.right_wrist);
 
     const leftRobotEntry = getRobotTelemetryForSide("left", teleopStatus);
     const rightRobotEntry = getRobotTelemetryForSide("right", teleopStatus);
@@ -1782,7 +1903,14 @@ function openOutputBrowser() {
 }
 
 async function bootstrapTeleoperation() {
-    if (state.teleopBootstrapped || state.ui.teleopBootstrapBusy) {
+    if (state.ui.teleopBootstrapBusy) {
+        return;
+    }
+    if (state.teleopBootstrapped) {
+        await refreshTeleopStatus();
+        if (hasActiveTeleopServices(state.teleopStatus)) {
+            startTeleopPolling();
+        }
         return;
     }
     setTeleopBootstrapBusy(true);
@@ -1795,18 +1923,39 @@ async function bootstrapTeleoperation() {
             { method: "POST" },
             {
                 timeoutMs: TELEOP_BOOTSTRAP_TIMEOUT_MS,
-                timeoutMessage: "Automatic teleoperation initialization timed out. Use the Connect buttons after the hardware is ready.",
+                timeoutMessage: "Automatic data-collection initialization timed out. Use the Connect buttons after the hardware is ready.",
             },
         );
         state.teleopBootstrapped = true;
-        await refreshTeleopStatus();
-        if (bootstrapResult.ready) {
-            startTeleopPolling();
+    } catch (error) {
+        // Even on timeout, the server may have partially started services.
+        // Refresh status to discover what's running and start polling if needed.
+        try {
+            await refreshTeleopStatus();
+        } catch (_) {
+            // Status fetch also failed — nothing to recover
         }
+        if (hasActiveTeleopServices(state.teleopStatus)) {
+            state.teleopBootstrapped = true;
+            startTeleopPolling();
+            pushNotification(error.message, "warning");
+        } else {
+            state.teleopBootstrapped = false;
+            throw error;
+        }
+        return;
     } finally {
-        state.teleopBootstrapped = true;
         setComponentLoading("teleop-cameras-wrap", false);
         setTeleopBootstrapBusy(false);
+    }
+    // Bootstrap API call succeeded — refresh status and start polling
+    try {
+        await refreshTeleopStatus();
+    } catch (_) {
+        // Non-fatal: polling will retry
+    }
+    if (bootstrapResult.ready || hasActiveTeleopServices(state.teleopStatus)) {
+        startTeleopPolling();
     }
 }
 

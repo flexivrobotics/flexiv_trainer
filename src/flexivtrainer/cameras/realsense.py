@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +37,7 @@ class RealSenseService:
         }
         self._last_frames: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, str] = {}
+        self._lock = threading.Lock()
 
     def available(self) -> bool:
         return rs is not None
@@ -156,18 +158,20 @@ class RealSenseService:
                 "errors": {"import": "pyrealsense2 is not importable"},
             }
 
-        available_serials = self._available_serials()
-        for name in self._resolve_camera_names(camera_names):
-            runtime = self._runtimes[name]
-            if runtime.started:
-                continue
-            self._start_runtime(runtime, available_serials)
+        with self._lock:
+            available_serials = self._available_serials()
+            for name in self._resolve_camera_names(camera_names):
+                runtime = self._runtimes[name]
+                if runtime.started:
+                    continue
+                self._start_runtime(runtime, available_serials)
 
         return self.status()
 
     def stop_streams(self, camera_names: list[str] | None = None) -> dict[str, Any]:
-        for name in self._resolve_camera_names(camera_names):
-            self._stop_runtime(self._runtimes[name])
+        with self._lock:
+            for name in self._resolve_camera_names(camera_names):
+                self._stop_runtime(self._runtimes[name])
         return self.status()
 
     def status(self) -> dict[str, Any]:
@@ -188,13 +192,17 @@ class RealSenseService:
         }
 
     def read_frames(
-        self, block: bool = False, timeout_ms: int = 1_000
+        self,
+        block: bool = False,
+        timeout_ms: int = 1_000,
+        camera_names: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         if rs is None:
             raise RuntimeError("pyrealsense2 is not available")
 
         frames: dict[str, dict[str, Any]] = {}
-        for name, runtime in self._runtimes.items():
+        for name in self._resolve_camera_names(camera_names):
+            runtime = self._runtimes[name]
             if runtime.pipeline is None:
                 continue
 
@@ -212,11 +220,13 @@ class RealSenseService:
 
                 image = np.asanyarray(color_frame.get_data())
                 now = time.monotonic()
-                if runtime.last_frame_time is not None:
-                    delta = max(now - runtime.last_frame_time, 1e-6)
-                    runtime.fps = 1.0 / delta
-                runtime.last_frame_time = now
-                runtime.frame_count += 1
+                with self._lock:
+                    if runtime.last_frame_time is not None:
+                        delta = max(now - runtime.last_frame_time, 1e-6)
+                        alpha = 0.3
+                        runtime.fps = alpha * (1.0 / delta) + (1 - alpha) * runtime.fps
+                    runtime.last_frame_time = now
+                    runtime.frame_count += 1
 
                 frames[name] = {
                     "image": image,
@@ -228,8 +238,37 @@ class RealSenseService:
             except Exception as exc:  # pragma: no cover - hardware specific
                 self._errors[name] = describe_exception(exc)
 
-        self._last_frames.update(frames)
+        with self._lock:
+            self._last_frames.update(frames)
         return frames
+
+    def capture_frame(
+        self,
+        camera_name: str,
+        *,
+        block: bool = True,
+        timeout_ms: int = 350,
+        allow_cached: bool = True,
+    ) -> dict[str, Any]:
+        selected_name = self._resolve_camera_names([camera_name])[0]
+        runtime = self._runtimes[selected_name]
+        if runtime.pipeline is None or not runtime.started:
+            raise RuntimeError(f"Camera '{selected_name}' is not started")
+
+        frames = self.read_frames(
+            block=block,
+            timeout_ms=timeout_ms,
+            camera_names=[selected_name],
+        )
+        if selected_name in frames:
+            return frames[selected_name]
+
+        with self._lock:
+            cached = self._last_frames.get(selected_name)
+        if allow_cached and cached is not None:
+            return cached
+
+        raise RuntimeError(f"No frame is available for camera '{selected_name}'")
 
     def latest_frame_metadata(self) -> dict[str, Any]:
         metadata = {}

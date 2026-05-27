@@ -439,6 +439,20 @@ button:disabled {
     color: #fbf7f0;
 }
 
+.feed__placeholder[data-render-mode="live"] {
+    place-items: stretch;
+    border: none;
+}
+
+.feed__image {
+    width: 100%;
+    height: 100%;
+    display: block;
+    border-radius: 18px;
+    object-fit: contain;
+    background: #000;
+}
+
 .telemetry-card {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 22px;
@@ -859,11 +873,18 @@ button:disabled {
     border-radius: 999px;
     flex: 0 0 auto;
     cursor: help;
+    background: rgba(102, 119, 134, 0.9);
+    box-shadow: 0 0 0 3px rgba(102, 119, 134, 0.14);
 }
 
-.teleop-system-card__dot--ready {
+.teleop-system-card__dot--ok {
     background: #5fd58a;
     box-shadow: 0 0 0 3px rgba(95, 213, 138, 0.16);
+}
+
+.teleop-system-card__dot--working {
+    background: #e4be62;
+    box-shadow: 0 0 0 3px rgba(228, 190, 98, 0.18);
 }
 
 .teleop-system-card__dot--error {

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import binascii
+import struct
+import zlib
+
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from flexivtrainer.data.lerobot_io import (
@@ -44,6 +50,35 @@ def _bootstrap_issue_detail(result: dict) -> str | None:
     return " | ".join(issues[:8]) or None
 
 
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    checksum = binascii.crc32(chunk_type)
+    checksum = binascii.crc32(payload, checksum) & 0xFFFFFFFF
+    return (
+        struct.pack(">I", len(payload))
+        + chunk_type
+        + payload
+        + struct.pack(">I", checksum)
+    )
+
+
+def _encode_png(image: np.ndarray) -> bytes:
+    frame = np.asarray(image, dtype=np.uint8)
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError("Expected a BGR image array with shape (H, W, 3)")
+
+    height, width, _ = frame.shape
+    rgb = frame[:, :, ::-1]
+    scanlines = b"".join(b"\x00" + row.tobytes() for row in rgb)
+
+    return b"\x89PNG\r\n\x1a\n" + b"".join(
+        [
+            _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
+            _png_chunk(b"IDAT", zlib.compress(scanlines, level=1)),
+            _png_chunk(b"IEND", b""),
+        ]
+    )
+
+
 @router.post("/bootstrap")
 def bootstrap(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     result = runtime.bootstrap_teleop_module()
@@ -70,6 +105,32 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
     }
+
+
+@router.get("/cameras/{camera_name}/frame")
+def camera_frame(
+    camera_name: str, runtime: RuntimeManager = Depends(get_runtime_manager)
+) -> Response:
+    try:
+        frame_payload = runtime.cameras.capture_frame(camera_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    try:
+        content = _encode_png(frame_payload["image"])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @router.post("/start")

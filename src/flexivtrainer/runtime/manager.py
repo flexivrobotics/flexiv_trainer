@@ -378,7 +378,12 @@ class RuntimeManager:
     def browse_path(
         self, path: Path | None = None, directories_only: bool = False
     ) -> dict[str, Any]:
-        target = (path or self.settings.storage.root).expanduser().resolve()
+        storage_root = self.settings.storage.root.expanduser().resolve()
+        target = (path or storage_root).expanduser().resolve()
+        if not str(target).startswith(str(storage_root)):
+            raise ValueError(
+                f"Access denied: path must be within storage root ({storage_root})"
+            )
         if not target.exists():
             raise FileNotFoundError(f"Path does not exist: {target}")
         items = []
@@ -417,7 +422,13 @@ class RuntimeManager:
                 _optional_dependency_error("Dataset combination", exc)
             ) from exc
 
+        storage_root = self.settings.storage.root.expanduser().resolve()
         roots = [Path(path).resolve() for path in episode_paths]
+        for root in roots:
+            if not str(root).startswith(str(storage_root)):
+                raise ValueError(
+                    f"Access denied: path must be within storage root ({storage_root})"
+                )
         return combine_episode_datasets(
             roots, self.settings.storage.combined_root, output_name
         )
@@ -430,7 +441,12 @@ class RuntimeManager:
                 _optional_dependency_error("Dataset preview", exc)
             ) from exc
 
+        storage_root = self.settings.storage.root.expanduser().resolve()
         dataset_path = dataset_path.resolve()
+        if not str(dataset_path).startswith(str(storage_root)):
+            raise ValueError(
+                f"Access denied: path must be within storage root ({storage_root})"
+            )
         manifest_path = dataset_path / "episode.json"
         if not manifest_path.exists():
             manifest_path = dataset_path / "combined.json"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from flexivtrainer.observability import info, ok
@@ -23,7 +23,10 @@ def list_episodes(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dic
 
 @router.get("/preview")
 def preview(path: str, runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    return runtime.preview_dataset(Path(path))
+    try:
+        return runtime.preview_dataset(Path(path))
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.get("/browse")
@@ -32,9 +35,12 @@ def browse(
     directories_only: bool = False,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
-    return runtime.browse_path(
-        Path(path) if path else None, directories_only=directories_only
-    )
+    try:
+        return runtime.browse_path(
+            Path(path) if path else None, directories_only=directories_only
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/combine")
