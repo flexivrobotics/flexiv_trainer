@@ -45,6 +45,13 @@ const state = {
         right: [],
     },
     recordingEntries: [],
+    notifications: {
+        items: [],
+        unreadCount: 0,
+        open: false,
+        nextId: 1,
+        lastTeleopIssueSignature: "",
+    },
 };
 
 const TELEMETRY_HISTORY_LIMIT = 90;
@@ -141,6 +148,9 @@ const LOADING_WHEEL_SEGMENTS = Array.from(
 ).join("");
 state.recordingEntries = [...DEFAULT_RECORDING_ENTRY_IDS];
 
+let teleopStatusRefreshPromise = null;
+let teleopStatusRefreshQueued = false;
+
 const TELEMETRY_SERIES = {
     force: {
         title: "Cartesian Force",
@@ -160,6 +170,98 @@ function byId(id) {
     return document.getElementById(id);
 }
 
+function setMarkupIfChanged(element, renderKey, markup) {
+    if (!element) {
+        return false;
+    }
+    if (element.dataset.renderKey === renderKey) {
+        return false;
+    }
+    element.innerHTML = markup;
+    element.dataset.renderKey = renderKey;
+    return true;
+}
+
+function formatNotificationTimestamp(timestamp) {
+    return new Date(timestamp).toLocaleString([], {
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    });
+}
+
+function renderNotificationCenter() {
+    const toggle = byId("notification-toggle");
+    const badge = byId("notification-badge");
+    const panel = byId("notification-panel");
+    const list = byId("notification-list");
+    if (!toggle || !badge || !panel || !list) {
+        return;
+    }
+
+    toggle.setAttribute("aria-expanded", state.notifications.open ? "true" : "false");
+    panel.classList.toggle("hidden", !state.notifications.open);
+
+    const unread = state.notifications.unreadCount;
+    badge.textContent = String(unread);
+    badge.classList.toggle("hidden", unread === 0);
+
+    if (!state.notifications.items.length) {
+        list.innerHTML = `<div class="notification-empty">No messages yet.</div>`;
+        return;
+    }
+
+    list.innerHTML = state.notifications.items.map((item) => `
+        <article class="notification-item notification-item--${item.level}">
+            <div class="notification-item__row">
+                <span class="notification-item__pill">${item.level.toUpperCase()}</span>
+                <time class="notification-item__time">${formatNotificationTimestamp(item.timestamp)}</time>
+            </div>
+            <p class="notification-item__message">${item.message}</p>
+            ${item.count > 1 ? `<span class="notification-item__count">x${item.count}</span>` : ""}
+        </article>
+    `).join("");
+}
+
+function toggleNotificationCenter(forceOpen) {
+    const nextOpen = typeof forceOpen === "boolean" ? forceOpen : !state.notifications.open;
+    state.notifications.open = nextOpen;
+    if (nextOpen) {
+        state.notifications.unreadCount = 0;
+    }
+    renderNotificationCenter();
+}
+
+function pushNotification(message, level = "info") {
+    const normalizedMessage = String(message || "").trim();
+    if (!normalizedMessage) {
+        return;
+    }
+
+    const latest = state.notifications.items[0];
+    if (latest && latest.message === normalizedMessage && latest.level === level) {
+        latest.timestamp = Date.now();
+        latest.count += 1;
+    } else {
+        state.notifications.items.unshift({
+            id: state.notifications.nextId,
+            message: normalizedMessage,
+            level,
+            timestamp: Date.now(),
+            count: 1,
+        });
+        state.notifications.nextId += 1;
+        state.notifications.items = state.notifications.items.slice(0, 120);
+    }
+
+    if (!state.notifications.open) {
+        state.notifications.unreadCount += 1;
+    }
+    renderNotificationCenter();
+}
+
 async function api(path, init) {
     const response = await fetch(path, {
         headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
@@ -172,12 +274,7 @@ async function api(path, init) {
 }
 
 function showToast(message, isError = false) {
-    const toast = byId("toast");
-    toast.textContent = message;
-    toast.classList.remove("hidden", "toast--error", "toast--success");
-    toast.classList.add(isError ? "toast--error" : "toast--success");
-    window.clearTimeout(showToast._timer);
-    showToast._timer = window.setTimeout(() => toast.classList.add("hidden"), 4000);
+    pushNotification(message, isError ? "error" : "info");
 }
 
 function formatValue(value) {
@@ -773,9 +870,13 @@ function renderCameraFps(elementId, camera) {
     }
 
     placeholder.classList.toggle("feed__placeholder--awaiting", !hasData);
-    placeholder.innerHTML = hasData
-        ? placeholder.dataset.defaultContent
-        : buildAwaitingDataMarkup();
+    const renderMode = hasData ? "default" : "awaiting";
+    if (placeholder.dataset.renderMode !== renderMode) {
+        placeholder.innerHTML = hasData
+            ? placeholder.dataset.defaultContent
+            : buildAwaitingDataMarkup();
+        placeholder.dataset.renderMode = renderMode;
+    }
 }
 
 function renderRecordingOptions(recording = {}) {
@@ -932,11 +1033,18 @@ function renderRecordingStatusPanel(teleopStatus) {
     }
 
     const model = buildRecordingStatusModel(teleopStatus);
-    status.className = `recording-status ${model.animated ? "recording-status--breathing" : ""}`.trim();
-    status.innerHTML = `
-        ${recordingStatusIconMarkup(model.kind)}
-        <span class="recording-status__text">${model.text}</span>
-    `;
+    const nextClassName = `recording-status ${model.animated ? "recording-status--breathing" : ""}`.trim();
+    if (status.className !== nextClassName) {
+        status.className = nextClassName;
+    }
+    setMarkupIfChanged(
+        status,
+        `${model.kind}:${model.text}:${model.animated ? "animated" : "static"}`,
+        `
+            ${recordingStatusIconMarkup(model.kind)}
+            <span class="recording-status__text">${model.text}</span>
+        `,
+    );
 
     byId("record-start").disabled = !model.canStart;
     byId("record-stop").disabled = !model.canStop;
@@ -967,6 +1075,26 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
         computeTelemetryStreamFps(history, "force", telemetry.force),
         TELEMETRY_FPS_OK_MIN,
     );
+    if (geometry.magnitude === null) {
+        setMarkupIfChanged(
+            panel,
+            `${side}:force:awaiting`,
+            `
+                <div class="telemetry-card__header">
+                    <div>
+                        <span class="eyebrow">${title}</span>
+                    </div>
+                    ${fpsMarkup}
+                </div>
+                <div class="vector-panel vector-panel--empty">
+                    ${buildAwaitingDataMarkup()}
+                </div>
+            `,
+        );
+        return;
+    }
+
+    delete panel.dataset.renderKey;
     panel.innerHTML = `
         <div class="telemetry-card__header">
             <div>
@@ -974,16 +1102,14 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
             </div>
             ${fpsMarkup}
         </div>
-        <div class="vector-panel ${geometry.magnitude !== null ? "vector-panel--live" : "vector-panel--empty"}">
-            ${geometry.magnitude === null ? buildAwaitingDataMarkup() : `
-                <svg class="vector-panel__svg" viewBox="0 0 240 160" aria-hidden="true">
-                    <line class="vector-panel__shaft" x1="${geometry.baseX}" y1="${geometry.baseY}" x2="${geometry.tipX}" y2="${geometry.tipY}"></line>
-                    <polygon class="vector-panel__head" points="${geometry.points}"></polygon>
-                </svg>
-                <div class="vector-panel__meta">
-                    <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
-                </div>
-            `}
+        <div class="vector-panel vector-panel--live">
+            <svg class="vector-panel__svg" viewBox="0 0 240 160" aria-hidden="true">
+                <line class="vector-panel__shaft" x1="${geometry.baseX}" y1="${geometry.baseY}" x2="${geometry.tipX}" y2="${geometry.tipY}"></line>
+                <polygon class="vector-panel__head" points="${geometry.points}"></polygon>
+            </svg>
+            <div class="vector-panel__meta">
+                <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
+            </div>
         </div>
     `;
 }
@@ -1101,6 +1227,38 @@ function renderTrendGraph(side, kind, history, currentVector) {
         TELEMETRY_FPS_OK_MIN,
     );
 
+    if (!scale.hasData) {
+        setMarkupIfChanged(
+            panel,
+            `${side}:${kind}:awaiting`,
+            `
+                <div class="telemetry-card__header">
+                    <div>
+                        <span class="eyebrow">${title}</span>
+                    </div>
+                    ${fpsMarkup}
+                </div>
+                <div class="trend-chart">
+                    <svg class="trend-chart__svg" viewBox="0 0 960 540" aria-hidden="true">
+                        ${buildTrendGrid(scale)}
+                    </svg>
+                    <div class="trend-chart__empty">${buildAwaitingDataMarkup()}</div>
+                </div>
+                <div class="trend-chart__legend">
+                    ${meta.labels.map((label, index) => `
+                        <span class="trend-chart__legend-item">
+                            <span class="trend-chart__swatch" style="--swatch:${meta.colors[index]}"></span>
+                            <strong>${label}</strong>
+                            <span>--</span>
+                        </span>
+                    `).join("")}
+                </div>
+            `,
+        );
+        return;
+    }
+
+    delete panel.dataset.renderKey;
     panel.innerHTML = `
         <div class="telemetry-card__header">
             <div>
@@ -1125,6 +1283,11 @@ function renderTrendGraph(side, kind, history, currentVector) {
             `).join("")}
         </div>
     `;
+}
+
+async function fetchAndRenderTeleopStatus() {
+    state.teleopStatus = await api("/teleop/status");
+    renderTeleop();
 }
 
 async function controlHomeService(serviceName, action, options = {}) {
@@ -1198,21 +1361,37 @@ function renderTeleop() {
     }
     issues.push(...Object.values(teleopStatus.ddk.errors || {}));
     issues.push(...Object.values(teleopStatus.cameras.errors || {}));
+    const issueSignature = issues.join(" | ");
+    if (issueSignature && issueSignature !== state.notifications.lastTeleopIssueSignature) {
+        pushNotification(issueSignature, "error");
+    }
+    state.notifications.lastTeleopIssueSignature = issueSignature;
+
     const message = byId("teleop-message");
-    if (issues.length) {
-        message.textContent = issues.join(" | ");
-        message.classList.remove("panel--ok");
-        message.classList.add("panel--issue");
-        message.classList.remove("hidden");
-    } else {
+    if (message) {
         message.classList.remove("panel--issue", "panel--ok");
         message.classList.add("hidden");
     }
 }
 
 async function refreshTeleopStatus() {
-    state.teleopStatus = await api("/teleop/status");
-    renderTeleop();
+    if (teleopStatusRefreshPromise) {
+        teleopStatusRefreshQueued = true;
+        return teleopStatusRefreshPromise;
+    }
+
+    teleopStatusRefreshPromise = (async () => {
+        try {
+            do {
+                teleopStatusRefreshQueued = false;
+                await fetchAndRenderTeleopStatus();
+            } while (teleopStatusRefreshQueued);
+        } finally {
+            teleopStatusRefreshPromise = null;
+        }
+    })();
+
+    return teleopStatusRefreshPromise;
 }
 
 async function refreshTeleopStatusWithIndicator() {
@@ -1591,6 +1770,23 @@ function bindGlobalEvents() {
         });
     });
 
+    const notificationCenter = byId("notification-center");
+    const notificationToggle = byId("notification-toggle");
+    if (notificationToggle) {
+        notificationToggle.onclick = (event) => {
+            event.stopPropagation();
+            toggleNotificationCenter();
+        };
+    }
+    if (notificationCenter) {
+        notificationCenter.onclick = (event) => event.stopPropagation();
+    }
+    document.addEventListener("click", () => {
+        if (state.notifications.open) {
+            toggleNotificationCenter(false);
+        }
+    });
+
     const refreshButton = byId("teleop-refresh");
     if (refreshButton) {
         refreshButton.onclick = () => refreshTeleopStatusWithIndicator().catch((error) => showToast(error.message, true));
@@ -1708,6 +1904,7 @@ function bindGlobalEvents() {
 
 async function init() {
     bindGlobalEvents();
+    renderNotificationCenter();
     await refreshSummary();
     renderTeleop();
     renderTraining();
