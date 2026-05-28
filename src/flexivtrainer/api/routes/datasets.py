@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from flexivtrainer.observability import info, ok
@@ -70,7 +71,12 @@ def combine(
         "Combining episode datasets",
         f"count={len(request.episode_paths)} output={request.output_name}",
     )
-    result = runtime.combine_episodes(request.episode_paths, request.output_name)
+    try:
+        result = runtime.combine_episodes(request.episode_paths, request.output_name)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     ok(
         "Combined dataset ready",
         " ".join(
@@ -82,3 +88,34 @@ def combine(
         ),
     )
     return result
+
+
+@router.get("/series")
+def series(
+    path: str,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    """Return all numeric time-series data from a dataset for plotting."""
+    try:
+        return runtime.dataset_series(Path(path))
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/frame-image")
+def frame_image(
+    path: str,
+    key: str,
+    index: int = 0,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> Response:
+    """Return a single frame image as JPEG."""
+    try:
+        data = runtime.dataset_frame_image(Path(path), key, index)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (RuntimeError, IndexError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(content=data, media_type="image/jpeg")

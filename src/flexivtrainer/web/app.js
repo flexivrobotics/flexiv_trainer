@@ -26,6 +26,12 @@ const state = {
     preview: null,
     combinedPreview: null,
     combinedPath: "",
+    previewSeries: null,
+    combinedSeries: null,
+    previewFrame: 0,
+    combinedFrame: 0,
+    previewPlaying: false,
+    combinedPlaying: false,
     outputDir: "",
     selectedPolicy: "diffusion",
     pathBrowser: {
@@ -225,6 +231,325 @@ const TELEMETRY_SERIES = {
         colors: ["#8de0ff", "#86e4a8", "#ffbf7a"],
     },
 };
+
+const DATASET_PLOT_GROUPS = [
+    {
+        id: "tcp_pose",
+        title: "TCP Pose",
+        units: "",
+        stateKey: "observation.state.tcp_pose",
+        actionKey: "action.tcp_pose",
+        labels: ["x", "y", "z", "rx", "ry", "rz"],
+        stateColors: ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff"],
+        actionColors: ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db"],
+    },
+    {
+        id: "tcp_twist",
+        title: "TCP Twist",
+        units: "",
+        stateKey: "observation.state.tcp_twist",
+        actionKey: "action.tcp_twist",
+        labels: ["vx", "vy", "vz", "wx", "wy", "wz"],
+        stateColors: ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff"],
+        actionColors: ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db"],
+    },
+    {
+        id: "tcp_wrench",
+        title: "TCP Wrench",
+        units: "",
+        stateKey: "observation.state.tcp_wrench",
+        actionKey: "action.tcp_wrench",
+        labels: ["fx", "fy", "fz", "mx", "my", "mz"],
+        stateColors: ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff"],
+        actionColors: ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db"],
+    },
+];
+
+let _previewAnimFrame = null;
+let _combinedAnimFrame = null;
+
+function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
+    const width = 960;
+    const height = 540;
+    const left = 44;
+    const right = 18;
+    const top = 18;
+    const bottom = 24;
+    const innerWidth = width - left - right;
+    const innerHeight = height - top - bottom;
+
+    // Collect all values for scale
+    const allValues = [];
+    for (const prefix of [group.stateKey, group.actionKey]) {
+        for (let i = 0; i < group.labels.length; i++) {
+            const key = `${prefix}.${i}`;
+            const arr = seriesData[key];
+            if (arr) {
+                arr.forEach((v) => { if (v !== null && Number.isFinite(v)) allValues.push(v); });
+            }
+        }
+    }
+
+    let min, max;
+    if (!allValues.length) {
+        min = -1; max = 1;
+    } else {
+        min = Math.min(...allValues);
+        max = Math.max(...allValues);
+        if (Math.abs(max - min) < 1e-6) {
+            const pad = Math.max(1, Math.abs(max) * 0.12 || 1);
+            min -= pad; max += pad;
+        } else {
+            const pad = (max - min) * 0.12;
+            min -= pad; max += pad;
+        }
+    }
+
+    // Grid
+    const lines = [];
+    for (let i = 0; i <= 5; i++) {
+        const x = left + (innerWidth * i) / 5;
+        lines.push(`<line class="trend-chart__grid-line" x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}"></line>`);
+    }
+    for (let i = 0; i <= 4; i++) {
+        const y = top + (innerHeight * i) / 4;
+        lines.push(`<line class="trend-chart__grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}"></line>`);
+    }
+    if (min < 0 && max > 0) {
+        const zeroY = top + (1 - ((0 - min) / (max - min))) * innerHeight;
+        lines.push(`<line class="trend-chart__zero" x1="${left}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}"></line>`);
+    }
+
+    // Playhead
+    if (numFrames > 1 && currentFrame >= 0) {
+        const px = left + (currentFrame / (numFrames - 1)) * innerWidth;
+        lines.push(`<line class="dataset-plot__playhead" x1="${px}" y1="${top}" x2="${px}" y2="${height - bottom}"></line>`);
+    }
+
+    // Paths
+    const paths = [];
+    const drawSeries = (prefix, colors, dash) => {
+        for (let ci = 0; ci < group.labels.length; ci++) {
+            const key = `${prefix}.${ci}`;
+            const arr = seriesData[key];
+            if (!arr) continue;
+            let d = "";
+            let drawing = false;
+            for (let fi = 0; fi < numFrames; fi++) {
+                const val = arr[fi];
+                if (val === null || !Number.isFinite(val)) { drawing = false; continue; }
+                const ratio = numFrames === 1 ? 1 : fi / (numFrames - 1);
+                const x = left + ratio * innerWidth;
+                const y = top + (1 - ((val - min) / (max - min))) * innerHeight;
+                d += `${drawing ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)} `;
+                drawing = true;
+            }
+            if (d) {
+                paths.push(`<path class="trend-chart__line" style="--trend-color:${colors[ci]}${dash ? ";stroke-dasharray:8 4" : ""}" d="${d.trim()}"></path>`);
+            }
+        }
+    };
+    drawSeries(group.stateKey, group.stateColors, false);
+    drawSeries(group.actionKey, group.actionColors, true);
+
+    return `<svg class="trend-chart__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true"><g>${lines.join("")}</g>${paths.join("")}</svg>`;
+}
+
+function _buildDatasetPlotLegend(seriesData, group) {
+    const items = [];
+    // State legends
+    for (let i = 0; i < group.labels.length; i++) {
+        const key = `${group.stateKey}.${i}`;
+        const hasData = !!(seriesData[key] && seriesData[key].some((v) => v !== null));
+        items.push(`
+            <span class="trend-chart__legend-item${hasData ? "" : " trend-chart__legend-item--dim"}">
+                <span class="trend-chart__swatch" style="--swatch:${group.stateColors[i]}"></span>
+                <strong>state.${group.labels[i]}</strong>
+            </span>
+        `);
+    }
+    // Action legends (dashed indicator)
+    for (let i = 0; i < group.labels.length; i++) {
+        const key = `${group.actionKey}.${i}`;
+        const hasData = !!(seriesData[key] && seriesData[key].some((v) => v !== null));
+        items.push(`
+            <span class="trend-chart__legend-item${hasData ? "" : " trend-chart__legend-item--dim"}">
+                <span class="trend-chart__swatch trend-chart__swatch--dashed" style="--swatch:${group.actionColors[i]}"></span>
+                <strong>action.${group.labels[i]}</strong>
+            </span>
+        `);
+    }
+    return items.join("");
+}
+
+function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, playingKey) {
+    const container = byId(containerId);
+    if (!container || !preview) return;
+
+    const currentFrame = state[frameKey];
+    const numFrames = preview.num_frames || 0;
+    const isPlaying = state[playingKey];
+    const datasetPath = preview.path;
+
+    // Camera feeds
+    const feedsHtml = (preview.camera_keys || []).map((cameraKey) => `
+        <div class="feed">
+            <div class="feed__header"><span>${cameraKey}</span><strong>${preview.fps} FPS</strong></div>
+            <div class="feed__placeholder" data-render-mode="live">
+                <img class="feed__image dataset-frame-img" data-camera-key="${cameraKey}" src="/datasets/frame-image?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(cameraKey)}&index=${currentFrame}" alt="${cameraKey} frame ${currentFrame}" />
+            </div>
+        </div>
+    `).join("");
+
+    // Playback controls
+    const playbackHtml = numFrames > 1 ? `
+        <div class="dataset-playback">
+            <button class="dataset-playback__btn" data-action="${isPlaying ? "pause" : "play"}" type="button" aria-label="${isPlaying ? "Pause" : "Play"}">
+                ${isPlaying ? "⏸" : "▶"}
+            </button>
+            <input type="range" class="dataset-playback__slider" min="0" max="${numFrames - 1}" value="${currentFrame}" />
+            <span class="dataset-playback__counter">${currentFrame + 1} / ${numFrames}</span>
+        </div>
+    ` : "";
+
+    // Plots
+    const plotsHtml = DATASET_PLOT_GROUPS.map((group) => {
+        // Check if any data exists for this group
+        let hasAnyData = false;
+        if (seriesData) {
+            for (const prefix of [group.stateKey, group.actionKey]) {
+                for (let i = 0; i < group.labels.length; i++) {
+                    if (seriesData[`${prefix}.${i}`]) { hasAnyData = true; break; }
+                }
+                if (hasAnyData) break;
+            }
+        }
+        const svg = seriesData ? _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) : "";
+        const legend = seriesData ? _buildDatasetPlotLegend(seriesData, group) : "";
+        return `
+            <div class="dataset-plot-card">
+                <span class="eyebrow">${group.title}</span>
+                <div class="trend-chart">
+                    ${svg}
+                    ${!hasAnyData ? `<div class="trend-chart__empty">No data available</div>` : ""}
+                </div>
+                <div class="trend-chart__legend">${legend}</div>
+            </div>
+        `;
+    }).join("");
+
+    container.innerHTML = `
+        <div class="feed-row dataset-feed-row">${feedsHtml}</div>
+        ${playbackHtml}
+        <div class="dataset-plots-grid">${plotsHtml}</div>
+    `;
+
+    // Attach playback event handlers
+    const slider = container.querySelector(".dataset-playback__slider");
+    if (slider) {
+        slider.oninput = () => {
+            state[frameKey] = parseInt(slider.value, 10);
+            _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey);
+        };
+    }
+    const playBtn = container.querySelector(".dataset-playback__btn");
+    if (playBtn) {
+        playBtn.onclick = () => {
+            state[playingKey] = !state[playingKey];
+            if (state[playingKey]) {
+                _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey);
+            } else {
+                _stopDatasetPlayback(playingKey);
+            }
+            // Update button
+            playBtn.textContent = state[playingKey] ? "⏸" : "▶";
+            playBtn.dataset.action = state[playingKey] ? "pause" : "play";
+            playBtn.ariaLabel = state[playingKey] ? "Pause" : "Play";
+        };
+    }
+
+    // Start playback if already playing
+    if (isPlaying) {
+        _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey);
+    }
+}
+
+function _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey) {
+    const currentFrame = state[frameKey];
+    const numFrames = preview.num_frames || 0;
+    const datasetPath = preview.path;
+
+    // Update images
+    container.querySelectorAll(".dataset-frame-img").forEach((img) => {
+        const key = img.dataset.cameraKey;
+        img.src = `/datasets/frame-image?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(key)}&index=${currentFrame}`;
+    });
+
+    // Update slider and counter
+    const slider = container.querySelector(".dataset-playback__slider");
+    if (slider) slider.value = currentFrame;
+    const counter = container.querySelector(".dataset-playback__counter");
+    if (counter) counter.textContent = `${currentFrame + 1} / ${numFrames}`;
+
+    // Update playheads in SVGs
+    container.querySelectorAll(".dataset-plot-card").forEach((card, gi) => {
+        const group = DATASET_PLOT_GROUPS[gi];
+        if (!group || !seriesData) return;
+        const chartDiv = card.querySelector(".trend-chart");
+        if (!chartDiv) return;
+        chartDiv.innerHTML = _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame);
+        // Re-add "no data" overlay if needed
+        let hasAnyData = false;
+        for (const prefix of [group.stateKey, group.actionKey]) {
+            for (let i = 0; i < group.labels.length; i++) {
+                if (seriesData[`${prefix}.${i}`]) { hasAnyData = true; break; }
+            }
+            if (hasAnyData) break;
+        }
+        if (!hasAnyData) {
+            chartDiv.innerHTML += `<div class="trend-chart__empty">No data available</div>`;
+        }
+    });
+}
+
+function _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey) {
+    const animKey = playingKey === "previewPlaying" ? "_previewAnimFrame" : "_combinedAnimFrame";
+    _stopDatasetPlayback(playingKey);
+    const fps = preview.fps || 30;
+    const numFrames = preview.num_frames || 0;
+    const interval = 1000 / fps;
+    let lastTime = 0;
+
+    function tick(timestamp) {
+        if (!state[playingKey]) return;
+        if (timestamp - lastTime >= interval) {
+            lastTime = timestamp;
+            state[frameKey] = (state[frameKey] + 1) % numFrames;
+            _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey);
+        }
+        if (playingKey === "previewPlaying") {
+            _previewAnimFrame = requestAnimationFrame(tick);
+        } else {
+            _combinedAnimFrame = requestAnimationFrame(tick);
+        }
+    }
+
+    if (playingKey === "previewPlaying") {
+        _previewAnimFrame = requestAnimationFrame(tick);
+    } else {
+        _combinedAnimFrame = requestAnimationFrame(tick);
+    }
+}
+
+function _stopDatasetPlayback(playingKey) {
+    if (playingKey === "previewPlaying" && _previewAnimFrame) {
+        cancelAnimationFrame(_previewAnimFrame);
+        _previewAnimFrame = null;
+    } else if (playingKey === "combinedPlaying" && _combinedAnimFrame) {
+        cancelAnimationFrame(_combinedAnimFrame);
+        _combinedAnimFrame = null;
+    }
+}
 
 function byId(id) {
     return document.getElementById(id);
@@ -1197,21 +1522,17 @@ function renderRecordingOptions(recording = {}) {
     const selected = new Set(state.recordingEntries);
     const allSelected = DEFAULT_RECORDING_ENTRY_IDS.every((entryId) => selected.has(entryId));
 
-    const selectAllLabel = document.createElement("label");
-    selectAllLabel.className = `recording-option ${locked ? "recording-option--disabled" : ""}`;
-    selectAllLabel.innerHTML = `
-        <input type="checkbox" ${allSelected ? "checked" : ""} ${locked ? "disabled" : ""} />
-        <span class="recording-option__text">
-            <span class="recording-option__label">Select All</span>
-        </span>
-    `;
-    const selectAllInput = selectAllLabel.querySelector("input");
-    selectAllInput.onchange = () => {
-        state.recordingEntries = selectAllInput.checked ? [...DEFAULT_RECORDING_ENTRY_IDS] : [];
+    const selectAllButton = document.createElement("button");
+    selectAllButton.className = "secondary-button recording-select-all-button";
+    selectAllButton.type = "button";
+    selectAllButton.disabled = locked;
+    selectAllButton.textContent = allSelected ? "Deselect All" : "Select All";
+    selectAllButton.onclick = () => {
+        state.recordingEntries = allSelected ? [] : [...DEFAULT_RECORDING_ENTRY_IDS];
         renderRecordingOptions(recording);
         renderRecordingStatusPanel(state.teleopStatus);
     };
-    container.appendChild(selectAllLabel);
+    container.appendChild(selectAllButton);
 
     RECORDING_ENTRY_OPTIONS.forEach((option) => {
         const checked = selected.has(option.id);
@@ -1817,8 +2138,17 @@ async function refreshTeleopStatusWithIndicator() {
 async function loadTrainingPreview(episodePath, options = {}) {
     try {
         state.preview = await api(`/datasets/preview?path=${encodeURIComponent(episodePath)}`);
+        state.previewFrame = 0;
+        state.previewPlaying = false;
+        _stopDatasetPlayback("previewPlaying");
+        try {
+            state.previewSeries = await api(`/datasets/series?path=${encodeURIComponent(episodePath)}`);
+        } catch (_) {
+            state.previewSeries = null;
+        }
     } catch (error) {
         state.preview = null;
+        state.previewSeries = null;
         if (!options.silent) {
             showToast(error.message, true);
         }
@@ -1892,13 +2222,12 @@ function renderTraining() {
         <aside class="panel">
           <div class="panel-header">
             <h2>Episodes</h2>
-            <button class="secondary-button" id="training-select-all" type="button">Select All</button>
+            <button class="secondary-button" id="training-select-all" type="button">${state.selectedEpisodes.length === state.episodes.length ? "Deselect All" : "Select All"}</button>
           </div>
           <div class="episode-list" id="training-episode-picker"></div>
         </aside>
         <div class="training-main">
-          <div class="panel panel--soft"><div class="feed-row" id="training-preview-feeds"></div></div>
-          <div class="panel panel--soft"><h3>Dataset Fields</h3><div id="training-preview-legend"></div></div>
+          <div id="episode-preview-block"></div>
           <div class="control-bar">
             <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
             <button id="training-combine" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Combine Selected Episodes</button>
@@ -1941,16 +2270,11 @@ function renderTraining() {
             }
             picker.appendChild(row);
         });
-        const feeds = byId("training-preview-feeds");
-        const legend = byId("training-preview-legend");
+        const previewBlock = byId("episode-preview-block");
         if (!state.preview) {
-            feeds.innerHTML = `<div class="feed__placeholder">Select an episode dataset to preview metadata.</div>`;
-            legend.innerHTML = "";
+            previewBlock.innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Select an episode to preview.</div></div>`;
         } else {
-            feeds.innerHTML = (state.preview.camera_keys || ["No camera keys available"]).map((cameraKey) => `
-        <div class="feed"><div class="feed__header"><span>${cameraKey}</span><strong>${state.preview.fps} FPS</strong></div><div class="feed__placeholder">Recorded media placeholder</div></div>
-      `).join("");
-            legend.innerHTML = (state.preview.numeric_keys || []).slice(0, 24).map((key) => `<span class="legend-chip">${key}</span>`).join("");
+            renderDatasetPreviewBlock("episode-preview-block", state.preview, state.previewSeries?.series || null, "previewFrame", "previewPlaying");
         }
         byId("training-select-all").onclick = () => {
             state.selectedEpisodes = state.selectedEpisodes.length === state.episodes.length ? [] : state.episodes.map((episode) => episode.path);
@@ -1970,6 +2294,14 @@ function renderTraining() {
                 });
                 state.combinedPath = result.root;
                 state.combinedPreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
+                state.combinedFrame = 0;
+                state.combinedPlaying = false;
+                _stopDatasetPlayback("combinedPlaying");
+                try {
+                    state.combinedSeries = await api(`/datasets/series?path=${encodeURIComponent(result.root)}`);
+                } catch (_) {
+                    state.combinedSeries = null;
+                }
                 renderTraining();
             } catch (error) {
                 showToast(error.message, true);
@@ -1984,17 +2316,11 @@ function renderTraining() {
         container.innerHTML = `
             <div class="panel-header"><div><h2>Combined Dataset</h2></div></div>
       <div class="progress-block ${state.combinedPreview ? "hidden" : ""}"><div><div class="progress-bar"><span style="width: 72%"></span></div><p>Combining selected episodes...</p></div></div>
-      <div class="${state.combinedPreview ? "" : "hidden"}" id="combined-preview-block">
-        <div class="feed-row" id="combined-feed-row"></div>
-        <div class="panel panel--soft"><h3>Combined Dataset Fields</h3><div id="combined-legend"></div></div>
-      </div>
+      <div class="${state.combinedPreview ? "" : "hidden"}" id="combined-preview-block"></div>
       <div class="control-bar"><button class="secondary-button" id="combine-prev" type="button">Previous Step</button><button id="combine-next" type="button" ${state.combinedPreview ? "" : "disabled"}>Next</button></div>
     `;
         if (state.combinedPreview) {
-            byId("combined-feed-row").innerHTML = (state.combinedPreview.camera_keys || []).map((cameraKey) => `
-        <div class="feed"><div class="feed__header"><span>${cameraKey}</span><strong>${state.combinedPreview.fps} FPS</strong></div><div class="feed__placeholder">Combined media placeholder</div></div>
-      `).join("");
-            byId("combined-legend").innerHTML = (state.combinedPreview.numeric_keys || []).slice(0, 24).map((key) => `<span class="legend-chip">${key}</span>`).join("");
+            renderDatasetPreviewBlock("combined-preview-block", state.combinedPreview, state.combinedSeries?.series || null, "combinedFrame", "combinedPlaying");
         }
         byId("combine-prev").onclick = () => {
             state.trainingStep = 2;
@@ -2123,7 +2449,9 @@ function updateBrowserSelectionUi() {
     const selectablePaths = getBrowserSelectablePaths();
     if (selectAllButton) {
         selectAllButton.disabled = selectablePaths.length === 0;
-        selectAllButton.textContent = "Select All";
+        const allSelected = selectablePaths.length > 0
+            && selectablePaths.every((path) => state.pathBrowser.selected.includes(path));
+        selectAllButton.textContent = allSelected ? "Deselect All" : "Select All";
     }
 
     updateBrowserConfirmState();

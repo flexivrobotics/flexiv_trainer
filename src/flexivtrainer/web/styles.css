@@ -719,6 +719,13 @@ button:disabled {
     margin-top: 0;
 }
 
+.recording-select-all-button {
+    width: 100%;
+    font-size: 0.82rem;
+    padding: 0.52rem 0.8rem;
+    margin-bottom: 0.15rem;
+}
+
 .recording-option {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -1466,6 +1473,97 @@ button:active {
     background: var(--accent-soft);
     margin: 0 0.5rem 0.5rem 0;
     font-size: 0.85rem;
+}
+
+/* Dataset preview player */
+.dataset-feed-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+}
+
+.dataset-playback {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.75rem 0;
+    padding: 0.6rem 1rem;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.5);
+    border: 1px solid var(--line);
+}
+
+.dataset-playback__btn {
+    width: 2.2rem;
+    height: 2.2rem;
+    border-radius: 50%;
+    border: 1px solid var(--line);
+    background: white;
+    cursor: pointer;
+    font-size: 0.9rem;
+    display: grid;
+    place-items: center;
+}
+
+.dataset-playback__btn:hover {
+    background: var(--accent-soft);
+}
+
+.dataset-playback__slider {
+    flex: 1;
+    accent-color: var(--accent-strong);
+    cursor: pointer;
+}
+
+.dataset-playback__counter {
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    min-width: 5.5rem;
+    text-align: right;
+}
+
+.dataset-plots-grid {
+    display: grid;
+    gap: 1rem;
+    margin-top: 0.75rem;
+}
+
+.dataset-plot-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.dataset-plot-card .eyebrow {
+    font-size: 0.82rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-strong, #1a5f7a);
+    font-weight: 600;
+}
+
+.dataset-plot-card .trend-chart {
+    aspect-ratio: 3 / 1;
+}
+
+.dataset-plot__playhead {
+    stroke: rgba(255, 100, 100, 0.7);
+    stroke-width: 2;
+    stroke-dasharray: 6 3;
+}
+
+.trend-chart__legend-item--dim {
+    opacity: 0.4;
+}
+
+.trend-chart__swatch--dashed {
+    position: relative;
+    background: repeating-linear-gradient(90deg,
+            var(--swatch) 0 4px,
+            transparent 4px 7px);
+    border-radius: 2px;
+    height: 0.35rem;
 }
 
 .output-picker {

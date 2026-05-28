@@ -497,10 +497,17 @@ class RuntimeManager:
             for key, feature in dataset.features.items()
             if feature["dtype"] in {"image", "video"}
         ]
+        _META_KEYS = {
+            "index",
+            "episode_index",
+            "frame_index",
+            "task_index",
+            "timestamp",
+        }
         numeric_keys = [
             key
             for key, feature in dataset.features.items()
-            if feature["dtype"] not in {"image", "video"}
+            if feature["dtype"] not in {"image", "video"} and key not in _META_KEYS
         ]
         first_item = dataset.get_raw_item(0) if dataset.num_frames else {}
         return {
@@ -516,6 +523,148 @@ class RuntimeManager:
                 first_item.get("task") if isinstance(first_item, dict) else None
             ),
         }
+
+    def dataset_series(self, dataset_path: Path) -> dict[str, Any]:
+        """Return all numeric time-series data from a dataset for plotting."""
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError as exc:
+            raise RuntimeError(
+                _optional_dependency_error("Dataset series", exc)
+            ) from exc
+
+        import json
+
+        storage_root = self.settings.storage.root.expanduser().resolve()
+        dataset_path = dataset_path.resolve()
+        if not str(dataset_path).startswith(str(storage_root)):
+            raise ValueError(
+                f"Access denied: path must be within storage root ({storage_root})"
+            )
+
+        manifest_path = dataset_path / "episode.json"
+        if not manifest_path.exists():
+            manifest_path = dataset_path / "combined.json"
+
+        repo_id = f"local/{dataset_path.name}"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            repo_id = manifest.get("repo_id", repo_id)
+
+        dataset = LeRobotDataset(repo_id, root=dataset_path)
+
+        # Identify numeric keys (excluding metadata)
+        _META_KEYS = {
+            "index",
+            "episode_index",
+            "frame_index",
+            "task_index",
+            "timestamp",
+        }
+        numeric_keys = [
+            key
+            for key, feat in dataset.features.items()
+            if feat["dtype"] not in {"image", "video"} and key not in _META_KEYS
+        ]
+
+        # Read all numeric data
+        import numpy as np
+        import torch
+
+        series: dict[str, list[float | None]] = {key: [] for key in numeric_keys}
+        timestamps: list[float] = []
+
+        for idx in range(dataset.num_frames):
+            item = dataset.get_raw_item(idx)
+            ts = item.get("timestamp")
+            if isinstance(ts, torch.Tensor):
+                ts = ts.item()
+            timestamps.append(float(ts) if ts is not None else idx / dataset.fps)
+            for key in numeric_keys:
+                val = item.get(key)
+                if val is None:
+                    series[key].append(None)
+                elif isinstance(val, torch.Tensor):
+                    series[key].append(val.item())
+                elif isinstance(val, (int, float, np.integer, np.floating)):
+                    series[key].append(float(val))
+                else:
+                    series[key].append(None)
+
+        return {
+            "path": str(dataset_path),
+            "fps": dataset.fps,
+            "num_frames": dataset.num_frames,
+            "timestamps": timestamps,
+            "series": series,
+            "numeric_keys": numeric_keys,
+        }
+
+    def dataset_frame_image(
+        self, dataset_path: Path, camera_key: str, frame_index: int
+    ) -> bytes:
+        """Return a single frame image as JPEG bytes."""
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError as exc:
+            raise RuntimeError(
+                _optional_dependency_error("Dataset frame image", exc)
+            ) from exc
+
+        import io
+        import json
+
+        import numpy as np
+        import torch
+        from PIL import Image
+
+        storage_root = self.settings.storage.root.expanduser().resolve()
+        dataset_path = dataset_path.resolve()
+        if not str(dataset_path).startswith(str(storage_root)):
+            raise ValueError(
+                f"Access denied: path must be within storage root ({storage_root})"
+            )
+
+        manifest_path = dataset_path / "episode.json"
+        if not manifest_path.exists():
+            manifest_path = dataset_path / "combined.json"
+
+        repo_id = f"local/{dataset_path.name}"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            repo_id = manifest.get("repo_id", repo_id)
+
+        dataset = LeRobotDataset(repo_id, root=dataset_path)
+
+        if frame_index < 0 or frame_index >= dataset.num_frames:
+            raise IndexError(
+                f"Frame index {frame_index} out of range [0, {dataset.num_frames})"
+            )
+
+        if camera_key not in dataset.features:
+            raise KeyError(f"Camera key '{camera_key}' not found in dataset")
+
+        item = dataset.get_raw_item(frame_index)
+        image_data = item.get(camera_key)
+        if image_data is None:
+            raise KeyError(
+                f"No image data for key '{camera_key}' at frame {frame_index}"
+            )
+
+        # Convert tensor to numpy HWC
+        if isinstance(image_data, torch.Tensor):
+            image_data = image_data.numpy()
+        if isinstance(image_data, np.ndarray):
+            if image_data.ndim == 3 and image_data.shape[0] in (1, 3, 4):
+                image_data = np.moveaxis(image_data, 0, -1)
+            # Scale from [0, 1] float to [0, 255] uint8 if needed
+            if image_data.dtype in (np.float32, np.float64):
+                image_data = (image_data * 255).clip(0, 255).astype(np.uint8)
+
+        img = Image.fromarray(image_data)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        return buf.getvalue()
 
 
 @lru_cache(maxsize=1)
