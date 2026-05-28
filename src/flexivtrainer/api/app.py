@@ -48,7 +48,7 @@ def create_app() -> FastAPI:
             get_runtime_manager().shutdown()
             get_runtime_manager.cache_clear()
 
-    app = FastAPI(title="Flexiv Trainer API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Flexiv Trainer API", version="1.0.0", lifespan=lifespan)
 
     @app.middleware("http")
     async def terminal_request_log(request: Request, call_next):
