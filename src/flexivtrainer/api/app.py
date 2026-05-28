@@ -20,9 +20,10 @@ from time import perf_counter
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from flexivtrainer import __version__
 from flexivtrainer.api.routes import datasets, system, teleop, training
 from flexivtrainer.config import get_settings
 from flexivtrainer.observability import (
@@ -48,7 +49,7 @@ def create_app() -> FastAPI:
             get_runtime_manager().shutdown()
             get_runtime_manager.cache_clear()
 
-    app = FastAPI(title="Flexiv Trainer API", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="Flexiv Trainer API", version=__version__, lifespan=lifespan)
 
     @app.middleware("http")
     async def terminal_request_log(request: Request, call_next):
@@ -78,8 +79,13 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
 
     @app.get("/", include_in_schema=False)
-    def root() -> FileResponse:
-        return FileResponse(WEB_ROOT / "index.html")
+    def root() -> HTMLResponse:
+        index_html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        index_html = index_html.replace("__FLEXIV_TRAINER_VERSION__", __version__)
+        return HTMLResponse(
+            index_html,
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     app.include_router(system.router)
     app.include_router(teleop.router)

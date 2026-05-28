@@ -1609,6 +1609,29 @@ button:active {
     gap: 0.8rem;
 }
 
+.version-badge {
+    position: fixed;
+    left: 1rem;
+    bottom: 1rem;
+    z-index: 29;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.34rem 0.62rem;
+    border-radius: 999px;
+    border: 1px solid rgba(72, 103, 125, 0.18);
+    background: rgba(255, 252, 246, 0.84);
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: lowercase;
+    box-shadow: 0 10px 24px rgba(86, 109, 128, 0.12);
+    backdrop-filter: blur(14px);
+    pointer-events: none;
+    user-select: none;
+}
+
 .notification-toggle {
     position: relative;
     width: 3.8rem;
