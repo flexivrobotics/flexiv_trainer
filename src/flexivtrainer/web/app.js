@@ -29,11 +29,27 @@ const state = {
     outputDir: "",
     selectedPolicy: "diffusion",
     pathBrowser: {
+        mode: "generic",
         title: "",
         currentPath: "/",
+        rootPath: "/",
         directoriesOnly: true,
         multiSelect: false,
         selected: [],
+        items: [],
+        allowNavigation: true,
+        annotateEpisodeDirs: false,
+        showSelectAll: false,
+        hideHeader: false,
+        hideEyebrow: false,
+        hideClose: false,
+        hideUp: false,
+        requireSelection: false,
+        fallbackToCurrentPath: true,
+        emptyMessage: "No entries available.",
+        confirmLabel: "Select",
+        pathNote: "Current path",
+        eyebrow: "Server Path Browser",
         onConfirm: null,
     },
     intervals: {
@@ -1798,32 +1814,55 @@ async function refreshTeleopStatusWithIndicator() {
     }
 }
 
+async function loadTrainingPreview(episodePath, options = {}) {
+    try {
+        state.preview = await api(`/datasets/preview?path=${encodeURIComponent(episodePath)}`);
+    } catch (error) {
+        state.preview = null;
+        if (!options.silent) {
+            showToast(error.message, true);
+        }
+    }
+}
+
 function renderTraining() {
     const container = byId("training-content");
 
     if (state.trainingStep === 1) {
         container.innerHTML = `
-      <div class="panel-header">
-        <div>
-          <h2>Load Episode Datasets</h2>
-        </div>
-      </div>
+            <div class="panel-header panel-header--training-step">
+                <div>
+                    <h2 class="training-step-title">Load Episodes</h2>
+                </div>
+            </div>
       <div class="episode-list" id="load-episode-list"></div>
-      <div class="control-bar">
-        <button class="secondary-button" id="training-add-episode" type="button">Add Episode</button>
+            <div class="control-bar control-bar--episode-step">
+                <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add episode dataset" title="Add episode dataset">
+                    <span aria-hidden="true">+</span>
+                </button>
         <button id="training-next-step" type="button" ${state.episodes.length ? "" : "disabled"}>Next</button>
       </div>
     `;
         const list = byId("load-episode-list");
         if (!state.episodes.length) {
-            list.innerHTML = `<div class="episode-row"><span>No episode datasets selected yet.</span></div>`;
+            list.innerHTML = `
+                                <div class="episode-empty-state">
+                                        <span>No episode datasets selected yet.</span>
+                                </div>
+                        `;
         } else {
             state.episodes.forEach((episode, index) => {
                 const row = document.createElement("div");
-                row.className = "episode-row";
+                row.className = "episode-entry-row";
                 row.innerHTML = `
-          <div class="episode-row__main"><strong>${index + 1}</strong><span>${episode.name}</span></div>
-          <button class="secondary-button" data-remove-episode="${episode.path}" type="button">Remove</button>
+                    <div class="episode-entry-card">
+                        <strong class="episode-entry-card__index">${index + 1}</strong>
+                        <span class="episode-entry-card__divider" aria-hidden="true"></span>
+                        <span class="episode-entry-card__name">${escapeHtml(episode.name)}</span>
+                    </div>
+                    <button class="round-icon-button round-icon-button--remove" data-remove-episode="${escapeHtml(episode.path)}" type="button" aria-label="Remove ${escapeHtml(episode.name)}" title="Remove ${escapeHtml(episode.name)}">
+                        <span aria-hidden="true">&minus;</span>
+                    </button>
         `;
                 list.appendChild(row);
             });
@@ -1845,6 +1884,9 @@ function renderTraining() {
     }
 
     if (state.trainingStep === 2) {
+        if (state.preview && !state.episodes.some((episode) => episode.path === state.preview.path)) {
+            state.preview = null;
+        }
         container.innerHTML = `
       <div class="training-layout">
         <aside class="panel">
@@ -1865,39 +1907,39 @@ function renderTraining() {
       </div>
     `;
         const picker = byId("training-episode-picker");
+        const previewPath = state.preview?.path || "";
         state.episodes.forEach((episode, index) => {
-            const row = document.createElement("button");
-            row.className = "episode-row";
-            row.type = "button";
+            const row = document.createElement("div");
+            row.className = `episode-row episode-row--selectable ${previewPath === episode.path ? "episode-row--selected" : ""}`.trim();
             row.innerHTML = `
         <div class="episode-row__main">
           <input data-toggle-episode="${episode.path}" type="checkbox" ${state.selectedEpisodes.includes(episode.path) ? "checked" : ""} />
           <strong>${index + 1}</strong>
-          <span>${episode.name}</span>
+          <span>${escapeHtml(episode.name)}</span>
         </div>
       `;
-            row.onclick = async (event) => {
-                if (event.target instanceof HTMLInputElement) {
-                    return;
-                }
-                state.preview = await api(`/datasets/preview?path=${encodeURIComponent(episode.path)}`);
+            row.onclick = async () => {
+                await loadTrainingPreview(episode.path);
                 renderTraining();
             };
+            const input = row.querySelector("[data-toggle-episode]");
+            if (input instanceof HTMLInputElement) {
+                input.onclick = (event) => event.stopPropagation();
+                input.onchange = async () => {
+                    const path = input.dataset.toggleEpisode;
+                    if (!path) {
+                        return;
+                    }
+                    if (state.selectedEpisodes.includes(path)) {
+                        state.selectedEpisodes = state.selectedEpisodes.filter((item) => item !== path);
+                    } else {
+                        state.selectedEpisodes = [...state.selectedEpisodes, path];
+                    }
+                    await loadTrainingPreview(episode.path);
+                    renderTraining();
+                };
+            }
             picker.appendChild(row);
-        });
-        picker.querySelectorAll("[data-toggle-episode]").forEach((input) => {
-            input.onchange = () => {
-                const path = input.dataset.toggleEpisode;
-                if (!path) {
-                    return;
-                }
-                if (state.selectedEpisodes.includes(path)) {
-                    state.selectedEpisodes = state.selectedEpisodes.filter((item) => item !== path);
-                } else {
-                    state.selectedEpisodes = [...state.selectedEpisodes, path];
-                }
-                renderTraining();
-            };
         });
         const feeds = byId("training-preview-feeds");
         const legend = byId("training-preview-legend");
@@ -2036,44 +2078,223 @@ function renderTraining() {
     };
 }
 
+function isEpisodeBrowserMode() {
+    return state.pathBrowser.mode === "episodes";
+}
+
+function getBrowserSelectablePaths() {
+    return (state.pathBrowser.items || [])
+        .filter((item) => {
+            if (isEpisodeBrowserMode()) {
+                return !!item.is_valid_episode;
+            }
+            return state.pathBrowser.directoriesOnly ? !!item.is_dir : true;
+        })
+        .map((item) => item.path);
+}
+
+function updateBrowserConfirmState() {
+    const confirmButton = byId("browser-confirm");
+    if (!confirmButton) {
+        return;
+    }
+    const selectionRequired = !!state.pathBrowser.requireSelection || !!state.pathBrowser.multiSelect;
+    confirmButton.disabled = selectionRequired && !state.pathBrowser.selected.length;
+}
+
+function updateBrowserSelectionUi() {
+    const list = byId("browser-list");
+    if (!list) {
+        return;
+    }
+
+    const selected = new Set(state.pathBrowser.selected);
+    list.querySelectorAll("[data-browser-path]").forEach((element) => {
+        const path = element.dataset.browserPath;
+        const isSelected = !!path && selected.has(path);
+        element.classList.toggle("browser-item--selected", isSelected);
+        const checkbox = element.querySelector("input[type='checkbox']");
+        if (checkbox instanceof HTMLInputElement) {
+            checkbox.checked = isSelected;
+        }
+    });
+
+    const selectAllButton = byId("browser-select-all");
+    const selectablePaths = getBrowserSelectablePaths();
+    if (selectAllButton) {
+        selectAllButton.disabled = selectablePaths.length === 0;
+        selectAllButton.textContent = "Select All";
+    }
+
+    updateBrowserConfirmState();
+}
+
+function setBrowserSelection(paths) {
+    const allowed = new Set(getBrowserSelectablePaths());
+    state.pathBrowser.selected = paths.filter((path) => allowed.has(path));
+    updateBrowserSelectionUi();
+}
+
+function toggleBrowserSelection(path) {
+    if (!path) {
+        return;
+    }
+    const nextSelected = new Set(state.pathBrowser.selected);
+    if (nextSelected.has(path)) {
+        nextSelected.delete(path);
+    } else {
+        if (!state.pathBrowser.multiSelect) {
+            nextSelected.clear();
+        }
+        nextSelected.add(path);
+    }
+    setBrowserSelection([...nextSelected]);
+}
+
+function syncBrowserDialogChrome() {
+    const header = byId("browser-header");
+    const eyebrow = byId("browser-eyebrow");
+    const closeButton = byId("browser-close");
+    const upButton = byId("browser-up");
+    const selectAllButton = byId("browser-select-all");
+    const confirmButton = byId("browser-confirm");
+    const pathNote = byId("browser-path-note");
+
+    if (header) {
+        header.classList.toggle("hidden", !!state.pathBrowser.hideHeader);
+    }
+    if (eyebrow) {
+        eyebrow.textContent = state.pathBrowser.eyebrow || "";
+        eyebrow.classList.toggle("hidden", !!state.pathBrowser.hideEyebrow || !state.pathBrowser.eyebrow);
+    }
+    if (closeButton) {
+        closeButton.classList.toggle("hidden", !!state.pathBrowser.hideClose);
+    }
+    if (upButton) {
+        upButton.classList.toggle("hidden", !!state.pathBrowser.hideUp);
+    }
+    if (selectAllButton) {
+        selectAllButton.classList.toggle("hidden", !state.pathBrowser.showSelectAll);
+    }
+    if (confirmButton) {
+        confirmButton.textContent = state.pathBrowser.confirmLabel || "Select";
+    }
+    if (pathNote) {
+        pathNote.textContent = state.pathBrowser.pathNote || "";
+        pathNote.classList.toggle("hidden", !state.pathBrowser.pathNote);
+    }
+    byId("browser-title").textContent = state.pathBrowser.title || "Select Path";
+}
+
 async function refreshBrowser(path) {
-    const result = await api(`/datasets/browse?path=${encodeURIComponent(path)}&directories_only=${state.pathBrowser.directoriesOnly}`);
+    const params = new URLSearchParams();
+    params.set("path", path);
+    params.set("directories_only", String(state.pathBrowser.directoriesOnly));
+    if (state.pathBrowser.rootPath) {
+        params.set("root_path", state.pathBrowser.rootPath);
+    }
+    if (state.pathBrowser.annotateEpisodeDirs) {
+        params.set("annotate_episode_dirs", "true");
+    }
+    const result = await api(`/datasets/browse?${params.toString()}`);
     state.pathBrowser.currentPath = result.path;
-    state.pathBrowser.selected = [];
-    byId("browser-title").textContent = state.pathBrowser.title;
+    state.pathBrowser.rootPath = result.root_path || state.pathBrowser.rootPath || result.path;
+    state.pathBrowser.items = result.items || [];
+    state.pathBrowser.selected = state.pathBrowser.selected.filter((selectedPath) =>
+        state.pathBrowser.items.some((item) => item.path === selectedPath),
+    );
+    syncBrowserDialogChrome();
     byId("browser-path").textContent = result.path;
     const list = byId("browser-list");
     list.innerHTML = "";
-    result.items.forEach((item) => {
+
+    if (!state.pathBrowser.items.length) {
+        list.innerHTML = `<div class="dialog-empty-state">${escapeHtml(state.pathBrowser.emptyMessage || "No entries available.")}</div>`;
+        updateBrowserSelectionUi();
+        byId("browser-modal").classList.remove("hidden");
+        return;
+    }
+
+    state.pathBrowser.items.forEach((item) => {
+        if (isEpisodeBrowserMode()) {
+            const selectable = !!item.is_valid_episode;
+            const row = document.createElement("label");
+            row.className = `browser-item browser-item--episode ${selectable ? "" : "browser-item--invalid"}`.trim();
+            row.dataset.browserPath = item.path;
+            row.innerHTML = `
+                <span class="browser-item__main">
+                    <input class="browser-item__checkbox" type="checkbox" ${selectable ? "" : "disabled"} />
+                    <strong class="browser-item__name">${escapeHtml(item.name)}</strong>
+                </span>
+                <span class="browser-item__meta ${selectable ? "hidden" : ""}">Invalid episode</span>
+            `;
+            const checkbox = row.querySelector("input");
+            if (checkbox instanceof HTMLInputElement) {
+                checkbox.checked = state.pathBrowser.selected.includes(item.path);
+                checkbox.onchange = () => toggleBrowserSelection(item.path);
+            }
+            list.appendChild(row);
+            return;
+        }
+
         const button = document.createElement("button");
         button.className = "browser-item";
         button.type = "button";
-        button.innerHTML = `<strong>${item.name}</strong><span>${item.is_dir ? "Directory" : "File"}</span>`;
+        button.dataset.browserPath = item.path;
+        button.innerHTML = `<strong>${escapeHtml(item.name)}</strong><span>${item.is_dir ? "Directory" : "File"}</span>`;
         button.onclick = () => {
-            if (!item.is_dir) {
+            if (!item.is_dir && state.pathBrowser.directoriesOnly) {
                 return;
             }
             if (state.pathBrowser.multiSelect) {
-                if (state.pathBrowser.selected.includes(item.path)) {
-                    state.pathBrowser.selected = state.pathBrowser.selected.filter((value) => value !== item.path);
-                } else {
-                    state.pathBrowser.selected = [...state.pathBrowser.selected, item.path];
-                }
-                button.classList.toggle("browser-item--selected", state.pathBrowser.selected.includes(item.path));
+                toggleBrowserSelection(item.path);
             } else {
-                state.pathBrowser.selected = [item.path];
-                document.querySelectorAll(".browser-item").forEach((element) => element.classList.remove("browser-item--selected"));
-                button.classList.add("browser-item--selected");
+                setBrowserSelection([item.path]);
             }
         };
-        button.ondblclick = () => item.is_dir && refreshBrowser(item.path).catch((error) => showToast(error.message, true));
+        if (state.pathBrowser.allowNavigation) {
+            button.ondblclick = () => {
+                if (item.is_dir) {
+                    refreshBrowser(item.path).catch((error) => showToast(error.message, true));
+                }
+            };
+        }
         list.appendChild(button);
     });
+
+    updateBrowserSelectionUi();
     byId("browser-modal").classList.remove("hidden");
 }
 
 async function openBrowser(options) {
-    state.pathBrowser = { ...state.pathBrowser, ...options, selected: [] };
+    state.pathBrowser = {
+        ...state.pathBrowser,
+        mode: "generic",
+        title: "Select Path",
+        currentPath: "/",
+        rootPath: "",
+        directoriesOnly: true,
+        multiSelect: false,
+        selected: [],
+        items: [],
+        allowNavigation: true,
+        annotateEpisodeDirs: false,
+        showSelectAll: false,
+        hideHeader: false,
+        hideEyebrow: false,
+        hideClose: false,
+        hideUp: false,
+        requireSelection: false,
+        fallbackToCurrentPath: true,
+        emptyMessage: "No entries available.",
+        confirmLabel: "Select",
+        pathNote: "Current path",
+        eyebrow: "Server Path Browser",
+        onConfirm: null,
+        ...options,
+        selected: [],
+        items: [],
+    };
     await refreshBrowser(options.startPath);
 }
 
@@ -2083,12 +2304,29 @@ function closeBrowser() {
 
 function openEpisodeBrowser() {
     openBrowser({
-        title: "Select Episode Datasets",
+        mode: "episodes",
+        title: "",
         startPath: state.summary.storage.episodes,
+        rootPath: state.summary.storage.episodes,
         directoriesOnly: true,
         multiSelect: true,
+        allowNavigation: false,
+        annotateEpisodeDirs: true,
+        showSelectAll: true,
+        hideHeader: true,
+        hideEyebrow: true,
+        hideClose: true,
+        hideUp: true,
+        requireSelection: true,
+        fallbackToCurrentPath: false,
+        emptyMessage: "No episode datasets found under this directory.",
+        confirmLabel: "Load",
+        pathNote: "Episodes stored under:",
         onConfirm: (paths) => {
-            paths.forEach((path) => {
+            const orderedPaths = (state.pathBrowser.items || [])
+                .map((item) => item.path)
+                .filter((itemPath) => paths.includes(itemPath));
+            orderedPaths.forEach((path) => {
                 if (!state.episodes.some((item) => item.path === path)) {
                     state.episodes.push({ name: path.split("/").pop(), path });
                 }
@@ -2330,9 +2568,17 @@ function bindGlobalEvents() {
 
     byId("browser-close").onclick = closeBrowser;
     byId("browser-cancel").onclick = closeBrowser;
+    byId("browser-select-all").onclick = () => {
+        const selectablePaths = getBrowserSelectablePaths();
+        const allSelected = selectablePaths.length > 0
+            && selectablePaths.every((path) => state.pathBrowser.selected.includes(path));
+        setBrowserSelection(allSelected ? [] : selectablePaths);
+    };
     byId("browser-up").onclick = () => {
         const parts = state.pathBrowser.currentPath.split("/").filter(Boolean);
-        const parent = parts.length ? `/${parts.slice(0, -1).join("/")}` || "/" : "/";
+        const parentPath = parts.length ? `/${parts.slice(0, -1).join("/")}` || "/" : "/";
+        const rootPath = state.pathBrowser.rootPath || "/";
+        const parent = parentPath.startsWith(rootPath) ? parentPath : rootPath;
         refreshBrowser(parent).catch((error) => showToast(error.message, true));
     };
     byId("browser-confirm").onclick = () => {
@@ -2341,9 +2587,9 @@ function bindGlobalEvents() {
         }
         const selection = state.pathBrowser.selected.length
             ? state.pathBrowser.selected
-            : state.pathBrowser.multiSelect
-                ? []
-                : [state.pathBrowser.currentPath];
+            : state.pathBrowser.fallbackToCurrentPath
+                ? [state.pathBrowser.currentPath]
+                : [];
         if (!selection.length) {
             return;
         }

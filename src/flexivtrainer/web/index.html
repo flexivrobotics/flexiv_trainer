@@ -21,7 +21,7 @@ limitations under the License.
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260527-6" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260527-12" />
 </head>
 
 <body>
@@ -258,16 +258,22 @@ limitations under the License.
 
     <div class="dialog-backdrop hidden" id="browser-modal">
         <div class="dialog-panel">
-            <div class="dialog-header">
+            <div class="dialog-header" id="browser-header">
                 <div>
-                    <p class="eyebrow">Server Path Browser</p>
+                    <p class="eyebrow" id="browser-eyebrow">Server Path Browser</p>
                     <h3 id="browser-title">Select Path</h3>
                 </div>
                 <button class="secondary-button" id="browser-close" type="button">Close</button>
             </div>
-            <div class="dialog-toolbar">
-                <button class="secondary-button" id="browser-up" type="button">Up</button>
-                <code id="browser-path">/</code>
+            <div class="dialog-toolbar" id="browser-toolbar">
+                <div class="dialog-path-block">
+                    <span class="dialog-path-note" id="browser-path-note">Current path</span>
+                    <code id="browser-path">/</code>
+                </div>
+                <div class="dialog-toolbar__actions">
+                    <button class="secondary-button hidden" id="browser-select-all" type="button">Select All</button>
+                    <button class="secondary-button" id="browser-up" type="button">Up</button>
+                </div>
             </div>
             <div class="dialog-list" id="browser-list"></div>
             <div class="dialog-footer">
@@ -298,7 +304,7 @@ limitations under the License.
         </section>
     </div>
 
-    <script type="module" src="/static/app.js?v=20260527-10"></script>
+    <script type="module" src="/static/app.js?v=20260527-12"></script>
 </body>
 
 </html>

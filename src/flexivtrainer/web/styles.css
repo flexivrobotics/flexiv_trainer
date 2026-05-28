@@ -399,6 +399,10 @@ button:disabled {
     gap: 0.85rem;
 }
 
+.teleop-sidebar--right.control-panel {
+    --control-section-gap: 0.42rem;
+}
+
 .feed-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -1076,6 +1080,34 @@ button:active {
     padding: 1.3rem;
 }
 
+.dialog-toolbar {
+    align-items: flex-start;
+}
+
+.dialog-path-block {
+    min-width: 0;
+    display: grid;
+    gap: 0.24rem;
+}
+
+.dialog-path-note {
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.04em;
+}
+
+.dialog-toolbar__actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+#browser-path {
+    flex: 1;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
 .component-wrapper {
     position: relative;
     overflow: hidden;
@@ -1163,6 +1195,25 @@ button:active {
     margin-top: 1rem;
 }
 
+.dialog-list {
+    margin-top: 0.72rem;
+}
+
+.dialog-footer {
+    margin-top: 0.72rem;
+}
+
+.dialog-empty-state {
+    display: grid;
+    place-items: center;
+    min-height: 7rem;
+    border: 1px dashed var(--line);
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.4);
+    color: var(--muted);
+    font-size: 0.92rem;
+}
+
 .episode-row {
     border: 1px solid var(--line);
     border-radius: 18px;
@@ -1202,6 +1253,172 @@ button:active {
     display: flex;
     align-items: center;
     gap: 0.8rem;
+}
+
+.panel-header--training-step {
+    margin-bottom: 0.25rem;
+}
+
+.training-step-title {
+    margin: 0;
+    color: var(--ink);
+    font-size: 1.18rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.control-bar--episode-step {
+    align-items: center;
+}
+
+.episode-empty-state {
+    display: grid;
+    place-items: center;
+    min-height: 5.6rem;
+    border: 1px dashed var(--line);
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.4);
+    color: var(--muted);
+    text-align: center;
+}
+
+.episode-entry-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.episode-entry-card {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.45);
+    padding: 0.9rem 1rem;
+}
+
+.episode-entry-card__index {
+    flex: 0 0 auto;
+    min-width: 1.15rem;
+}
+
+.episode-entry-card__divider {
+    align-self: stretch;
+    width: 1px;
+    background: rgba(72, 103, 125, 0.18);
+}
+
+.episode-entry-card__name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.round-icon-button {
+    width: 2.7rem;
+    height: 2.7rem;
+    min-width: 2.7rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 999px;
+    font-size: 1.45rem;
+    line-height: 1;
+}
+
+.round-icon-button span {
+    transform: translateY(-0.03em);
+}
+
+.round-icon-button--add {
+    border-color: rgba(47, 157, 100, 0.26);
+    background: #2f9d64;
+    color: #ffffff;
+}
+
+.round-icon-button--add:hover {
+    border-color: #278553;
+    background: #278553;
+    color: #ffffff;
+}
+
+.round-icon-button--remove {
+    width: 1.8rem;
+    height: 1.8rem;
+    min-width: 1.8rem;
+    font-size: 1rem;
+    border-color: rgba(206, 73, 73, 0.22);
+    background: #ce4949;
+    color: #ffffff;
+}
+
+.round-icon-button--remove:hover {
+    border-color: #b73e3e;
+    background: #b73e3e;
+    color: #ffffff;
+}
+
+.browser-item {
+    align-items: center;
+}
+
+.browser-item--episode {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.9rem;
+    cursor: pointer;
+}
+
+.browser-item--invalid {
+    cursor: default;
+    opacity: 0.78;
+}
+
+.browser-item__main {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.browser-item__checkbox {
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    accent-color: var(--accent-strong);
+}
+
+.browser-item__checkbox:disabled {
+    opacity: 0.6;
+}
+
+.browser-item__name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.browser-item__meta {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.episode-row--selectable {
+    cursor: pointer;
+}
+
+.episode-row--selected {
+    border-color: rgba(105, 185, 232, 0.44);
+    background: rgba(105, 185, 232, 0.12);
 }
 
 .training-layout {

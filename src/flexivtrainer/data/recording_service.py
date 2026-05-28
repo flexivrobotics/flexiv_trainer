@@ -21,7 +21,7 @@ import shutil
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -285,7 +285,7 @@ class RecordingService:
             self._elapsed_s = 0.0
 
     def _create_staging_path(self) -> tuple[str, Path]:
-        base_name = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        base_name = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
         staging_root = self._settings.storage.staging_root
         staging_root.mkdir(parents=True, exist_ok=True)
 

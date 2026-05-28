@@ -393,13 +393,24 @@ class RuntimeManager:
         }
 
     def browse_path(
-        self, path: Path | None = None, directories_only: bool = False
+        self,
+        path: Path | None = None,
+        directories_only: bool = False,
+        *,
+        root_path: Path | None = None,
+        annotate_episode_dirs: bool = False,
     ) -> dict[str, Any]:
         storage_root = self.settings.storage.root.expanduser().resolve()
-        target = (path or storage_root).expanduser().resolve()
-        if not str(target).startswith(str(storage_root)):
+        restricted_root = (root_path or storage_root).expanduser().resolve()
+        target = (path or restricted_root).expanduser().resolve()
+
+        if not restricted_root.is_relative_to(storage_root):
             raise ValueError(
-                f"Access denied: path must be within storage root ({storage_root})"
+                f"Access denied: root must be within storage root ({storage_root})"
+            )
+        if not target.is_relative_to(restricted_root):
+            raise ValueError(
+                f"Access denied: path must be within root ({restricted_root})"
             )
         if not target.exists():
             raise FileNotFoundError(f"Path does not exist: {target}")
@@ -407,14 +418,19 @@ class RuntimeManager:
         for child in sorted(target.iterdir()):
             if directories_only and not child.is_dir():
                 continue
-            items.append(
-                {
-                    "name": child.name,
-                    "path": str(child),
-                    "is_dir": child.is_dir(),
-                }
-            )
-        return {"path": str(target), "items": items}
+            item = {
+                "name": child.name,
+                "path": str(child),
+                "is_dir": child.is_dir(),
+            }
+            if annotate_episode_dirs and child.is_dir():
+                item["is_valid_episode"] = (child / "episode.json").exists()
+            items.append(item)
+        return {
+            "path": str(target),
+            "root_path": str(restricted_root),
+            "items": items,
+        }
 
     def list_episode_datasets(self) -> list[dict[str, Any]]:
         episodes = []
