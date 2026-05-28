@@ -68,7 +68,7 @@ def combine(
     request: CombineRequest, runtime: RuntimeManager = Depends(get_runtime_manager)
 ) -> dict:
     info(
-        "Combining episode datasets",
+        "Merging episode datasets",
         f"count={len(request.episode_paths)} output={request.output_name}",
     )
     try:
@@ -78,7 +78,7 @@ def combine(
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     ok(
-        "Combined dataset ready",
+        "Merged dataset ready",
         " ".join(
             [
                 f"root={result.get('root', request.output_name)}",

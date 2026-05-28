@@ -40,7 +40,7 @@ class StorageConfig(BaseModel):
     root: Path = Path(".local")
     episodes_dirname: str = "episodes"
     staging_dirname: str = "staging"
-    combined_dirname: str = "combined"
+    combined_dirname: str = "merged"
     training_dirname: str = "training"
     cache_dirname: str = "cache"
 

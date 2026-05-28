@@ -1055,7 +1055,7 @@ function renderHomeStorage() {
     [
         ["UI URL", state.summary.backend.ui_url],
         ["Episodes", state.summary.storage.episodes],
-        ["Combined datasets", state.summary.storage.combined],
+        ["Merged datasets", state.summary.storage.combined],
         ["Training outputs", state.summary.storage.training],
     ].forEach(([label, value]) => {
         const item = document.createElement("div");
@@ -2230,7 +2230,7 @@ function renderTraining() {
           <div id="episode-preview-block"></div>
           <div class="control-bar">
             <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
-            <button id="training-combine" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Combine Selected Episodes</button>
+            <button id="training-combine" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Merge Selected Episodes</button>
           </div>
         </div>
       </div>
@@ -2290,7 +2290,7 @@ function renderTraining() {
                 renderTraining();
                 const result = await api("/datasets/combine", {
                     method: "POST",
-                    body: JSON.stringify({ episode_paths: state.selectedEpisodes, output_name: `combined-${Date.now()}` }),
+                    body: JSON.stringify({ episode_paths: state.selectedEpisodes, output_name: `merged-${Date.now()}` }),
                 });
                 state.combinedPath = result.root;
                 state.combinedPreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
@@ -2314,8 +2314,8 @@ function renderTraining() {
 
     if (state.trainingStep === 3) {
         container.innerHTML = `
-            <div class="panel-header"><div><h2>Combined Dataset</h2></div></div>
-      <div class="progress-block ${state.combinedPreview ? "hidden" : ""}"><div><div class="progress-bar"><span style="width: 72%"></span></div><p>Combining selected episodes...</p></div></div>
+            <div class="panel-header"><div><h2>Merged Dataset</h2></div></div>
+      <div class="progress-block ${state.combinedPreview ? "hidden" : ""}"><div><div class="progress-bar"><span style="width: 72%"></span></div><p>Merging selected episodes...</p></div></div>
       <div class="${state.combinedPreview ? "" : "hidden"}" id="combined-preview-block"></div>
       <div class="control-bar"><button class="secondary-button" id="combine-prev" type="button">Previous Step</button><button id="combine-next" type="button" ${state.combinedPreview ? "" : "disabled"}>Next</button></div>
     `;
