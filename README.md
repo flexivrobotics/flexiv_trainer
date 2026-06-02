@@ -151,12 +151,12 @@ The merging will take some time depending on the actual dataset size. When done:
 Merged datasets are stored under:
 
 ```text
-.local/merged/
+.local/datasets/
 ```
 
 ## Start Training
 
-After merging, Skill Training walks you through policy selection and output configuration.
+In Policy Training, select a dataset and configure training.
 
 1. Choose a training policy.
 2. Click `Choose Directory` and select the training output directory.
@@ -180,10 +180,11 @@ For a normal session, the order is:
 5. Open `Data Collection`.
 6. Start teleoperation and record one or more demonstration episodes.
 7. Save the episodes you want to keep.
-8. Open `Skill Training`.
+8. Open `Data Processing`.
 9. Load and merge the saved episodes into one training dataset.
-10. Choose a policy and output directory.
-11. Start training.
+10. Open `Policy Training`.
+11. Select the merged dataset, choose a policy and output directory.
+12. Start training.
 
 ## Open UI From Another Device
 

@@ -26,16 +26,25 @@ def _load_manifest(root: Path) -> Any:
 
 
 def combine_episode_datasets(
-    episode_roots: list[Path], output_root: Path, output_name: str
+    episode_roots: list[Path],
+    output_root: Path,
+    output_name: str,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
+    """Combine episode datasets using LeRobot's built-in merge_datasets.
+
+    This uses file-level copy (parquet + video) rather than frame-by-frame
+    decode/encode, making it significantly faster.
+
+    Args:
+        on_progress: Optional callback(episode_index, total_episodes, 0, 0)
+            called as episodes are loaded.
+    """
+    from lerobot.datasets.dataset_tools import merge_datasets
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     if not episode_roots:
         raise ValueError("At least one episode dataset is required")
-
-    manifests = [_load_manifest(root) for root in episode_roots]
-    first = manifests[0]
-    first_dataset = LeRobotDataset(first.repo_id, root=first.root)
 
     target_root = output_root / output_name
     if target_root.exists():
@@ -44,60 +53,29 @@ def combine_episode_datasets(
             "Choose a different output name or remove the existing directory."
         )
     output_root.mkdir(parents=True, exist_ok=True)
-    target = LeRobotDataset.create(
-        repo_id=f"local/{output_name}",
-        fps=first_dataset.fps,
-        features=first_dataset.features,
-        root=target_root,
-        robot_type="flexiv_rizon_dual",
-        use_videos=True,
+
+    manifests = [_load_manifest(root) for root in episode_roots]
+    total = len(manifests)
+
+    # Load all source datasets
+    datasets: list[LeRobotDataset] = []
+    for idx, manifest in enumerate(manifests):
+        if on_progress:
+            on_progress(idx, total, 0, 1)
+        datasets.append(LeRobotDataset(manifest.repo_id, root=manifest.root))
+
+    if on_progress:
+        on_progress(total - 1, total, 1, 1)
+
+    # Use LeRobot's optimized merge (file-level copy of parquet + videos)
+    merge_datasets(
+        datasets=datasets,
+        output_repo_id=f"local/{output_name}",
+        output_dir=target_root,
     )
 
-    # Metadata keys injected by LeRobot that must not be passed to add_frame
-    _META_KEYS = {"index", "episode_index", "frame_index", "task_index", "timestamp"}
-
-    for manifest in manifests:
-        dataset = LeRobotDataset(manifest.repo_id, root=manifest.root)
-        if dataset.fps != first_dataset.fps:
-            raise ValueError(
-                f"FPS mismatch for {manifest.root}: {dataset.fps} != {first_dataset.fps}"
-            )
-        if dataset.features != first_dataset.features:
-            raise ValueError(f"Feature schema mismatch for {manifest.root}")
-
-        image_keys = {
-            key
-            for key, feat in dataset.features.items()
-            if feat.get("dtype") in ("image", "video")
-        }
-
-        for index in range(dataset.num_frames):
-            item = dataset.get_raw_item(index)
-            frame: dict[str, Any] = {}
-            for key in dataset.features:
-                if key in _META_KEYS or key not in item:
-                    continue
-                value = item[key]
-                # LeRobot returns images as CHW tensors; add_frame expects HWC numpy
-                if key in image_keys:
-                    import numpy as np
-                    import torch
-
-                    if isinstance(value, torch.Tensor):
-                        value = value.numpy()
-                    if (
-                        hasattr(value, "ndim")
-                        and value.ndim == 3
-                        and value.shape[0] in (1, 3, 4)
-                    ):
-                        value = np.moveaxis(value, 0, -1)
-                frame[key] = value
-            frame["task"] = item.get("task", manifest.task)
-            target.add_frame(frame)
-
-        target.save_episode()
-
-    target.finalize()
+    # Write our own metadata file
+    first_dataset = datasets[0]
     (target_root / "combined.json").write_text(
         json.dumps(
             {

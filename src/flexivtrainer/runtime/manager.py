@@ -424,7 +424,9 @@ class RuntimeManager:
                 "is_dir": child.is_dir(),
             }
             if annotate_episode_dirs and child.is_dir():
-                item["is_valid_episode"] = (child / "episode.json").exists()
+                item["is_valid_episode"] = (child / "episode.json").exists() or (
+                    child / "combined.json"
+                ).exists()
             items.append(item)
         return {
             "path": str(target),
@@ -446,7 +448,10 @@ class RuntimeManager:
         return episodes
 
     def combine_episodes(
-        self, episode_paths: list[str], output_name: str
+        self,
+        episode_paths: list[str],
+        output_name: str,
+        on_progress: Any | None = None,
     ) -> dict[str, Any]:
         try:
             from flexivtrainer.jobs.combine import combine_episode_datasets
@@ -463,7 +468,7 @@ class RuntimeManager:
                     f"Access denied: path must be within storage root ({storage_root})"
                 )
         return combine_episode_datasets(
-            roots, self.settings.storage.combined_root, output_name
+            roots, self.settings.storage.combined_root, output_name, on_progress
         )
 
     def preview_dataset(self, dataset_path: Path) -> dict[str, Any]:

@@ -21,7 +21,7 @@ limitations under the License.
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260527-15" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260528-4" />
 </head>
 
 <body>
@@ -31,7 +31,9 @@ limitations under the License.
             <nav>
                 <button class="nav-link" data-nav="teleoperation" type="button">Data Collection</button>
                 <span class="nav-divider" aria-hidden="true">|</span>
-                <button class="nav-link" data-nav="training" type="button">Skill Training</button>
+                <button class="nav-link" data-nav="processing" type="button">Data Processing</button>
+                <span class="nav-divider" aria-hidden="true">|</span>
+                <button class="nav-link" data-nav="training" type="button">Policy Training</button>
             </nav>
         </header>
 
@@ -65,7 +67,8 @@ limitations under the License.
                             <li>Confirm robots, cameras, and network are ready.</li>
                             <li>Open Data Collection and verify module health.</li>
                             <li>Record and save one or more episodes.</li>
-                            <li>Open Skill Training to load, merge, and train.</li>
+                            <li>Open Data Processing to preview and merge episodes.</li>
+                            <li>Open Policy Training to train a policy.</li>
                         </ol>
                     </section>
 
@@ -95,15 +98,15 @@ limitations under the License.
                             <h3>Record a New Episode</h3>
                             <p>Open Data Collection, start teleop, and record a saved episode.</p>
                         </button>
-                        <button class="workflow-card" data-nav="training" type="button">
+                        <button class="workflow-card" data-nav="processing" type="button">
                             <span class="workflow-card__badge">Example</span>
                             <h3>Review or Merge Episodes</h3>
-                            <p>Open Skill Training, load saved datasets, and merge selected episodes.</p>
+                            <p>Open Data Processing, load saved datasets, and merge selected episodes.</p>
                         </button>
                         <button class="workflow-card" data-nav="training" type="button">
                             <span class="workflow-card__badge">Example</span>
                             <h3>Train a Policy</h3>
-                            <p>Choose a policy, select an output directory, and start skill training.</p>
+                            <p>Load a dataset, choose a policy, and start policy training.</p>
                         </button>
                     </div>
                 </section>
@@ -248,6 +251,12 @@ limitations under the License.
                 </div>
             </section>
 
+            <section class="view" data-view="processing">
+                <section class="panel panel--wide">
+                    <div id="processing-content"></div>
+                </section>
+            </section>
+
             <section class="view" data-view="training">
                 <section class="panel panel--wide">
                     <div id="training-content"></div>
@@ -306,7 +315,7 @@ limitations under the License.
 
     <div class="version-badge" id="version-badge" aria-hidden="true">v__FLEXIV_TRAINER_VERSION__</div>
 
-    <script type="module" src="/static/app.js?v=20260528-1"></script>
+    <script type="module" src="/static/app.js?v=20260528-4"></script>
 </body>
 
 </html>

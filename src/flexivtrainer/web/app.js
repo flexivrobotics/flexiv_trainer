@@ -20,18 +20,27 @@ const state = {
     trainingStatus: null,
     teleopBootstrapped: false,
     trainingBootstrapped: false,
+    processingBootstrapped: false,
+    processingStep: 1,
     trainingStep: 1,
     episodes: [],
     selectedEpisodes: [],
     preview: null,
     combinedPreview: null,
     combinedPath: "",
+    combineProgress: null,
     previewSeries: null,
     combinedSeries: null,
     previewFrame: 0,
     combinedFrame: 0,
     previewPlaying: false,
     combinedPlaying: false,
+    // Training page state
+    mergedDatasetPath: "",
+    mergedDatasetPreview: null,
+    mergedDatasetSeries: null,
+    mergedDatasetFrame: 0,
+    mergedDatasetPlaying: false,
     outputDir: "",
     selectedPolicy: "diffusion",
     pathBrowser: {
@@ -382,6 +391,74 @@ function _buildDatasetPlotLegend(seriesData, group) {
     return items.join("");
 }
 
+function _showPreviewLoadingOverlay(containerId) {
+    const container = byId(containerId);
+    if (!container) return;
+    container.innerHTML = `
+        <div class="panel panel--soft" style="position:relative;min-height:200px">
+            <div class="preview-loading-overlay">
+                <span class="preview-loading-overlay__label">Loading data ...</span>
+                <div class="preview-loading-bar"><span></span></div>
+            </div>
+        </div>`;
+}
+
+async function _pollCombineProgress() {
+    while (true) {
+        await new Promise((r) => setTimeout(r, 400));
+        if (state.processingStep !== 3) return;
+        try {
+            const prog = await api("/datasets/combine-progress");
+            state.combineProgress = prog;
+            if (prog.status === "done") {
+                const result = prog.result;
+                state.combinedPath = result.root;
+                // Hide progress block and show loading overlay
+                const progressBlock = document.querySelector(".merge-progress-block");
+                if (progressBlock) progressBlock.classList.add("hidden");
+                const previewBlock = byId("combined-preview-block");
+                if (previewBlock) {
+                    previewBlock.classList.remove("hidden");
+                    _showPreviewLoadingOverlay("combined-preview-block");
+                }
+                state.combinedPreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
+                state.combinedFrame = 0;
+                state.combinedPlaying = false;
+                _stopDatasetPlayback("combinedPlaying");
+                try {
+                    state.combinedSeries = await api(`/datasets/series?path=${encodeURIComponent(result.root)}`);
+                } catch (_) {
+                    state.combinedSeries = null;
+                }
+                renderProcessing();
+                return;
+            } else if (prog.status === "error") {
+                showToast(prog.error || "Merge failed", true);
+                state.processingStep = 2;
+                renderProcessing();
+                return;
+            }
+            // Update progress bars in place without full re-render
+            _updateMergeProgressBars(prog);
+        } catch (_) {
+            // endpoint not available yet, keep polling
+        }
+    }
+}
+
+function _updateMergeProgressBars(prog) {
+    const overallPercent = prog.total_episodes ? Math.round((prog.episode_index / prog.total_episodes) * 100) : 0;
+    const overallLabel = `${prog.episode_index}/${prog.total_episodes}`;
+    const block = document.querySelector(".merge-progress-block");
+    if (!block) return;
+    const bar = block.querySelector(".progress-bar");
+    if (bar) {
+        bar.querySelector("span:first-child").style.width = `${overallPercent}%`;
+        const txt = bar.querySelector(".progress-bar__text");
+        if (txt) txt.textContent = overallLabel;
+    }
+}
+
 function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, playingKey) {
     const container = byId(containerId);
     if (!container || !preview) return;
@@ -394,7 +471,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     // Camera feeds
     const feedsHtml = (preview.camera_keys || []).map((cameraKey) => `
         <div class="feed">
-            <div class="feed__header"><span>${cameraKey}</span><strong>${preview.fps} FPS</strong></div>
+            <div class="feed__header"><span>${cameraKey}</span></div>
             <div class="feed__placeholder" data-render-mode="live">
                 <img class="feed__image dataset-frame-img" data-camera-key="${cameraKey}" src="/datasets/frame-image?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(cameraKey)}&index=${currentFrame}" alt="${cameraKey} frame ${currentFrame}" />
             </div>
@@ -402,15 +479,15 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     `).join("");
 
     // Playback controls
-    const playbackHtml = numFrames > 1 ? `
+    const playbackHtml = `
         <div class="dataset-playback">
             <button class="dataset-playback__btn" data-action="${isPlaying ? "pause" : "play"}" type="button" aria-label="${isPlaying ? "Pause" : "Play"}">
                 ${isPlaying ? "⏸" : "▶"}
             </button>
-            <input type="range" class="dataset-playback__slider" min="0" max="${numFrames - 1}" value="${currentFrame}" />
+            <input type="range" class="dataset-playback__slider" min="0" max="${Math.max(numFrames - 1, 0)}" value="${currentFrame}" />
             <span class="dataset-playback__counter">${currentFrame + 1} / ${numFrames}</span>
         </div>
-    ` : "";
+    `;
 
     // Plots
     const plotsHtml = DATASET_PLOT_GROUPS.map((group) => {
@@ -2155,31 +2232,27 @@ async function loadTrainingPreview(episodePath, options = {}) {
     }
 }
 
-function renderTraining() {
-    const container = byId("training-content");
+function renderProcessing() {
+    const container = byId("processing-content");
 
-    if (state.trainingStep === 1) {
+    if (state.processingStep === 1) {
         container.innerHTML = `
             <div class="panel-header panel-header--training-step">
                 <div>
                     <h2 class="training-step-title">Load Episodes</h2>
                 </div>
             </div>
-      <div class="episode-list" id="load-episode-list"></div>
+            <div class="episode-list" id="load-episode-list"></div>
             <div class="control-bar control-bar--episode-step">
                 <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add episode dataset" title="Add episode dataset">
                     <span aria-hidden="true">+</span>
                 </button>
-        <button id="training-next-step" type="button" ${state.episodes.length ? "" : "disabled"}>Next</button>
-      </div>
-    `;
+                <button id="training-next-step" type="button" ${state.episodes.length ? "" : "disabled"}>Next</button>
+            </div>
+        `;
         const list = byId("load-episode-list");
         if (!state.episodes.length) {
-            list.innerHTML = `
-                                <div class="episode-empty-state">
-                                        <span>No episode datasets selected yet.</span>
-                                </div>
-                        `;
+            list.innerHTML = `<div class="episode-empty-state"><span>No episode datasets selected yet.</span></div>`;
         } else {
             state.episodes.forEach((episode, index) => {
                 const row = document.createElement("div");
@@ -2199,42 +2272,42 @@ function renderTraining() {
         }
         byId("training-add-episode").onclick = () => openEpisodeBrowser();
         byId("training-next-step").onclick = () => {
-            state.trainingStep = 2;
-            renderTraining();
+            state.processingStep = 2;
+            renderProcessing();
         };
         list.querySelectorAll("[data-remove-episode]").forEach((button) => {
             button.onclick = () => {
                 const path = button.dataset.removeEpisode;
                 state.episodes = state.episodes.filter((item) => item.path !== path);
                 state.selectedEpisodes = state.selectedEpisodes.filter((item) => item !== path);
-                renderTraining();
+                renderProcessing();
             };
         });
         return;
     }
 
-    if (state.trainingStep === 2) {
+    if (state.processingStep === 2) {
         if (state.preview && !state.episodes.some((episode) => episode.path === state.preview.path)) {
             state.preview = null;
         }
         container.innerHTML = `
-      <div class="training-layout">
-        <aside class="panel">
-          <div class="panel-header">
-            <h2>Episodes</h2>
-            <button class="secondary-button" id="training-select-all" type="button">${state.selectedEpisodes.length === state.episodes.length ? "Deselect All" : "Select All"}</button>
-          </div>
-          <div class="episode-list" id="training-episode-picker"></div>
-        </aside>
-        <div class="training-main">
-          <div id="episode-preview-block"></div>
-          <div class="control-bar">
-            <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
-            <button id="training-combine" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Merge Selected Episodes</button>
-          </div>
-        </div>
-      </div>
-    `;
+            <div class="training-layout">
+                <aside class="panel">
+                    <div class="panel-header">
+                        <h2>Episodes</h2>
+                        <button class="secondary-button" id="training-select-all" type="button">${state.selectedEpisodes.length === state.episodes.length ? "Deselect All" : "Select All"}</button>
+                    </div>
+                    <div class="episode-list" id="training-episode-picker"></div>
+                </aside>
+                <div class="training-main">
+                    <div id="episode-preview-block"></div>
+                    <div class="control-bar">
+                        <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
+                        <button id="training-combine" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Merge Selected Episodes</button>
+                    </div>
+                </div>
+            </div>
+        `;
         const picker = byId("training-episode-picker");
         const previewPath = state.preview?.path || "";
         state.episodes.forEach((episode, index) => {
@@ -2248,8 +2321,9 @@ function renderTraining() {
         </div>
       `;
             row.onclick = async () => {
+                _showPreviewLoadingOverlay("episode-preview-block");
                 await loadTrainingPreview(episode.path);
-                renderTraining();
+                renderProcessing();
             };
             const input = row.querySelector("[data-toggle-episode]");
             if (input instanceof HTMLInputElement) {
@@ -2264,8 +2338,9 @@ function renderTraining() {
                     } else {
                         state.selectedEpisodes = [...state.selectedEpisodes, path];
                     }
+                    _showPreviewLoadingOverlay("episode-preview-block");
                     await loadTrainingPreview(episode.path);
-                    renderTraining();
+                    renderProcessing();
                 };
             }
             picker.appendChild(row);
@@ -2278,73 +2353,117 @@ function renderTraining() {
         }
         byId("training-select-all").onclick = () => {
             state.selectedEpisodes = state.selectedEpisodes.length === state.episodes.length ? [] : state.episodes.map((episode) => episode.path);
-            renderTraining();
+            renderProcessing();
         };
         byId("training-prev-step").onclick = () => {
-            state.trainingStep = 1;
-            renderTraining();
+            state.processingStep = 1;
+            renderProcessing();
         };
         byId("training-combine").onclick = async () => {
             try {
-                state.trainingStep = 3;
-                renderTraining();
-                const result = await api("/datasets/combine", {
+                state.processingStep = 3;
+                state.combineProgress = null;
+                state.combinedPreview = null;
+                state.combinedSeries = null;
+                renderProcessing();
+                await api("/datasets/combine", {
                     method: "POST",
                     body: JSON.stringify({ episode_paths: state.selectedEpisodes, output_name: `merged-${Date.now()}` }),
                 });
-                state.combinedPath = result.root;
-                state.combinedPreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
-                state.combinedFrame = 0;
-                state.combinedPlaying = false;
-                _stopDatasetPlayback("combinedPlaying");
-                try {
-                    state.combinedSeries = await api(`/datasets/series?path=${encodeURIComponent(result.root)}`);
-                } catch (_) {
-                    state.combinedSeries = null;
-                }
-                renderTraining();
+                // Poll for progress
+                await _pollCombineProgress();
             } catch (error) {
                 showToast(error.message, true);
-                state.trainingStep = 2;
-                renderTraining();
+                state.processingStep = 2;
+                renderProcessing();
             }
         };
         return;
     }
 
-    if (state.trainingStep === 3) {
+    if (state.processingStep === 3) {
+        const prog = state.combineProgress;
+        const merging = !state.combinedPreview;
+        const overallPercent = prog && prog.total_episodes ? Math.round((prog.episode_index / prog.total_episodes) * 100) : 0;
+        const overallLabel = prog ? `${prog.episode_index}/${prog.total_episodes}` : "";
         container.innerHTML = `
             <div class="panel-header"><div><h2>Merged Dataset</h2></div></div>
-      <div class="progress-block ${state.combinedPreview ? "hidden" : ""}"><div><div class="progress-bar"><span style="width: 72%"></span></div><p>Merging selected episodes...</p></div></div>
-      <div class="${state.combinedPreview ? "" : "hidden"}" id="combined-preview-block"></div>
-      <div class="control-bar"><button class="secondary-button" id="combine-prev" type="button">Previous Step</button><button id="combine-next" type="button" ${state.combinedPreview ? "" : "disabled"}>Next</button></div>
-    `;
+            <div class="merge-progress-block ${merging ? "" : "hidden"}">
+                <p class="merge-progress-block__title">Merging selected episodes...</p>
+                <div class="merge-progress-item">
+                    <div class="progress-bar progress-bar--thick"><span style="width: ${overallPercent}%"></span><span class="progress-bar__text">${overallLabel}</span></div>
+                </div>
+            </div>
+            <div class="${state.combinedPreview ? "" : "hidden"}" id="combined-preview-block"></div>
+            <div class="control-bar"><button class="secondary-button" id="combine-prev" type="button">Previous Step</button></div>
+        `;
         if (state.combinedPreview) {
             renderDatasetPreviewBlock("combined-preview-block", state.combinedPreview, state.combinedSeries?.series || null, "combinedFrame", "combinedPlaying");
         }
         byId("combine-prev").onclick = () => {
-            state.trainingStep = 2;
-            renderTraining();
+            state.processingStep = 2;
+            renderProcessing();
         };
-        byId("combine-next").onclick = () => {
-            state.trainingStep = 4;
+        return;
+    }
+}
+
+function renderTraining() {
+    const container = byId("training-content");
+
+    if (state.trainingStep === 1) {
+        container.innerHTML = `
+            <div class="panel-header panel-header--training-step">
+                <div>
+                    <h2 class="training-step-title">Select Training Dataset</h2>
+                </div>
+            </div>
+            <div class="merged-dataset-entry" id="merged-dataset-entry">
+                ${state.mergedDatasetPath
+                ? `<div class="episode-entry-row"><div class="episode-entry-card"><strong class="episode-entry-card__index">1</strong><span class="episode-entry-card__divider" aria-hidden="true"></span><span class="episode-entry-card__name">${escapeHtml(state.mergedDatasetPath.split("/").pop())}</span></div><button class="round-icon-button round-icon-button--remove" id="training-remove-dataset" type="button" aria-label="Remove dataset" title="Remove dataset"><span aria-hidden="true">&minus;</span></button></div>`
+                : `<div class="episode-empty-state"><span>No training dataset selected yet.</span></div>`
+            }
+            </div>
+            <div id="merged-dataset-preview-block"></div>
+            <div class="control-bar control-bar--episode-step">
+                <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets">
+                    <span aria-hidden="true">+</span>
+                </button>
+                <button id="training-next-step" type="button" ${state.mergedDatasetPath ? "" : "disabled"}>Next</button>
+            </div>
+        `;
+        if (state.mergedDatasetPreview) {
+            renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
+        }
+        byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
+        const removeBtn = byId("training-remove-dataset");
+        if (removeBtn) {
+            removeBtn.onclick = () => {
+                state.mergedDatasetPath = "";
+                state.mergedDatasetPreview = null;
+                state.mergedDatasetSeries = null;
+                renderTraining();
+            };
+        }
+        byId("training-next-step").onclick = () => {
+            state.trainingStep = 2;
             renderTraining();
         };
         return;
     }
 
-    if (state.trainingStep === 4) {
+    if (state.trainingStep === 2) {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
         const policiesReady = !!state.trainingPolicies;
         container.innerHTML = `
             <div class="panel-header"><div><h2>Choose Training Policy</h2></div></div>
-      <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
-        <div class="policy-grid" id="policy-grid"></div>
-        ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
-      </div>
-      <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${state.outputDir || "No directory selected"}</strong></div><button class="secondary-button" id="training-pick-output" type="button">Choose Directory</button></div>
-      <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${state.outputDir && policiesReady ? "" : "disabled"}>Start Training</button></div>
-    `;
+            <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
+                <div class="policy-grid" id="policy-grid"></div>
+                ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
+            </div>
+            <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${state.outputDir || "No directory selected"}</strong></div><button class="secondary-button" id="training-pick-output" type="button">Choose Directory</button></div>
+            <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${state.outputDir && policiesReady ? "" : "disabled"}>Start Training</button></div>
+        `;
         const grid = byId("policy-grid");
         Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
             const card = document.createElement("button");
@@ -2359,21 +2478,21 @@ function renderTraining() {
         });
         byId("training-pick-output").onclick = () => openOutputBrowser();
         byId("policy-prev").onclick = () => {
-            state.trainingStep = 3;
+            state.trainingStep = 1;
             renderTraining();
         };
         byId("policy-start").onclick = async () => {
             try {
-                state.trainingStep = 5;
+                state.trainingStep = 3;
                 renderTraining();
                 state.trainingStatus = await api("/training/start", {
                     method: "POST",
-                    body: JSON.stringify({ dataset_path: state.combinedPath, output_dir: state.outputDir, policy_type: state.selectedPolicy }),
+                    body: JSON.stringify({ dataset_path: state.mergedDatasetPath, output_dir: state.outputDir, policy_type: state.selectedPolicy }),
                 });
                 renderTraining();
                 window.clearInterval(state.intervals.training);
                 state.intervals.training = window.setInterval(async () => {
-                    if (state.activeView !== "training" || state.trainingStep !== 5) {
+                    if (state.activeView !== "training" || state.trainingStep !== 3) {
                         return;
                     }
                     state.trainingStatus = await api("/training/status");
@@ -2381,7 +2500,7 @@ function renderTraining() {
                 }, 2000);
             } catch (error) {
                 showToast(error.message, true);
-                state.trainingStep = 4;
+                state.trainingStep = 2;
                 renderTraining();
             }
         };
@@ -2392,14 +2511,14 @@ function renderTraining() {
     const done = status.status === "completed";
     const failed = status.status === "failed";
     container.innerHTML = `
-    <div class="panel-header"><div><h2>Training Run</h2></div></div>
-    <div class="progress-bar"><span style="width: ${status.progress || 0}%"></span></div>
-    <div class="result-pill ${done ? "result-pill--success" : failed ? "result-pill--error" : ""}">${done ? "Training completed" : failed ? formatValue(status.error || "Training failed") : formatValue(status.status)}</div>
-    <pre class="log-pane">${(status.logs || []).join("\n") || "Training logs will appear here."}</pre>
-    <div class="control-bar"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
-  `;
+        <div class="panel-header"><div><h2>Training Run</h2></div></div>
+        <div class="progress-bar"><span style="width: ${status.progress || 0}%"></span></div>
+        <div class="result-pill ${done ? "result-pill--success" : failed ? "result-pill--error" : ""}">${done ? "Training completed" : failed ? formatValue(status.error || "Training failed") : formatValue(status.status)}</div>
+        <pre class="log-pane">${(status.logs || []).join("\n") || "Training logs will appear here."}</pre>
+        <div class="control-bar"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
+    `;
     byId("training-run-prev").onclick = () => {
-        state.trainingStep = 4;
+        state.trainingStep = 2;
         renderTraining();
     };
 }
@@ -2660,6 +2779,52 @@ function openEpisodeBrowser() {
                 }
             });
             closeBrowser();
+            renderProcessing();
+        },
+    }).catch((error) => showToast(error.message, true));
+}
+
+function openMergedDatasetBrowser() {
+    openBrowser({
+        mode: "episodes",
+        title: "",
+        startPath: state.summary.storage.combined,
+        rootPath: state.summary.storage.combined,
+        directoriesOnly: true,
+        multiSelect: false,
+        allowNavigation: false,
+        annotateEpisodeDirs: true,
+        showSelectAll: false,
+        hideHeader: true,
+        hideEyebrow: true,
+        hideClose: true,
+        hideUp: true,
+        requireSelection: true,
+        fallbackToCurrentPath: false,
+        emptyMessage: "No datasets found.",
+        confirmLabel: "Load",
+        pathNote: "Datasets stored under:",
+        onConfirm: async (paths) => {
+            const path = paths[0];
+            if (!path) return;
+            state.mergedDatasetPath = path;
+            closeBrowser();
+            _showPreviewLoadingOverlay("merged-dataset-preview-block");
+            try {
+                state.mergedDatasetPreview = await api(`/datasets/preview?path=${encodeURIComponent(path)}`);
+                state.mergedDatasetFrame = 0;
+                state.mergedDatasetPlaying = false;
+                _stopDatasetPlayback("mergedDatasetPlaying");
+                try {
+                    state.mergedDatasetSeries = await api(`/datasets/series?path=${encodeURIComponent(path)}`);
+                } catch (_) {
+                    state.mergedDatasetSeries = null;
+                }
+            } catch (error) {
+                state.mergedDatasetPreview = null;
+                state.mergedDatasetSeries = null;
+                showToast(error.message, true);
+            }
             renderTraining();
         },
     }).catch((error) => showToast(error.message, true));
@@ -2736,6 +2901,14 @@ async function bootstrapTeleoperation() {
     }
 }
 
+async function bootstrapProcessing() {
+    if (state.processingBootstrapped) {
+        return;
+    }
+    state.processingBootstrapped = true;
+    renderProcessing();
+}
+
 async function bootstrapTraining() {
     if (state.trainingBootstrapped) {
         return;
@@ -2759,6 +2932,9 @@ function bindGlobalEvents() {
             setActiveView(target);
             if (target === "teleoperation") {
                 bootstrapTeleoperation().catch((error) => showToast(error.message, true));
+            }
+            if (target === "processing") {
+                bootstrapProcessing().catch((error) => showToast(error.message, true));
             }
             if (target === "training") {
                 bootstrapTraining().catch((error) => showToast(error.message, true));

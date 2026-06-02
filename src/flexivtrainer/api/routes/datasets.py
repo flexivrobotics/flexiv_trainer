@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -24,6 +26,10 @@ from flexivtrainer.observability import info, ok
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
+
+# -- In-memory combine job state --
+_combine_lock = threading.Lock()
+_combine_job: dict[str, Any] | None = None
 
 
 class CombineRequest(BaseModel):
@@ -67,27 +73,71 @@ def browse(
 def combine(
     request: CombineRequest, runtime: RuntimeManager = Depends(get_runtime_manager)
 ) -> dict:
+    global _combine_job
     info(
         "Merging episode datasets",
         f"count={len(request.episode_paths)} output={request.output_name}",
     )
-    try:
-        result = runtime.combine_episodes(request.episode_paths, request.output_name)
-    except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    ok(
-        "Merged dataset ready",
-        " ".join(
-            [
-                f"root={result.get('root', request.output_name)}",
-                f"episodes={result.get('episodes', len(request.episode_paths))}",
-                f"output={result.get('output_name', request.output_name)}",
-            ]
-        ),
-    )
-    return result
+
+    with _combine_lock:
+        if _combine_job and _combine_job["status"] == "running":
+            raise HTTPException(
+                status_code=409, detail="A merge is already in progress"
+            )
+        _combine_job = {
+            "status": "running",
+            "episode_index": 0,
+            "total_episodes": len(request.episode_paths),
+            "frame_index": 0,
+            "total_frames": 0,
+            "result": None,
+            "error": None,
+        }
+
+    def _on_progress(
+        ep_idx: int, total_eps: int, frame_idx: int, total_frames: int
+    ) -> None:
+        assert _combine_job is not None
+        _combine_job["episode_index"] = ep_idx
+        _combine_job["total_episodes"] = total_eps
+        _combine_job["frame_index"] = frame_idx
+        _combine_job["total_frames"] = total_frames
+
+    def _run() -> None:
+        global _combine_job
+        try:
+            result = runtime.combine_episodes(
+                request.episode_paths, request.output_name, on_progress=_on_progress
+            )
+            assert _combine_job is not None
+            _combine_job["status"] = "done"
+            _combine_job["result"] = result
+            ok(
+                "Merged dataset ready",
+                " ".join(
+                    [
+                        f"root={result.get('root', request.output_name)}",
+                        f"episodes={result.get('episodes', len(request.episode_paths))}",
+                        f"output={result.get('output_name', request.output_name)}",
+                    ]
+                ),
+            )
+        except Exception as exc:
+            assert _combine_job is not None
+            _combine_job["status"] = "error"
+            _combine_job["error"] = str(exc)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return {"status": "started", "total_episodes": len(request.episode_paths)}
+
+
+@router.get("/combine-progress")
+def combine_progress() -> dict:
+    """Return the current merge progress."""
+    if _combine_job is None:
+        raise HTTPException(status_code=404, detail="No merge in progress")
+    return _combine_job
 
 
 @router.get("/series")
