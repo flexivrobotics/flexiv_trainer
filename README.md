@@ -24,6 +24,8 @@ This is required to run the teleoperation module:
 ```bash
 echo "${USER}    -   rtprio    99" | sudo tee -a /etc/security/limits.conf
 echo "${USER}    -   nice     -20" | sudo tee -a /etc/security/limits.conf
+echo "${USER} soft memlock unlimited" | sudo tee -a /etc/security/limits.conf
+echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
 ```
 
 ## Hardware Requirements
@@ -33,13 +35,7 @@ echo "${USER}    -   nice     -20" | sudo tee -a /etc/security/limits.conf
 
 ### Supported cameras
 
-#### Egocentric
-
-- RealSense D435
-
-#### In-hand
-
-- RealSense D405
+- RealSense
 
 ## Install
 
