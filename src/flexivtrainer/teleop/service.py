@@ -58,6 +58,7 @@ class TeleopService:
         self._controller: Any | None = None
         self._error: str | None = None
         self._initialized = False
+        self._started = False
 
     def _instance_provider_results(self, provider: Any) -> list[Any]:
         if not callable(provider):
@@ -137,10 +138,6 @@ class TeleopService:
             )
         )
 
-        class_provider = getattr(TransparentCartesianTeleopLAN, "instances", None)
-        if class_provider is not None:
-            provider_results.extend(self._instance_provider_results(class_provider))
-
         robots = self._extract_robot_handles(provider_results)
         deduped: list[Any] = []
         seen: set[int] = set()
@@ -198,6 +195,7 @@ class TeleopService:
                 if callable(init_method):
                     init_method()
                 self._initialized = True
+                self._started = False
                 self._error = None
             except Exception as exc:  # pragma: no cover - hardware specific
                 self._error = describe_exception(exc)
@@ -210,6 +208,7 @@ class TeleopService:
             return self.snapshot()
         try:
             self._controller.Start()
+            self._started = True
             self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
@@ -220,6 +219,7 @@ class TeleopService:
             return self.snapshot()
         try:
             self._controller.Stop()
+            self._started = False
             self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
@@ -234,24 +234,12 @@ class TeleopService:
         except Exception:
             pass
 
-        for method_name in (
-            "Close",
-            "close",
-            "Shutdown",
-            "shutdown",
-            "Disconnect",
-            "disconnect",
-        ):
-            method = getattr(self._controller, method_name, None)
-            if callable(method):
-                try:
-                    method()
-                except Exception as exc:  # pragma: no cover - hardware specific
-                    self._error = describe_exception(exc)
-                break
-
+        # TransparentCartesianTeleopLAN exposes no explicit close/disconnect
+        # method; its C++ destructor performs teardown once the last reference
+        # is dropped, so releasing the controller here is the cleanup.
         self._controller = None
         self._initialized = False
+        self._started = False
         self._error = None
 
     def reset_home(self) -> dict[str, Any]:
@@ -298,19 +286,35 @@ class TeleopService:
 
         return {"ok": not warnings, "warnings": warnings}
 
+    def _read_fault(self) -> str | None:
+        """Return a fault message if the controller reports a fault.
+
+        ``TransparentCartesianTeleopLAN`` exposes fault state through the
+        ``any_fault()`` method (not a ``fault`` attribute), so the method must
+        be invoked rather than read as a value.
+        """
+        if self._controller is None:
+            return None
+
+        any_fault = getattr(self._controller, "any_fault", None)
+        if not callable(any_fault):
+            return None
+
+        try:
+            faulted = any_fault()
+        except Exception:  # pragma: no cover - hardware specific
+            return None
+
+        return "Teleoperation fault detected" if faulted else None
+
     def snapshot(self) -> TeleopSnapshot:
         robot_pairs = self._get_robot_pairs()
         configured = any(
             pair.leader_serial and pair.follower_serial for pair in robot_pairs
         )
-        started = False
-        stopped = True
-        fault: str | None = None
-        if self._controller is not None:
-            started = not bool(getattr(self._controller, "stopped", True))
-            stopped = bool(getattr(self._controller, "stopped", True))
-            raw_fault = getattr(self._controller, "fault", None)
-            fault = str(raw_fault) if raw_fault else None
+        started = self._started and self._controller is not None
+        stopped = not started
+        fault: str | None = self._read_fault()
         return TeleopSnapshot(
             configured=configured,
             available=TransparentCartesianTeleopLAN is not None,
