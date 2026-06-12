@@ -40,15 +40,15 @@ _IMAGE_ENTRY_TO_CAMERA = {
 }
 
 _OBSERVATION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "observation.state.tcp_pose": ("cartesian_state", "tcp_pose"),
-    "observation.state.tcp_twist": ("cartesian_state", "tcp_vel"),
-    "observation.state.tcp_wrench": ("cartesian_state", "ext_wrench_in_world"),
+    "observation.state.tcp_pose": ("states", "tcp_pose"),
+    "observation.state.tcp_twist": ("states", "tcp_vel"),
+    "observation.state.tcp_wrench": ("states", "ext_wrench_in_world"),
 }
 
 _ACTION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "action.tcp_pose": ("cartesian_command", "tcp_pose_des"),
-    "action.tcp_twist": ("cartesian_command", "tcp_vel_des"),
-    "action.tcp_wrench": ("cartesian_command", "wrench_des_in_ctrl_frame"),
+    "action.tcp_pose": ("actions", "tcp_pose_d"),
+    "action.tcp_twist": ("actions", "tcp_vel_d"),
+    "action.tcp_wrench": ("actions", "ext_wrench_d"),
 }
 
 
@@ -105,10 +105,10 @@ def _flatten_numeric_labels(prefix: str, values: Any) -> list[str]:
 
 
 def extract_recording_feature_values(
-    ddk_snapshot: dict[str, Any], entries: list[str] | None = None
+    robot_snapshot: dict[str, Any], entries: list[str] | None = None
 ) -> tuple[list[str], list[str]]:
     resolved_entries = resolve_recording_entries(entries)
-    robots = ddk_snapshot.get("robots") if isinstance(ddk_snapshot, dict) else None
+    robots = robot_snapshot.get("robots") if isinstance(robot_snapshot, dict) else None
     if not isinstance(robots, dict):
         return [], []
 
@@ -143,14 +143,14 @@ def extract_recording_feature_values(
 
 
 def build_features_from_sample(
-    ddk_snapshot: dict[str, Any],
+    robot_snapshot: dict[str, Any],
     images: dict[str, np.ndarray],
     entries: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
     resolved_entries = resolve_recording_entries(entries)
     selected_images = extract_recording_images(images, resolved_entries)
     observation_values, action_values = extract_recording_feature_values(
-        ddk_snapshot, resolved_entries
+        robot_snapshot, resolved_entries
     )
 
     features: dict[str, dict[str, Any]] = {}

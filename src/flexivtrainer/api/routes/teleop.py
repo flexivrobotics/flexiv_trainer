@@ -118,7 +118,7 @@ def bootstrap(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
 def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return {
         "teleop": runtime.teleop.snapshot().__dict__,
-        "ddk": runtime.ddk.snapshot(initialize=False),
+        "robot_data": runtime.teleop.robot_data_snapshot(),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),

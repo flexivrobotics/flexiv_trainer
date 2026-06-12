@@ -14,7 +14,7 @@
 
 from types import SimpleNamespace
 
-from flexivtrainer.config import AppSettings, StorageConfig
+from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
 from flexivtrainer.teleop.service import TeleopService
 
 
@@ -24,6 +24,23 @@ class FakeRobot:
 
     def ExecutePrimitive(self, primitive: str, params: dict | None = None) -> None:
         self.calls.append((primitive, params))
+
+    def connected(self) -> bool:
+        return True
+
+    def states(self) -> dict[str, list[float]]:
+        return {
+            "tcp_pose": [0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0],
+            "tcp_vel": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            "ext_wrench_in_world": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+
+    def actions(self) -> dict[str, list[float]]:
+        return {
+            "tcp_pose_d": [10.0, 11.0, 12.0, 1.0, 0.0, 0.0, 0.0],
+            "tcp_vel_d": [10.1, 10.2, 10.3, 10.4, 10.5, 10.6],
+            "ext_wrench_d": [11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        }
 
     def primitive_states(self) -> dict[str, bool]:
         return {"reachedTarget": True}
@@ -131,3 +148,21 @@ def test_reset_home_returns_error_when_no_robot_instances_are_exposed(tmp_path) 
 
     assert result["ok"] is False
     assert "TransparentCartesianTeleopLAN.instances()" in str(result["error"])
+
+
+def test_robot_data_snapshot_uses_instance_states_and_actions(tmp_path) -> None:
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [
+        TeleopRobotPair(leader_serial="LOCAL_A", follower_serial="REMOTE_A"),
+        TeleopRobotPair(leader_serial="LOCAL_B", follower_serial="REMOTE_B"),
+    ]
+    service = TeleopService(settings, get_robot_pairs=lambda: pairs)
+    service._controller = FakeController((FakeRobot(), FakeRobot()))
+
+    snapshot = service.robot_data_snapshot()
+
+    assert set(snapshot["robots"]) == {"REMOTE_A", "REMOTE_B"}
+    first = snapshot["robots"]["REMOTE_A"]
+    assert first["connected"] is True
+    assert first["states"]["tcp_pose"] == [0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0]
+    assert first["actions"]["tcp_pose_d"] == [10.0, 11.0, 12.0, 1.0, 0.0, 0.0, 0.0]

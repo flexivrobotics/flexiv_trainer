@@ -131,43 +131,43 @@ const RECORDING_ENTRY_OPTIONS = [
         id: "observation.state.tcp_pose",
         label: "observation.state.tcp_pose",
         bucket: "observation",
-        payload: "cartesian_state",
+        payload: "states",
         sourceField: "tcp_pose",
     },
     {
         id: "observation.state.tcp_twist",
         label: "observation.state.tcp_twist",
         bucket: "observation",
-        payload: "cartesian_state",
+        payload: "states",
         sourceField: "tcp_vel",
     },
     {
         id: "observation.state.tcp_wrench",
         label: "observation.state.tcp_wrench",
         bucket: "observation",
-        payload: "cartesian_state",
+        payload: "states",
         sourceField: "ext_wrench_in_world",
     },
     {
         id: "action.tcp_pose",
         label: "action.tcp_pose",
         bucket: "action",
-        payload: "cartesian_command",
-        sourceField: "tcp_pose_des",
+        payload: "actions",
+        sourceField: "tcp_pose_d",
     },
     {
         id: "action.tcp_twist",
         label: "action.tcp_twist",
         bucket: "action",
-        payload: "cartesian_command",
-        sourceField: "tcp_vel_des",
+        payload: "actions",
+        sourceField: "tcp_vel_d",
     },
     {
         id: "action.tcp_wrench",
         label: "action.tcp_wrench",
         bucket: "action",
-        payload: "cartesian_command",
-        sourceField: "wrench_des_in_ctrl_frame",
+        payload: "actions",
+        sourceField: "ext_wrench_d",
     },
 ];
 const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
@@ -953,7 +953,7 @@ function hasActiveTeleopServices(teleopStatus) {
         return true;
     }
 
-    const robots = Object.values(teleopStatus.ddk?.robots || {});
+    const robots = Object.values(teleopStatus.robot_data?.robots || {});
     if (robots.some((robot) => !!robot?.connected)) {
         return true;
     }
@@ -1005,10 +1005,6 @@ function createServiceStatusCard(serviceKey, service) {
         teleop_service: [
             { label: "Connect", action: () => controlHomeService("teleop", "connect"), className: "start-button" },
             { label: "Disconnect", action: () => controlHomeService("teleop", "disconnect"), className: "stop-button" },
-        ],
-        robot_data_service: [
-            { label: "Connect", action: () => controlHomeService("ddk", "connect"), className: "start-button" },
-            { label: "Disconnect", action: () => controlHomeService("ddk", "disconnect"), className: "stop-button" },
         ],
         cameras: [
             { label: "Connect", action: () => controlHomeService("cameras", "connect"), className: "start-button" },
@@ -1443,15 +1439,15 @@ function extractCartesianVector(payload, kind, keyHint = "") {
 
 function readRobotTelemetry(robot) {
     return {
-        force: extractCartesianVector(robot?.cartesian_state, "force", "cartesian_state")
-            || extractCartesianVector(robot?.cartesian_command, "force", "cartesian_command"),
-        moment: extractCartesianVector(robot?.cartesian_state, "moment", "cartesian_state")
-            || extractCartesianVector(robot?.cartesian_command, "moment", "cartesian_command"),
+        force: extractCartesianVector(robot?.states, "force", "states")
+            || extractCartesianVector(robot?.actions, "force", "actions"),
+        moment: extractCartesianVector(robot?.states, "moment", "states")
+            || extractCartesianVector(robot?.actions, "moment", "actions"),
     };
 }
 
 function getRobotTelemetryForSide(side, teleopStatus) {
-    const robots = teleopStatus.ddk?.robots || {};
+    const robots = teleopStatus.robot_data?.robots || {};
     const sideIndex = side === "left" ? 0 : 1;
     const preferredSerial = state.summary?.robot_config?.remote_robot_serials?.[sideIndex];
     if (preferredSerial && robots[preferredSerial]) {
@@ -1792,7 +1788,7 @@ function areSelectedRecordingEntriesAvailable(teleopStatus) {
         }
 
         return configuredRemoteSerials.every((serial) => {
-            const robot = teleopStatus?.ddk?.robots?.[serial];
+            const robot = teleopStatus?.robot_data?.robots?.[serial];
             const payload = robot?.[option.payload];
             return hasRecordingPayload(payload?.[option.sourceField]);
         });
@@ -2241,7 +2237,7 @@ async function controlHomeService(serviceName, action, options = {}) {
 function renderTeleop() {
     const teleopStatus = state.teleopStatus || {
         teleop: { started: false, initialized: false, error: null },
-        ddk: { robots: {}, errors: {} },
+        robot_data: { robots: {}, errors: {} },
         cameras: { cameras: {}, errors: {} },
         services: state.summary?.services || {},
         recording: {
@@ -2292,7 +2288,7 @@ function renderTeleop() {
     if (teleopStatus.teleop.error) {
         issues.push(teleopStatus.teleop.error);
     }
-    issues.push(...Object.values(teleopStatus.ddk.errors || {}));
+    issues.push(...Object.values(teleopStatus.robot_data.errors || {}));
     issues.push(...Object.values(teleopStatus.cameras.errors || {}));
     const issueSignature = issues.join(" | ");
     if (issueSignature && issueSignature !== state.notifications.lastTeleopIssueSignature) {

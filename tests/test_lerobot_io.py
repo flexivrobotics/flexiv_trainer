@@ -28,15 +28,15 @@ def make_snapshot() -> dict:
     return {
         "robots": {
             "REMOTE_A": {
-                "cartesian_state": {
+                "states": {
                     "tcp_pose": [0, 1, 2, 3, 4, 5, 6],
                     "tcp_vel": [10, 11, 12, 13, 14, 15],
                     "ext_wrench_in_world": [20, 21, 22, 23, 24, 25],
                 },
-                "cartesian_command": {
-                    "tcp_pose_des": [30, 31, 32, 33, 34, 35, 36],
-                    "tcp_vel_des": [40, 41, 42, 43, 44, 45],
-                    "wrench_des_in_ctrl_frame": [50, 51, 52, 53, 54, 55],
+                "actions": {
+                    "tcp_pose_d": [30, 31, 32, 33, 34, 35, 36],
+                    "tcp_vel_d": [40, 41, 42, 43, 44, 45],
+                    "ext_wrench_d": [50, 51, 52, 53, 54, 55],
                 },
             }
         }

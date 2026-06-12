@@ -40,11 +40,11 @@ class RecordingService:
     def __init__(
         self,
         settings: AppSettings,
-        ddk: Any,
+        teleop: Any,
         cameras: Any,
     ) -> None:
         self._settings = settings
-        self._ddk = ddk
+        self._teleop = teleop
         self._cameras = cameras
 
         self._lock = threading.Lock()
@@ -98,6 +98,11 @@ class RecordingService:
                 raise RuntimeError("Previous recording is awaiting save or discard")
 
         entries = resolve_recording_entries(recording_entries)
+        includes_observation_values = any(
+            entry in _OBSERVATION_ENTRY_SPECS for entry in entries
+        )
+        includes_action_values = any(entry in _ACTION_ENTRY_SPECS for entry in entries)
+        requires_robot_values = includes_observation_values or includes_action_values
         target_fps = fps or 30
         episode_name, staging_path = self._create_staging_path()
 
@@ -105,9 +110,18 @@ class RecordingService:
             camera_names = resolve_recording_image_names(entries)
             self._ensure_camera_streams(camera_names)
             images = self._grab_images(camera_names, require_all=True, attempts=3)
-            ddk_snapshot = self._ddk.snapshot(initialize=False)
+            robot_snapshot = (
+                self._teleop.robot_data_snapshot(
+                    include_states=includes_observation_values,
+                    include_actions=includes_action_values,
+                )
+                if requires_robot_values
+                else {}
+            )
 
-            features, _, _ = build_features_from_sample(ddk_snapshot, images, entries)
+            features, _, _ = build_features_from_sample(
+                robot_snapshot, images, entries
+            )
             if not features:
                 raise RuntimeError(
                     "No recording features resolved for the selected entries"
@@ -414,8 +428,11 @@ class RecordingService:
                     timeout_ms=capture_timeout_ms,
                     block=False,
                 )
-                ddk_snapshot = (
-                    self._ddk.snapshot(initialize=False)
+                robot_snapshot = (
+                    self._teleop.robot_data_snapshot(
+                        include_states=includes_observation_values,
+                        include_actions=includes_action_values,
+                    )
                     if requires_robot_values
                     else {}
                 )
@@ -439,7 +456,7 @@ class RecordingService:
 
                 if requires_robot_values:
                     obs_values, act_values = _extract_snapshot_values(
-                        ddk_snapshot, entries
+                        robot_snapshot, entries
                     )
                     for key, value in obs_values.items():
                         frame[key] = np.array([value], dtype=np.float32)
@@ -519,23 +536,23 @@ class _ProgressTee:
 
 
 _OBSERVATION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "observation.state.tcp_pose": ("cartesian_state", "tcp_pose"),
-    "observation.state.tcp_twist": ("cartesian_state", "tcp_vel"),
-    "observation.state.tcp_wrench": ("cartesian_state", "ext_wrench_in_world"),
+    "observation.state.tcp_pose": ("states", "tcp_pose"),
+    "observation.state.tcp_twist": ("states", "tcp_vel"),
+    "observation.state.tcp_wrench": ("states", "ext_wrench_in_world"),
 }
 
 _ACTION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "action.tcp_pose": ("cartesian_command", "tcp_pose_des"),
-    "action.tcp_twist": ("cartesian_command", "tcp_vel_des"),
-    "action.tcp_wrench": ("cartesian_command", "wrench_des_in_ctrl_frame"),
+    "action.tcp_pose": ("actions", "tcp_pose_d"),
+    "action.tcp_twist": ("actions", "tcp_vel_d"),
+    "action.tcp_wrench": ("actions", "ext_wrench_d"),
 }
 
 
 def _extract_snapshot_values(
-    ddk_snapshot: dict[str, Any], entries: list[str]
+    robot_snapshot: dict[str, Any], entries: list[str]
 ) -> tuple[dict[str, float], dict[str, float]]:
-    """Extract actual numeric values from a DDK snapshot, keyed by feature label."""
-    robots = ddk_snapshot.get("robots") if isinstance(ddk_snapshot, dict) else None
+    """Extract actual numeric values from a robot snapshot, keyed by feature label."""
+    robots = robot_snapshot.get("robots") if isinstance(robot_snapshot, dict) else None
     if not isinstance(robots, dict):
         return {}, {}
 

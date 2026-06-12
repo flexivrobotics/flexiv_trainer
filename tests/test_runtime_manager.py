@@ -94,7 +94,14 @@ def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) 
             stopped=True,
             fault=None,
             error=None,
-        )
+        ),
+        robot_data_snapshot=lambda: {
+            "robots": {
+                "REMOTE_A": {"connected": True},
+                "REMOTE_B": {"connected": True},
+            },
+            "errors": {},
+        },
     )
     manager.ddk = SimpleNamespace(
         initialize=lambda: {
@@ -116,7 +123,8 @@ def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) 
                 "left_wrist": {"started": False},
                 "right_wrist": {"started": False},
             },
-        }
+        },
+        configured_serials=lambda: {},
     )
     manager.recording = SimpleNamespace(status=lambda: {"active": False})
 

@@ -88,7 +88,7 @@ class RuntimeManager:
                 _optional_dependency_error("Episode recording", exc)
             )
         else:
-            self.recording = RecordingService(settings, self.ddk, self.cameras)
+            self.recording = RecordingService(settings, self.teleop, self.cameras)
         self.training = TrainingService(settings)
 
     def _load_robot_config(self) -> RobotSerialConfig:
@@ -227,30 +227,22 @@ class RuntimeManager:
                 teleop_errors, "Press Connect to initialize TDK."
             )
 
-        ddk_status = self.ddk.status()
-        remote_count = len(self.get_remote_robot_serials())
-        connected_count = sum(
-            1 for robot in ddk_status["robots"].values() if robot.get("connected")
-        )
-        ddk_errors = [str(value) for value in ddk_status["errors"].values() if value]
-        if not ddk_status["available"]:
-            ddk_state = "Unavailable"
-            ddk_tone = "error"
-            ddk_detail = self._service_message(ddk_errors, "DDK is not available.")
-        elif remote_count == 0:
-            ddk_state = "Not configured"
-            ddk_tone = "error"
-            ddk_detail = "Enter two remote robot serial numbers."
-        elif connected_count == remote_count and remote_count > 0:
-            ddk_state = "Connected"
-            ddk_tone = "ok"
-            ddk_detail = f"{connected_count} data streams ready."
+        if not teleop_snapshot.available:
+            robot_data_state = "Unavailable"
+            robot_data_tone = "error"
+            robot_data_detail = "TDK is not available."
+        elif teleop_pair_count == 0:
+            robot_data_state = "Not configured"
+            robot_data_tone = "error"
+            robot_data_detail = "Enter two local and two remote robot serial numbers."
+        elif teleop_snapshot.initialized:
+            robot_data_state = "Connected"
+            robot_data_tone = "ok"
+            robot_data_detail = "Robot states/actions are available through TDK."
         else:
-            ddk_state = "Not connected"
-            ddk_tone = "error" if ddk_errors else "neutral"
-            ddk_detail = self._service_message(
-                ddk_errors, "Press Connect to initialize DDK."
-            )
+            robot_data_state = "Not connected"
+            robot_data_tone = "neutral"
+            robot_data_detail = "Connect the teleoperation service first."
 
         camera_status = self.cameras.status()
         configured_camera_count = len(camera_status["cameras"])
@@ -294,9 +286,9 @@ class RuntimeManager:
             },
             "robot_data_service": {
                 "label": "ROBOT DATA SERVICE",
-                "state": ddk_state,
-                "detail": ddk_detail,
-                "tone": ddk_tone,
+                "state": robot_data_state,
+                "detail": robot_data_detail,
+                "tone": robot_data_tone,
             },
             "cameras": {
                 "label": "CAMERAS",
@@ -342,7 +334,7 @@ class RuntimeManager:
                 "ui_url": self.settings.ui_url,
             },
             "teleop": self.teleop.snapshot().__dict__,
-            "ddk": self.ddk.status(),
+            "robot_data": self.teleop.robot_data_snapshot(),
             "cameras": self.cameras.discover(),
             "storage": {
                 "root": str(self.settings.storage.root),
@@ -373,23 +365,22 @@ class RuntimeManager:
         stages = []
 
         teleop = self.teleop.initialize().__dict__
-        stages.append({"stage": "teleop", "progress": 25, "detail": teleop})
+        stages.append({"stage": "teleop", "progress": 34, "detail": teleop})
 
-        ddk = self.ddk.initialize()
-        stages.append({"stage": "ddk", "progress": 50, "detail": ddk})
+        robot_data = self.teleop.robot_data_snapshot()
+        stages.append(
+            {
+                "stage": "robot_data",
+                "progress": 67,
+                "detail": robot_data,
+            }
+        )
 
         cameras = self.cameras.start_streams()
         self._save_camera_config()
-        stages.append({"stage": "cameras", "progress": 75, "detail": cameras})
+        stages.append({"stage": "cameras", "progress": 100, "detail": cameras})
 
-        overlay = {
-            "left_force_anchor": "bottom-left",
-            "right_force_anchor": "bottom-right",
-            "dynamic_position": False,
-        }
-        stages.append({"stage": "force_overlay", "progress": 100, "detail": overlay})
-
-        ddk_robots = ddk.get("robots") or {}
+        robot_data_robots = robot_data.get("robots") or {}
         camera_states = cameras.get("cameras") or {}
         teleop_ready = (
             bool(teleop.get("available"))
@@ -397,12 +388,12 @@ class RuntimeManager:
             and not teleop.get("error")
             and not teleop.get("fault")
         )
-        ddk_ready = (
-            bool(ddk.get("available"))
-            and bool(ddk.get("configured"))
-            and bool(ddk_robots)
-            and not ddk.get("errors")
-            and all(bool(robot.get("connected")) for robot in ddk_robots.values())
+        robot_data_ready = (
+            bool(robot_data_robots)
+            and not robot_data.get("errors")
+            and all(
+                bool(robot.get("connected")) for robot in robot_data_robots.values()
+            )
         )
         cameras_ready = (
             bool(cameras.get("available"))
@@ -412,7 +403,7 @@ class RuntimeManager:
         )
 
         return {
-            "ready": teleop_ready and ddk_ready and cameras_ready,
+            "ready": teleop_ready and robot_data_ready and cameras_ready,
             "stages": stages,
             "recording": self.recording.status(),
         }

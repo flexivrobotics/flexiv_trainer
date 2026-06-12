@@ -36,6 +36,24 @@ TransparentCartesianTeleopLAN = (
 )
 
 
+def _serialize_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _serialize_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value(item) for item in value]
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    if hasattr(value, "__dict__"):
+        return {
+            key: _serialize_value(item)
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
+    return str(value)
+
+
 @dataclass
 class TeleopSnapshot:
     configured: bool
@@ -59,6 +77,38 @@ class TeleopService:
         self._error: str | None = None
         self._initialized = False
         self._started = False
+
+    def _configured_remote_serials(self) -> list[str]:
+        serials: list[str] = []
+        for pair in self._get_robot_pairs():
+            serial = str(pair.follower_serial).strip()
+            if serial:
+                serials.append(serial)
+        return serials
+
+    def _coerce_numeric_vector(self, value: Any) -> list[float] | None:
+        if not isinstance(value, (list, tuple)):
+            return None
+
+        vector: list[float] = []
+        for item in value:
+            try:
+                vector.append(float(item))
+            except (TypeError, ValueError):
+                return None
+        return vector
+
+    def _robot_connected(self, robot: Any) -> bool:
+        connected_member = getattr(robot, "connected", None)
+        if callable(connected_member):
+            try:
+                return bool(connected_member())
+            except Exception:
+                return False
+
+        if connected_member is None:
+            return True
+        return bool(connected_member)
 
     def _instance_provider_results(self, provider: Any) -> list[Any]:
         if not callable(provider):
@@ -169,6 +219,94 @@ class TeleopService:
             time.sleep(0.2)
 
         raise TimeoutError("Timed out while waiting for Home primitive to finish")
+
+    def robot_data_snapshot(
+        self,
+        *,
+        include_states: bool = True,
+        include_actions: bool = True,
+    ) -> dict[str, Any]:
+        if self._controller is None:
+            return {"robots": {}, "errors": {}}
+
+        robots = self._home_robot_handles()
+        if not robots:
+            return {"robots": {}, "errors": {}}
+
+        configured_serials = self._configured_remote_serials()
+        snapshot_robots: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+
+        for index, robot in enumerate(robots):
+            base_name = (
+                configured_serials[index]
+                if index < len(configured_serials)
+                else f"robot_{index}"
+            )
+            robot_name = base_name
+            suffix = 1
+            while robot_name in snapshot_robots:
+                robot_name = f"{base_name}_{suffix}"
+                suffix += 1
+
+            payload: dict[str, Any] = {
+                "connected": self._robot_connected(robot),
+            }
+
+            try:
+                if include_states:
+                    states_reader = getattr(robot, "states", None)
+                    if callable(states_reader):
+                        raw_states = _serialize_value(states_reader())
+                        if isinstance(raw_states, dict):
+                            states: dict[str, list[float]] = {}
+                            tcp_pose = self._coerce_numeric_vector(
+                                raw_states.get("tcp_pose")
+                            )
+                            tcp_vel = self._coerce_numeric_vector(
+                                raw_states.get("tcp_vel")
+                            )
+                            ext_wrench_in_world = self._coerce_numeric_vector(
+                                raw_states.get("ext_wrench_in_world")
+                            )
+                            if tcp_pose is not None:
+                                states["tcp_pose"] = tcp_pose
+                            if tcp_vel is not None:
+                                states["tcp_vel"] = tcp_vel
+                            if ext_wrench_in_world is not None:
+                                states["ext_wrench_in_world"] = ext_wrench_in_world
+                            payload["states"] = states
+
+                if include_actions:
+                    actions_reader = getattr(robot, "actions", None)
+                    if callable(actions_reader):
+                        raw_actions = _serialize_value(actions_reader())
+                        if isinstance(raw_actions, dict):
+                            actions: dict[str, list[float]] = {}
+                            tcp_pose_d = self._coerce_numeric_vector(
+                                raw_actions.get("tcp_pose_d")
+                            )
+                            tcp_vel_d = self._coerce_numeric_vector(
+                                raw_actions.get("tcp_vel_d")
+                            )
+                            ext_wrench_d = self._coerce_numeric_vector(
+                                raw_actions.get("ext_wrench_d")
+                            )
+                            if tcp_pose_d is not None:
+                                actions["tcp_pose_d"] = tcp_pose_d
+                            if tcp_vel_d is not None:
+                                actions["tcp_vel_d"] = tcp_vel_d
+                            if ext_wrench_d is not None:
+                                actions["ext_wrench_d"] = ext_wrench_d
+                            payload["actions"] = actions
+            except Exception as exc:  # pragma: no cover - hardware specific
+                payload["connected"] = False
+                payload["error"] = describe_exception(exc)
+                errors[robot_name] = payload["error"]
+
+            snapshot_robots[robot_name] = payload
+
+        return {"robots": snapshot_robots, "errors": errors}
 
     def initialize(self) -> TeleopSnapshot:
         robot_pairs_config = self._get_robot_pairs()
