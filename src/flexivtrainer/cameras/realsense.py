@@ -75,6 +75,76 @@ class RealSenseService:
             )
         return {"available": True, "devices": devices, "errors": dict(self._errors)}
 
+    def configured_serials(self) -> dict[str, str | None]:
+        return {
+            name: runtime.config.device_serial
+            for name, runtime in self._runtimes.items()
+        }
+
+    def set_device_serials(self, serials: dict[str, str | None]) -> None:
+        """Assign device serials to camera locations.
+
+        A serial may back only one slot. Any duplicate is dropped (the first
+        slot in declaration order keeps it, later ones become N/A), which also
+        cleans up stale persisted configs. When any assignment changes, every
+        streaming camera is stopped and restarted so the new mapping resolves
+        cleanly even when serials are swapped between locations.
+        """
+        with self._lock:
+            before = {
+                name: runtime.config.device_serial
+                for name, runtime in self._runtimes.items()
+            }
+
+            for name, serial in serials.items():
+                runtime = self._runtimes.get(name)
+                if runtime is None:
+                    continue
+                runtime.config.device_serial = (
+                    (str(serial).strip() or None) if serial else None
+                )
+
+            # Enforce uniqueness: keep the first slot holding each serial.
+            seen: set[str] = set()
+            for runtime in self._runtimes.values():
+                serial = runtime.config.device_serial
+                if not serial:
+                    continue
+                if serial in seen:
+                    runtime.config.device_serial = None
+                else:
+                    seen.add(serial)
+
+            changed = False
+            for name, runtime in self._runtimes.items():
+                if runtime.config.device_serial != before[name]:
+                    changed = True
+                    self._errors.pop(name, None)
+
+            if changed:
+                self._restart_started_cameras()
+
+    def _restart_started_cameras(self) -> None:
+        # Only re-resolve while the camera service is active (at least one slot
+        # streaming). If nothing is running, leave it to an explicit connect.
+        if not any(rt.started for rt in self._runtimes.values()):
+            return
+
+        for runtime in self._runtimes.values():
+            if runtime.started:
+                self._stop_runtime(runtime)
+            # Drop sticky auto-assignments so each slot is re-resolved freshly.
+            runtime.actual_serial = None
+
+        if rs is None:
+            return
+
+        # Re-resolve every slot, not just the ones that happened to be running:
+        # freeing a device from one slot may now let another slot acquire it.
+        available_serials = self._available_serials()
+        for runtime in self._runtimes.values():
+            self._start_runtime(runtime, available_serials)
+
     def _resolve_camera_names(self, camera_names: list[str] | None = None) -> list[str]:
         selected = list(self._runtimes) if camera_names is None else list(camera_names)
         unknown = [name for name in selected if name not in self._runtimes]
@@ -106,25 +176,20 @@ class RealSenseService:
     def _resolve_runtime_serial(
         self, runtime: CameraRuntime, available_serials: list[str]
     ) -> str | None:
-        serial = runtime.config.device_serial or runtime.actual_serial
-        if serial:
-            if serial in available_serials:
-                available_serials.remove(serial)
-                return serial
-            runtime.actual_serial = serial
-            self._errors[runtime.config.name] = (
-                f"Camera serial {serial} is not detected"
-            )
-            return None
-
-        if not available_serials:
+        serial = runtime.config.device_serial
+        if not serial:
+            # Slot is set to N/A: intentionally unassigned, not an error.
             runtime.actual_serial = None
-            self._errors[runtime.config.name] = (
-                "No RealSense camera is available for this stream"
-            )
+            self._errors.pop(runtime.config.name, None)
             return None
 
-        return available_serials.pop(0)
+        if serial in available_serials:
+            available_serials.remove(serial)
+            return serial
+
+        runtime.actual_serial = serial
+        self._errors[runtime.config.name] = f"Camera serial {serial} is not detected"
+        return None
 
     def _start_runtime(
         self, runtime: CameraRuntime, available_serials: list[str]
@@ -164,6 +229,30 @@ class RealSenseService:
             runtime.started = False
             self._errors[runtime.config.name] = describe_exception(exc)
 
+    def ensure_default_assignment(self) -> bool:
+        """Assign detected cameras to the first slots when none are configured.
+
+        The N detected serials are assigned to the first N camera slots (in
+        declaration order); remaining slots stay unassigned (N/A). Only applied
+        when no slot has an explicit serial yet, so user choices are preserved.
+        Returns True when the configuration changed (so callers can persist it).
+        """
+        if rs is None:
+            return False
+
+        with self._lock:
+            if any(rt.config.device_serial for rt in self._runtimes.values()):
+                return False
+            serials = [device["serial"] for device in self.discover()["devices"]]
+            if not serials:
+                return False
+            changed = False
+            for runtime, serial in zip(self._runtimes.values(), serials):
+                if runtime.config.device_serial != serial:
+                    runtime.config.device_serial = serial
+                    changed = True
+            return changed
+
     def start_streams(self, camera_names: list[str] | None = None) -> dict[str, Any]:
         if rs is None:
             return {
@@ -172,6 +261,7 @@ class RealSenseService:
                 "errors": {"import": "pyrealsense2 is not importable"},
             }
 
+        self.ensure_default_assignment()
         with self._lock:
             available_serials = self._available_serials()
             for name in self._resolve_camera_names(camera_names):

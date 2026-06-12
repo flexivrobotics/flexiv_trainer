@@ -244,6 +244,53 @@ button:disabled {
     box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
 }
 
+.robot-input-group select {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.78rem 0.9rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.95rem;
+    cursor: pointer;
+}
+
+.robot-input-group select:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
+}
+
+.camera-control-stack {
+    gap: 0.85rem;
+}
+
+.camera-input-group {
+    gap: 0.3rem;
+}
+
+.camera-input-group select {
+    font-size: 0.85rem;
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+}
+
+.camera-input-caption {
+    color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.25;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    word-break: break-word;
+}
+
+.camera-control-empty {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
 .panel--wide {
     margin-top: 1rem;
 }
@@ -418,9 +465,9 @@ button:disabled {
 }
 
 .feed {
+    --feed-media-aspect-ratio: 16 / 9;
     --teleop-card-gap: 0.58rem;
     min-height: 0;
-    aspect-ratio: 16 / 9;
     display: flex;
     flex-direction: column;
     gap: var(--teleop-card-gap);
@@ -431,12 +478,7 @@ button:disabled {
 }
 
 .feed--hero {
-    aspect-ratio: 16 / 9;
     min-height: 0;
-}
-
-.wrist-column>.feed {
-    aspect-ratio: 16 / 9;
 }
 
 .feed__title {
@@ -485,6 +527,12 @@ button:disabled {
     color: rgba(251, 247, 240, 0.78);
 }
 
+.feed>.feed__placeholder {
+    width: 100%;
+    flex: none;
+    aspect-ratio: var(--feed-media-aspect-ratio);
+}
+
 .feed__placeholder--awaiting {
     color: #fbf7f0;
 }
@@ -497,7 +545,7 @@ button:disabled {
 
 .feed__image {
     width: 100%;
-    height: auto;
+    height: 100%;
     display: block;
     border-radius: 18px;
     object-fit: contain;

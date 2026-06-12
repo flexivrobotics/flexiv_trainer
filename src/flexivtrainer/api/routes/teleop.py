@@ -33,6 +33,10 @@ from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 router = APIRouter(prefix="/teleop", tags=["teleop"])
 
 
+class CameraConfigRequest(BaseModel):
+    serials: dict[str, str] = Field(default_factory=dict)
+
+
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
@@ -119,6 +123,26 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
     }
+
+
+@router.get("/cameras/config")
+def get_camera_config(
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    return {
+        **runtime.camera_config_snapshot(),
+        "devices": runtime.cameras.discover().get("devices", []),
+    }
+
+
+@router.put("/cameras/config")
+def update_camera_config(
+    request: CameraConfigRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    result = runtime.update_camera_config(request.serials)
+    ok("Camera assignment updated")
+    return result
 
 
 @router.get("/cameras/{camera_name}/frame")

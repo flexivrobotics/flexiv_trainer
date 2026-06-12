@@ -36,6 +36,20 @@ class CameraConfig(BaseModel):
     fps: int = 30
 
 
+class CameraSerialConfig(BaseModel):
+    """Persisted mapping of camera location name -> assigned device serial."""
+
+    serials: dict[str, str] = Field(default_factory=dict)
+
+    def normalized(self) -> CameraSerialConfig:
+        return CameraSerialConfig(
+            serials={
+                str(name): str(serial).strip()
+                for name, serial in self.serials.items()
+            }
+        )
+
+
 class StorageConfig(BaseModel):
     root: Path = Path(".local")
     episodes_dirname: str = "episodes"
@@ -67,6 +81,10 @@ class StorageConfig(BaseModel):
     @property
     def runtime_config_path(self) -> Path:
         return self.root / "robot_serials.json"
+
+    @property
+    def camera_config_path(self) -> Path:
+        return self.root / "camera_serials.json"
 
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

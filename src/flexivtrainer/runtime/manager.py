@@ -22,6 +22,7 @@ from typing import Any
 from flexivtrainer.cameras.realsense import RealSenseService
 from flexivtrainer.config import (
     AppSettings,
+    CameraSerialConfig,
     RobotSerialConfig,
     TeleopRobotPair,
     get_settings,
@@ -79,6 +80,7 @@ class RuntimeManager:
         self.teleop = TeleopService(settings, self.get_teleop_robot_pairs)
         self.ddk = DDKService(settings, self.get_remote_robot_serials)
         self.cameras = RealSenseService(settings)
+        self._load_camera_config()
         try:
             from flexivtrainer.data.recording_service import RecordingService
         except ImportError as exc:
@@ -107,6 +109,47 @@ class RuntimeManager:
 
     def robot_config_snapshot(self) -> dict[str, Any]:
         return self._robot_config.model_dump()
+
+    def _load_camera_config(self) -> None:
+        path = self.settings.storage.camera_config_path
+        if path.exists():
+            try:
+                config = CameraSerialConfig.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                ).normalized()
+            except (ValueError, OSError):
+                config = CameraSerialConfig()
+            if config.serials:
+                self.cameras.set_device_serials(config.serials)
+        else:
+            self._save_camera_config()
+
+    def _save_camera_config(self) -> None:
+        serials = {
+            name: (serial or "")
+            for name, serial in self.cameras.configured_serials().items()
+        }
+        self.settings.storage.camera_config_path.write_text(
+            CameraSerialConfig(serials=serials).model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+
+    def camera_config_snapshot(self) -> dict[str, Any]:
+        return {
+            "cameras": [
+                {"name": name, "device_serial": serial or ""}
+                for name, serial in self.cameras.configured_serials().items()
+            ]
+        }
+
+    def update_camera_config(self, serials: dict[str, str]) -> dict[str, Any]:
+        self.cameras.set_device_serials(serials)
+        self._save_camera_config()
+        return {
+            "camera_config": self.camera_config_snapshot(),
+            "cameras": self.cameras.status(),
+            "services": self.service_summary(),
+        }
 
     def get_remote_robot_serials(self) -> list[str]:
         return [serial for serial in self._robot_config.remote_robot_serials if serial]
@@ -280,11 +323,11 @@ class RuntimeManager:
                 else (self.ddk.shutdown() or {"disconnected": True})
             )
         elif service_name == "cameras":
-            result = (
-                self.cameras.start_streams()
-                if action == "connect"
-                else self.cameras.stop_streams()
-            )
+            if action == "connect":
+                result = self.cameras.start_streams()
+                self._save_camera_config()
+            else:
+                result = self.cameras.stop_streams()
         else:
             raise ValueError(f"Unsupported service: {service_name}")
 
@@ -308,6 +351,7 @@ class RuntimeManager:
                 "training": str(self.settings.storage.training_root),
             },
             "robot_config": self.robot_config_snapshot(),
+            "camera_config": self.camera_config_snapshot(),
             "services": self.service_summary(),
         }
 
@@ -335,6 +379,7 @@ class RuntimeManager:
         stages.append({"stage": "ddk", "progress": 50, "detail": ddk})
 
         cameras = self.cameras.start_streams()
+        self._save_camera_config()
         stages.append({"stage": "cameras", "progress": 75, "detail": cameras})
 
         overlay = {

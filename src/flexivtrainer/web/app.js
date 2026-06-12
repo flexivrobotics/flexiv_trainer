@@ -16,6 +16,7 @@ const state = {
     activeView: "home",
     summary: null,
     teleopStatus: null,
+    cameraConfig: null,
     trainingPolicies: null,
     trainingStatus: null,
     teleopBootstrapped: false,
@@ -74,6 +75,7 @@ const state = {
     },
     timers: {
         robotConfigSave: null,
+        cameraConfigSave: null,
     },
     ui: {
         teleopRefreshBusy: false,
@@ -1178,6 +1180,115 @@ function queueRobotConfigSave() {
             state.summary.robot_config = result.robot_config;
             state.summary.services = result.services;
             renderHomeStatus();
+        } catch (error) {
+            showToast(error.message, true);
+        }
+    }, 180);
+}
+
+const CAMERA_LOCATION_LABELS = {
+    ego: "Egocentric",
+    left_wrist: "Left Wrist",
+    right_wrist: "Right Wrist",
+};
+
+async function loadTeleopCameraConfig() {
+    try {
+        state.cameraConfig = await api("/teleop/cameras/config");
+        renderTeleopCameraConfig();
+    } catch (error) {
+        // Non-fatal: the panel keeps its placeholder until cameras are reachable.
+    }
+}
+
+function renderTeleopCameraConfig() {
+    const container = byId("teleop-camera-config");
+    if (!container) {
+        return;
+    }
+    const config = state.cameraConfig;
+    const cameras = config?.cameras || [];
+    const devices = config?.devices || [];
+    if (cameras.length === 0) {
+        container.innerHTML = `<p class="camera-control-empty">No cameras are configured.</p>`;
+        return;
+    }
+    container.innerHTML = "";
+    cameras.forEach((camera) => {
+        const field = document.createElement("label");
+        field.className = "robot-input-group camera-input-group";
+        const labelText = CAMERA_LOCATION_LABELS[camera.name] || camera.name;
+        const current = camera.device_serial || "";
+        const seen = new Set();
+        const options = [`<option value=""${current ? "" : " selected"}>N/A</option>`];
+        devices.forEach((device) => {
+            seen.add(device.serial);
+            const selected = device.serial === current ? " selected" : "";
+            options.push(`<option value="${device.serial}"${selected}>${device.serial}</option>`);
+        });
+        if (current && !seen.has(current)) {
+            options.push(`<option value="${current}" selected>${current}</option>`);
+        }
+        field.innerHTML = `
+            <span>${labelText}</span>
+            <select>${options.join("")}</select>
+            <small class="camera-input-caption"></small>
+        `;
+        const select = field.querySelector("select");
+        const caption = field.querySelector(".camera-input-caption");
+        const updateCaption = () => {
+            caption.textContent = describeCameraSelection(select.value, devices);
+        };
+        updateCaption();
+        select.onchange = () => {
+            const value = select.value;
+            camera.device_serial = value;
+            if (value) {
+                // A camera backs only one slot: clear it from any other slot.
+                (state.cameraConfig?.cameras || []).forEach((other) => {
+                    if (other !== camera && other.device_serial === value) {
+                        other.device_serial = "";
+                    }
+                });
+            }
+            renderTeleopCameraConfig();
+            queueCameraConfigSave();
+        };
+        container.appendChild(field);
+    });
+}
+
+function describeCameraSelection(serial, devices) {
+    if (!serial) {
+        return "Not assigned";
+    }
+    const device = (devices || []).find((entry) => entry.serial === serial);
+    return device ? device.name : "Camera not detected";
+}
+
+function queueCameraConfigSave() {
+    window.clearTimeout(state.timers.cameraConfigSave);
+    state.timers.cameraConfigSave = window.setTimeout(async () => {
+        try {
+            const serials = {};
+            (state.cameraConfig?.cameras || []).forEach((camera) => {
+                serials[camera.name] = camera.device_serial || "";
+            });
+            const result = await api("/teleop/cameras/config", {
+                method: "PUT",
+                body: JSON.stringify({ serials }),
+            });
+            if (state.cameraConfig && result.camera_config?.cameras) {
+                state.cameraConfig.cameras = result.camera_config.cameras;
+            }
+            if (state.summary && result.services) {
+                state.summary.services = result.services;
+                renderHomeStatus();
+            }
+            renderTeleopCameraConfig();
+            if (state.activeView === "teleoperation") {
+                await refreshTeleopStatus();
+            }
         } catch (error) {
             showToast(error.message, true);
         }
@@ -2848,6 +2959,7 @@ async function bootstrapTeleoperation() {
     if (state.ui.teleopBootstrapBusy) {
         return;
     }
+    loadTeleopCameraConfig();
     if (state.teleopBootstrapped) {
         await refreshTeleopStatus();
         if (hasActiveTeleopServices(state.teleopStatus)) {
@@ -2896,6 +3008,8 @@ async function bootstrapTeleoperation() {
     } catch (_) {
         // Non-fatal: polling will retry
     }
+    // Reload so the panel reflects the default assignment applied at startup.
+    loadTeleopCameraConfig();
     if (bootstrapResult.ready || hasActiveTeleopServices(state.teleopStatus)) {
         startTeleopPolling();
     }
