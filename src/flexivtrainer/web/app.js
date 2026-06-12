@@ -1242,14 +1242,24 @@ function renderTeleopCameraConfig() {
         updateCaption();
         select.onchange = () => {
             const value = select.value;
-            camera.device_serial = value;
+            const previous = camera.device_serial || "";
+            let other = null;
             if (value) {
-                // A camera backs only one slot: clear it from any other slot.
-                (state.cameraConfig?.cameras || []).forEach((other) => {
-                    if (other !== camera && other.device_serial === value) {
-                        other.device_serial = "";
-                    }
-                });
+                other = (state.cameraConfig?.cameras || []).find(
+                    (entry) => entry !== camera && entry.device_serial === value,
+                ) || null;
+            } else if (previous) {
+                // If there is exactly one other unassigned slot, treat selecting
+                // N/A as swapping with that slot.
+                const emptyOthers = (state.cameraConfig?.cameras || []).filter(
+                    (entry) => entry !== camera && !(entry.device_serial || ""),
+                );
+                other = emptyOthers.length === 1 ? emptyOthers[0] : null;
+            }
+
+            camera.device_serial = value;
+            if (other) {
+                other.device_serial = previous;
             }
             renderTeleopCameraConfig();
             queueCameraConfigSave();
@@ -2210,6 +2220,9 @@ async function controlHomeService(serviceName, action, options = {}) {
                 stopTeleopPolling();
             }
         }
+    }
+    if (serviceName === "cameras") {
+        await loadTeleopCameraConfig();
     }
     const labels = {
         teleop: "Teleop service",

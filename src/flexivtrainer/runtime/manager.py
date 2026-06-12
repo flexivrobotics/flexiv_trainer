@@ -120,7 +120,7 @@ class RuntimeManager:
             except (ValueError, OSError):
                 config = CameraSerialConfig()
             if config.serials:
-                self.cameras.set_device_serials(config.serials)
+                self.cameras.set_device_serials(config.serials, manual=False)
         else:
             self._save_camera_config()
 
@@ -143,7 +143,7 @@ class RuntimeManager:
         }
 
     def update_camera_config(self, serials: dict[str, str]) -> dict[str, Any]:
-        self.cameras.set_device_serials(serials)
+        self.cameras.set_device_serials(serials, manual=True)
         self._save_camera_config()
         return {
             "camera_config": self.camera_config_snapshot(),

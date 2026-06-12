@@ -102,6 +102,76 @@ def test_start_streams_fast_fails_when_configured_serial_is_missing(
     assert status["cameras"]["ego"]["started"] is False
 
 
+def test_ensure_default_assignment_fills_unassigned_slots(
+    monkeypatch, tmp_path
+) -> None:
+    start_calls: list[str | None] = []
+    fake_rs = make_fake_rs(
+        [
+            FakeDevice("D435", "SERIAL_A"),
+            FakeDevice("D435", "SERIAL_B"),
+            FakeDevice("D435", "SERIAL_C"),
+        ],
+        start_calls,
+    )
+    monkeypatch.setattr(realsense_module, "rs", fake_rs)
+
+    service = RealSenseService(
+        AppSettings(
+            storage=StorageConfig(root=tmp_path),
+            cameras=[
+                CameraConfig(name="ego", device_serial="SERIAL_A"),
+                CameraConfig(name="left_wrist", device_serial="SERIAL_B"),
+                CameraConfig(name="right_wrist"),
+            ],
+        )
+    )
+
+    changed = service.ensure_default_assignment()
+
+    assert changed is True
+    assert service.configured_serials() == {
+        "ego": "SERIAL_A",
+        "left_wrist": "SERIAL_B",
+        "right_wrist": "SERIAL_C",
+    }
+
+
+def test_ensure_default_assignment_replaces_stale_serials(
+    monkeypatch, tmp_path
+) -> None:
+    start_calls: list[str | None] = []
+    fake_rs = make_fake_rs(
+        [
+            FakeDevice("D435", "SERIAL_B"),
+            FakeDevice("D435", "SERIAL_C"),
+        ],
+        start_calls,
+    )
+    monkeypatch.setattr(realsense_module, "rs", fake_rs)
+
+    service = RealSenseService(
+        AppSettings(
+            storage=StorageConfig(root=tmp_path),
+            cameras=[
+                CameraConfig(name="ego"),
+                CameraConfig(name="left_wrist"),
+                CameraConfig(name="right_wrist"),
+            ],
+        )
+    )
+    service.set_device_serials({"ego": "SERIAL_A"}, manual=False)
+
+    changed = service.ensure_default_assignment()
+
+    assert changed is True
+    assert service.configured_serials() == {
+        "ego": "SERIAL_B",
+        "left_wrist": "SERIAL_C",
+        "right_wrist": None,
+    }
+
+
 def test_capture_frame_reads_only_requested_camera(tmp_path) -> None:
     service = RealSenseService(AppSettings(storage=StorageConfig(root=tmp_path)))
     payload = {

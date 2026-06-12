@@ -38,6 +38,7 @@ class CameraRuntime:
     pipeline: Any | None = None
     started: bool = False
     actual_serial: str | None = None
+    manual_assignment: bool = False
     frame_count: int = 0
     last_frame_time: float | None = None
     fps: float = 0.0
@@ -47,7 +48,11 @@ class RealSenseService:
     def __init__(self, settings: AppSettings) -> None:
         self._settings = settings
         self._runtimes = {
-            camera.name: CameraRuntime(config=camera) for camera in settings.cameras
+            camera.name: CameraRuntime(
+                config=camera,
+                manual_assignment=bool(camera.device_serial),
+            )
+            for camera in settings.cameras
         }
         self._last_frames: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, str] = {}
@@ -81,7 +86,9 @@ class RealSenseService:
             for name, runtime in self._runtimes.items()
         }
 
-    def set_device_serials(self, serials: dict[str, str | None]) -> None:
+    def set_device_serials(
+        self, serials: dict[str, str | None], *, manual: bool = True
+    ) -> None:
         """Assign device serials to camera locations.
 
         A serial may back only one slot. Any duplicate is dropped (the first
@@ -102,6 +109,9 @@ class RealSenseService:
                     continue
                 runtime.config.device_serial = (
                     (str(serial).strip() or None) if serial else None
+                )
+                runtime.manual_assignment = manual and bool(
+                    runtime.config.device_serial
                 )
 
             # Enforce uniqueness: keep the first slot holding each serial.
@@ -230,26 +240,46 @@ class RealSenseService:
             self._errors[runtime.config.name] = describe_exception(exc)
 
     def ensure_default_assignment(self) -> bool:
-        """Assign detected cameras to the first slots when none are configured.
+        """Reconcile configured slots with the currently detected cameras.
 
-        The N detected serials are assigned to the first N camera slots (in
-        declaration order); remaining slots stay unassigned (N/A). Only applied
-        when no slot has an explicit serial yet, so user choices are preserved.
-        Returns True when the configuration changed (so callers can persist it).
+        Any configured serial that is still detected is preserved. Remaining
+        detected devices are then assigned to the remaining slots in
+        declaration order, which lets the service recover from stale persisted
+        serials after cameras are unplugged and replaced. Explicit manual
+        assignments remain pinned even when temporarily unavailable.
+        Returns True when the configuration changed so callers can persist it.
         """
         if rs is None:
             return False
 
         with self._lock:
-            if any(rt.config.device_serial for rt in self._runtimes.values()):
-                return False
             serials = [device["serial"] for device in self.discover()["devices"]]
             if not serials:
                 return False
+
+            available = list(serials)
+            desired: dict[str, str | None] = {}
+
+            for name, runtime in self._runtimes.items():
+                serial = runtime.config.device_serial
+                if serial and serial in available:
+                    desired[name] = serial
+                    available.remove(serial)
+
             changed = False
-            for runtime, serial in zip(self._runtimes.values(), serials):
+            for name, runtime in self._runtimes.items():
+                serial = desired.get(name)
+                if (
+                    serial is None
+                    and runtime.manual_assignment
+                    and runtime.config.device_serial
+                ):
+                    serial = runtime.config.device_serial
+                elif serial is None and available:
+                    serial = available.pop(0)
                 if runtime.config.device_serial != serial:
                     runtime.config.device_serial = serial
+                    runtime.manual_assignment = False
                     changed = True
             return changed
 
@@ -263,7 +293,12 @@ class RealSenseService:
 
         self.ensure_default_assignment()
         with self._lock:
+            detected_devices = self.discover()["devices"]
             available_serials = self._available_serials()
+            if not detected_devices:
+                for name in self._resolve_camera_names(camera_names):
+                    self._errors[name] = "No RealSense camera is available"
+                return self.status()
             for name in self._resolve_camera_names(camera_names):
                 runtime = self._runtimes[name]
                 if runtime.started:
