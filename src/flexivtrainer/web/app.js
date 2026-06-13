@@ -1481,31 +1481,44 @@ function appendTelemetrySample(side, telemetry) {
     return history;
 }
 
+// Force magnitude (N) that maps to a full-length arrow; larger forces saturate.
+const FORCE_VECTOR_SATURATION_N = 30;
+// Max arrow length in viewBox units (keeps the tip inside the 240x160 panel).
+const FORCE_VECTOR_MAX_LENGTH = 64;
+
 function buildVectorGeometry(side, vector) {
-    const baseX = side === "left" ? 40 : 200;
-    const baseY = 118;
-    let dx = side === "left" ? 92 : -92;
-    let dy = -48;
+    // Root is pinned at the panel center; the arrow points along the force
+    // vector with a length proportional to its magnitude.
+    const baseX = 120;
+    const baseY = 80;
+    let dx = 0;
+    let dy = 0;
     let magnitude = null;
 
     if (vector) {
         const [fx, fy, fz] = vector;
         magnitude = Math.hypot(fx, fy, fz);
-        const inwardX = side === "left" ? fx : -fx;
-        const upwardY = -fy;
-        const planarMagnitude = Math.hypot(inwardX, upwardY);
+        const planarMagnitude = Math.hypot(fx, fy);
         if (planarMagnitude > 1e-6) {
-            const length = clamp(42 + Math.min(planarMagnitude, 30) * 2.2, 42, 118);
-            dx = (inwardX / planarMagnitude) * length;
-            dy = (upwardY / planarMagnitude) * length;
+            const length = clamp(
+                (planarMagnitude / FORCE_VECTOR_SATURATION_N) * FORCE_VECTOR_MAX_LENGTH,
+                0,
+                FORCE_VECTOR_MAX_LENGTH,
+            );
+            // +fx points right, +fy points up (SVG y grows downward).
+            dx = (fx / planarMagnitude) * length;
+            dy = (-fy / planarMagnitude) * length;
         }
     }
 
-    const tipX = clamp(baseX + dx, 18, 222);
-    const tipY = clamp(baseY + dy, 18, 144);
+    const tipX = clamp(baseX + dx, 16, 224);
+    const tipY = clamp(baseY + dy, 16, 144);
+    const length = Math.hypot(tipX - baseX, tipY - baseY);
     const angle = Math.atan2(tipY - baseY, tipX - baseX);
-    const headLength = 20;
-    const headWidth = 12;
+    // Arrowhead shrinks with the shaft so a near-zero force doesn't leave a
+    // stray head at the center.
+    const headLength = clamp(length * 0.32, 0, 18);
+    const headWidth = headLength * 0.62;
     const leftX = tipX - Math.cos(angle) * headLength + Math.sin(angle) * headWidth;
     const leftY = tipY - Math.sin(angle) * headLength - Math.cos(angle) * headWidth;
     const rightX = tipX - Math.cos(angle) * headLength - Math.sin(angle) * headWidth;

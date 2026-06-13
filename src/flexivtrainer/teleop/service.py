@@ -98,6 +98,15 @@ class TeleopService:
                 return None
         return vector
 
+    def _read_vector_field(self, source: Any, field: str) -> list[float] | None:
+        # RobotStates/RobotActions are pybind11 structs without __dict__, so
+        # their fields must be read by attribute rather than serialized en bloc.
+        if isinstance(source, dict):
+            raw = source.get(field)
+        else:
+            raw = getattr(source, field, None)
+        return self._coerce_numeric_vector(_serialize_value(raw))
+
     def _robot_connected(self, robot: Any) -> bool:
         connected_member = getattr(robot, "connected", None)
         if callable(connected_member):
@@ -257,47 +266,25 @@ class TeleopService:
                 if include_states:
                     states_reader = getattr(robot, "states", None)
                     if callable(states_reader):
-                        raw_states = _serialize_value(states_reader())
-                        if isinstance(raw_states, dict):
-                            states: dict[str, list[float]] = {}
-                            tcp_pose = self._coerce_numeric_vector(
-                                raw_states.get("tcp_pose")
-                            )
-                            tcp_vel = self._coerce_numeric_vector(
-                                raw_states.get("tcp_vel")
-                            )
-                            ext_wrench_in_world = self._coerce_numeric_vector(
-                                raw_states.get("ext_wrench_in_world")
-                            )
-                            if tcp_pose is not None:
-                                states["tcp_pose"] = tcp_pose
-                            if tcp_vel is not None:
-                                states["tcp_vel"] = tcp_vel
-                            if ext_wrench_in_world is not None:
-                                states["ext_wrench_in_world"] = ext_wrench_in_world
+                        raw_states = states_reader()
+                        states: dict[str, list[float]] = {}
+                        for field in ("tcp_pose", "tcp_vel", "ext_wrench_in_world"):
+                            vector = self._read_vector_field(raw_states, field)
+                            if vector is not None:
+                                states[field] = vector
+                        if states:
                             payload["states"] = states
 
                 if include_actions:
                     actions_reader = getattr(robot, "actions", None)
                     if callable(actions_reader):
-                        raw_actions = _serialize_value(actions_reader())
-                        if isinstance(raw_actions, dict):
-                            actions: dict[str, list[float]] = {}
-                            tcp_pose_d = self._coerce_numeric_vector(
-                                raw_actions.get("tcp_pose_d")
-                            )
-                            tcp_vel_d = self._coerce_numeric_vector(
-                                raw_actions.get("tcp_vel_d")
-                            )
-                            ext_wrench_d = self._coerce_numeric_vector(
-                                raw_actions.get("ext_wrench_d")
-                            )
-                            if tcp_pose_d is not None:
-                                actions["tcp_pose_d"] = tcp_pose_d
-                            if tcp_vel_d is not None:
-                                actions["tcp_vel_d"] = tcp_vel_d
-                            if ext_wrench_d is not None:
-                                actions["ext_wrench_d"] = ext_wrench_d
+                        raw_actions = actions_reader()
+                        actions: dict[str, list[float]] = {}
+                        for field in ("tcp_pose_d", "tcp_vel_d", "ext_wrench_d"):
+                            vector = self._read_vector_field(raw_actions, field)
+                            if vector is not None:
+                                actions[field] = vector
+                        if actions:
                             payload["actions"] = actions
             except Exception as exc:  # pragma: no cover - hardware specific
                 payload["connected"] = False

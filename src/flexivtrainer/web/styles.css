@@ -633,7 +633,7 @@ button:disabled {
 
 .vector-panel__shaft {
     stroke: #f0b97d;
-    stroke-width: 7;
+    stroke-width: 4;
     stroke-linecap: round;
 }
 
