@@ -346,6 +346,15 @@ class TeleopService:
             return self.snapshot()
         try:
             self._controller.Start()
+            # Engage is per-pair (no engage-all variant), so engage every
+            # configured pair by index once the control loop is started.
+            pair_count = sum(
+                1
+                for pair in self._get_robot_pairs()
+                if pair.leader_serial and pair.follower_serial
+            )
+            for idx in range(pair_count):
+                self._controller.Engage(idx, True)
             self._started = True
             self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
