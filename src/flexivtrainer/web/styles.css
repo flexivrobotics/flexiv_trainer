@@ -388,6 +388,28 @@ button:disabled {
     padding: 0.62rem 0.72rem;
 }
 
+.status-card__actions button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.status-card__actions button.button--busy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+}
+
+.button-spinner {
+    width: 0.9rem;
+    height: 0.9rem;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    animation: icon-spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
 .workflow-card h3,
 .status-card h3,
 .policy-card h3 {

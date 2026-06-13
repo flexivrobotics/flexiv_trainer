@@ -88,6 +88,10 @@ const state = {
             robot_data_service: false,
             cameras: false,
         },
+        serviceConnectBusy: {
+            teleop: false,
+            cameras: false,
+        },
     },
     telemetryHistory: {
         left: [],
@@ -994,22 +998,31 @@ function createServiceStatusCard(serviceKey, service) {
     const actions = card.querySelector(".status-card__actions");
     const definitions = {
         teleop_service: [
-            { label: "Connect", action: () => controlHomeService("teleop", "connect"), className: "start-button" },
-            { label: "Disconnect", action: () => controlHomeService("teleop", "disconnect"), className: "stop-button" },
+            { label: "Connect", serviceName: "teleop", control: "connect", className: "start-button" },
+            { label: "Disconnect", serviceName: "teleop", control: "disconnect", className: "stop-button" },
         ],
         cameras: [
-            { label: "Connect", action: () => controlHomeService("cameras", "connect"), className: "start-button" },
-            { label: "Disconnect", action: () => controlHomeService("cameras", "disconnect"), className: "stop-button" },
+            { label: "Connect", serviceName: "cameras", control: "connect", className: "start-button" },
+            { label: "Disconnect", serviceName: "cameras", control: "disconnect", className: "stop-button" },
         ],
     };
     (definitions[serviceKey] || []).forEach((definition) => {
         const button = document.createElement("button");
         button.type = "button";
-        button.textContent = definition.label;
         if (definition.className) {
             button.classList.add(definition.className);
         }
-        button.onclick = definition.action;
+        const connecting = !!state.ui.serviceConnectBusy?.[definition.serviceName];
+        if (definition.control === "connect" && connecting) {
+            button.classList.add("button--busy");
+            button.disabled = true;
+            button.innerHTML = `<span class="button-spinner" aria-hidden="true"></span><span>Connecting…</span>`;
+        } else {
+            button.textContent = definition.label;
+            // While a connect is in progress, keep the sibling actions inert too.
+            button.disabled = connecting;
+        }
+        button.onclick = () => controlHomeService(definition.serviceName, definition.control);
         actions.appendChild(button);
     });
     return card;
@@ -2192,7 +2205,20 @@ async function fetchAndRenderTeleopStatus() {
 }
 
 async function controlHomeService(serviceName, action, options = {}) {
-    const result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
+    const tracksBusy = action === "connect" && serviceName in state.ui.serviceConnectBusy;
+    if (tracksBusy) {
+        state.ui.serviceConnectBusy[serviceName] = true;
+        renderHomeStatus();
+    }
+    let result;
+    try {
+        result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
+    } finally {
+        if (tracksBusy) {
+            state.ui.serviceConnectBusy[serviceName] = false;
+            renderHomeStatus();
+        }
+    }
     state.summary.services = result.services;
     renderHomeStatus();
     const serviceKey = SERVICE_NAME_TO_KEY[serviceName];
