@@ -79,7 +79,6 @@ const state = {
     },
     ui: {
         teleopRefreshBusy: false,
-        teleopBootstrapBusy: false,
         teleopHomeBusy: false,
         recordingStartBusy: false,
         recordingSaveBusy: false,
@@ -107,7 +106,6 @@ const state = {
 
 const TELEMETRY_HISTORY_LIMIT = 90;
 const TELEMETRY_FPS_OK_MIN = 0.55;
-const TELEOP_BOOTSTRAP_TIMEOUT_MS = 4000;
 const RECORDING_ENTRY_OPTIONS = [
     {
         id: "observation.images.ego",
@@ -819,13 +817,6 @@ function createStatusCard(label, value, tone = "neutral") {
     card.className = `status-card status-card--${tone}`;
     card.innerHTML = `<span class="eyebrow">${label}</span><h3>${formatValue(value)}</h3>`;
     return card;
-}
-
-function setTeleopBootstrapBusy(busy) {
-    state.ui.teleopBootstrapBusy = busy;
-    if (state.activeView === "teleoperation") {
-        renderTeleop();
-    }
 }
 
 function setTeleopHomeBusy(busy) {
@@ -1853,7 +1844,7 @@ function buildRecordingStatusModel(teleopStatus) {
         };
     }
 
-    if (state.ui.recordingStartBusy || state.ui.teleopBootstrapBusy || !state.teleopBootstrapped || !teleopStatus) {
+    if (state.ui.recordingStartBusy || !state.teleopBootstrapped || !teleopStatus) {
         return {
             kind: "initializing",
             line1: "Initializing recorder",
@@ -2965,61 +2956,21 @@ function openOutputBrowser() {
 }
 
 async function bootstrapTeleoperation() {
-    if (state.ui.teleopBootstrapBusy) {
-        return;
-    }
     loadTeleopCameraConfig();
-    if (state.teleopBootstrapped) {
-        await refreshTeleopStatus();
-        if (hasActiveTeleopServices(state.teleopStatus)) {
-            startTeleopPolling();
-        }
-        return;
-    }
-    setTeleopBootstrapBusy(true);
-    setComponentLoading("teleop-cameras-wrap", true, "Initializing modules");
-    stopTeleopPolling();
-    let bootstrapResult = null;
+    // Do not auto-initialize the system modules when entering the data
+    // collection page. Modules are connected manually from the home page,
+    // or via the per-service reload buttons on this page. Here we only
+    // reflect whatever is already running.
     try {
-        bootstrapResult = await api(
-            "/teleop/bootstrap",
-            { method: "POST" },
-            {
-                timeoutMs: TELEOP_BOOTSTRAP_TIMEOUT_MS,
-                timeoutMessage: "Automatic data-collection initialization timed out. Use the Connect buttons after the hardware is ready.",
-            },
-        );
-        state.teleopBootstrapped = true;
+        await refreshTeleopStatus();
     } catch (error) {
-        // Even on timeout, the server may have partially started services.
-        // Refresh status to discover what's running and start polling if needed.
-        try {
-            await refreshTeleopStatus();
-        } catch (_) {
-            // Status fetch also failed — nothing to recover
-        }
-        if (hasActiveTeleopServices(state.teleopStatus)) {
-            state.teleopBootstrapped = true;
-            startTeleopPolling();
-            pushNotification(error.message, "warning");
-        } else {
-            state.teleopBootstrapped = false;
-            throw error;
-        }
-        return;
-    } finally {
-        setComponentLoading("teleop-cameras-wrap", false);
-        setTeleopBootstrapBusy(false);
+        // Non-fatal: the reload buttons and polling will retry.
+        showToast(error.message, true);
     }
-    // Bootstrap API call succeeded — refresh status and start polling
-    try {
-        await refreshTeleopStatus();
-    } catch (_) {
-        // Non-fatal: polling will retry
-    }
-    // Reload so the panel reflects the default assignment applied at startup.
+    state.teleopBootstrapped = true;
+    // Reload so the panel reflects the current camera assignment.
     loadTeleopCameraConfig();
-    if (bootstrapResult.ready || hasActiveTeleopServices(state.teleopStatus)) {
+    if (hasActiveTeleopServices(state.teleopStatus)) {
         startTeleopPolling();
     }
 }
