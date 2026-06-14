@@ -61,6 +61,7 @@ class TeleopSnapshot:
     initialized: bool
     started: bool
     stopped: bool
+    engaged: bool
     fault: str | None
     error: str | None
 
@@ -76,7 +77,12 @@ class TeleopService:
         self._controller: Any | None = None
         self._error: str | None = None
         self._initialized = False
+        # ``_started`` tracks whether the teleop control loop (Start()) is
+        # running; ``_engaged`` tracks whether the pairs are currently engaged.
+        # They are decoupled because the Stop button disengages without
+        # stopping the loop.
         self._started = False
+        self._engaged = False
 
     def _configured_remote_serials(self) -> list[str]:
         serials: list[str] = []
@@ -312,48 +318,80 @@ class TeleopService:
                 if pair.leader_serial and pair.follower_serial
             ]
             try:
+                # Connect / service reset only establishes the connection. The
+                # blocking Init() sequence (robot enable + F/T zeroing) is
+                # deferred to the Start button, which always runs Init() then
+                # Start().
                 self._controller = TransparentCartesianTeleopLAN(
                     robot_pairs_sn=robot_pairs,
                     network_interface_whitelist=self._settings.network_interface_whitelist,
                 )
-                init_method = getattr(self._controller, "Init", None)
-                if callable(init_method):
-                    init_method()
                 self._initialized = True
                 self._started = False
+                self._engaged = False
                 self._error = None
             except Exception as exc:  # pragma: no cover - hardware specific
                 self._error = describe_exception(exc)
                 self._controller = None
         return self.snapshot()
 
+    def _engageable_pair_count(self) -> int:
+        return sum(
+            1
+            for pair in self._get_robot_pairs()
+            if pair.leader_serial and pair.follower_serial
+        )
+
     def start(self) -> TeleopSnapshot:
+        # The Start button always runs Init() then Start(). Per the TDK contract
+        # (see TransparentCartesianTeleopLAN::Start/Stop docs), restarting after
+        # a Stop() requires calling Init() again first, so Init() is run on every
+        # Start rather than only when the controller is first constructed. The
+        # pairs stay disengaged by default; engaging is a separate action.
         self.initialize()
         if self._controller is None:
             return self.snapshot()
         try:
+            init_method = getattr(self._controller, "Init", None)
+            if callable(init_method):
+                init_method()
             self._controller.Start()
-            # Engage is per-pair (no engage-all variant), so engage every
-            # configured pair by index once the control loop is started.
-            pair_count = sum(
-                1
-                for pair in self._get_robot_pairs()
-                if pair.leader_serial and pair.follower_serial
-            )
-            for idx in range(pair_count):
-                self._controller.Engage(idx, True)
             self._started = True
+            self._engaged = False
             self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
 
     def stop(self) -> TeleopSnapshot:
+        # The Stop button stops the teleop control loop. Engagement is cleared
+        # because Engage requires a running loop.
         if self._controller is None:
             return self.snapshot()
         try:
             self._controller.Stop()
             self._started = False
+            self._engaged = False
+            self._error = None
+        except Exception as exc:  # pragma: no cover - hardware specific
+            self._error = describe_exception(exc)
+        return self.snapshot()
+
+    def set_engaged(self, engaged: bool) -> TeleopSnapshot:
+        # Engage/disengage every configured pair. Engage requires the teleop
+        # control loop to be running (Start() called), so guard on it.
+        if self._controller is None:
+            self._error = "Teleoperation controller is not initialized"
+            return self.snapshot()
+        if not self._started:
+            self._error = "Start teleoperation before engaging the robots"
+            return self.snapshot()
+        try:
+            # Engage is per-pair (no engage-all variant), so apply the flag to
+            # every configured pair by index.
+            for idx in range(self._engageable_pair_count()):
+                self._controller.Engage(idx, engaged)
+            self._engaged = engaged
             self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
@@ -363,9 +401,12 @@ class TeleopService:
         if self._controller is None:
             return
 
+        # Disconnect / service reset is the only path that fully stops the
+        # teleop control loop (Stop()); the Stop button merely disengages.
         try:
-            self.stop()
-        except Exception:
+            if self._started:
+                self._controller.Stop()
+        except Exception:  # pragma: no cover - hardware specific
             pass
 
         # TransparentCartesianTeleopLAN exposes no explicit close/disconnect
@@ -374,6 +415,7 @@ class TeleopService:
         self._controller = None
         self._initialized = False
         self._started = False
+        self._engaged = False
         self._error = None
 
     def reset_home(self) -> dict[str, Any]:
@@ -446,8 +488,12 @@ class TeleopService:
         configured = any(
             pair.leader_serial and pair.follower_serial for pair in robot_pairs
         )
+        # ``started`` reflects whether the teleop control loop is running;
+        # ``engaged`` reflects whether the pairs are currently engaged. The Start
+        # button controls the former, the Engage button the latter.
         started = self._started and self._controller is not None
         stopped = not started
+        engaged = self._engaged and self._controller is not None
         fault: str | None = self._read_fault()
         return TeleopSnapshot(
             configured=configured,
@@ -455,6 +501,7 @@ class TeleopService:
             initialized=self._initialized and self._controller is not None,
             started=started,
             stopped=stopped,
+            engaged=engaged,
             fault=fault,
             error=self._error,
         )

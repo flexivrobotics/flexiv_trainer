@@ -93,12 +93,22 @@ class FakeTeleopController:
 
     def __init__(self) -> None:
         self._faulted = False
+        self.init_calls = 0
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.engage_calls: list[tuple[int, bool]] = []
+
+    def Init(self) -> None:
+        self.init_calls += 1
 
     def Start(self) -> None:
-        pass
+        self.start_calls += 1
 
     def Stop(self) -> None:
-        pass
+        self.stop_calls += 1
+
+    def Engage(self, idx: int, engaged: bool) -> None:
+        self.engage_calls.append((idx, engaged))
 
     def stopped(self, index: int = 0) -> bool:
         return True
@@ -156,6 +166,92 @@ def test_start_then_stop_tracks_started_flag(tmp_path) -> None:
     stopped = service.stop()
     assert stopped.started is False
     assert stopped.stopped is True
+
+
+def _configured_service(tmp_path) -> TeleopService:
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [
+        TeleopRobotPair(leader_serial="LOCAL_A", follower_serial="REMOTE_A"),
+        TeleopRobotPair(leader_serial="LOCAL_B", follower_serial="REMOTE_B"),
+    ]
+    service = TeleopService(settings, get_robot_pairs=lambda: pairs)
+    service._controller = FakeTeleopController()
+    service._initialized = True
+    return service
+
+
+def test_start_and_stop_do_not_engage_pairs(tmp_path) -> None:
+    # Start only runs the control loop; Stop only stops it. Neither touches
+    # engagement, which is a separate action.
+    service = _configured_service(tmp_path)
+    controller = service._controller
+
+    started = service.start()
+    assert controller.start_calls == 1
+    assert started.started is True
+    assert started.engaged is False
+
+    stopped = service.stop()
+    assert controller.stop_calls == 1
+    assert controller.engage_calls == []
+    assert stopped.started is False
+    assert stopped.engaged is False
+
+
+def test_start_always_calls_init_before_start(tmp_path) -> None:
+    # Restarting after a Stop must re-run Init() before Start(), so every Start
+    # pairs an Init() with the Start().
+    service = _configured_service(tmp_path)
+    controller = service._controller
+
+    service.start()
+    assert (controller.init_calls, controller.start_calls) == (1, 1)
+
+    service.stop()
+    service.start()
+    assert (controller.init_calls, controller.start_calls) == (2, 2)
+
+
+def test_engage_then_disengage_toggles_every_pair(tmp_path) -> None:
+    service = _configured_service(tmp_path)
+    controller = service._controller
+
+    service.start()
+
+    engaged = service.set_engaged(True)
+    assert controller.engage_calls == [(0, True), (1, True)]
+    assert engaged.engaged is True
+    # Engaging must not restart or stop the control loop.
+    assert controller.start_calls == 1
+    assert controller.stop_calls == 0
+
+    disengaged = service.set_engaged(False)
+    assert controller.engage_calls[-2:] == [(0, False), (1, False)]
+    assert disengaged.engaged is False
+
+
+def test_engage_requires_started_control_loop(tmp_path) -> None:
+    service = _configured_service(tmp_path)
+    controller = service._controller
+
+    snapshot = service.set_engaged(True)
+
+    assert controller.engage_calls == []
+    assert snapshot.engaged is False
+    assert snapshot.error is not None
+
+
+def test_shutdown_stops_the_control_loop(tmp_path) -> None:
+    # Disconnect / service reset go through shutdown(), which is the only path
+    # that tears down the controller.
+    service = _configured_service(tmp_path)
+    controller = service._controller
+
+    service.start()
+    service.shutdown()
+
+    assert controller.stop_calls == 1
+    assert service._controller is None
 
 
 def test_reset_home_executes_home_primitive_for_all_robot_instances(tmp_path) -> None:

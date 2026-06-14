@@ -1985,10 +1985,17 @@ function updateTeleopControlButtons(teleopStatus) {
     const canStart = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
     const canStop = !!teleop.started || state.ui.teleopHomeBusy;
     const canHome = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
+    // Engaging requires the control loop to be running; the button toggles
+    // between engage and disengage based on the current engagement state.
+    const canEngage = !!teleop.started && !state.ui.teleopHomeBusy && !teleopResetBusy;
 
     byId("teleop-start").disabled = !canStart;
     byId("teleop-stop").disabled = !canStop;
     byId("teleop-home").disabled = !canHome;
+
+    const engageButton = byId("teleop-engage");
+    engageButton.disabled = !canEngage;
+    engageButton.textContent = teleop.engaged ? "Disengage" : "Engage";
 }
 
 function renderForcePanel(side, robotEntry, telemetry, history) {
@@ -3091,6 +3098,16 @@ function bindGlobalEvents() {
     byId("teleop-stop").onclick = async () => {
         try {
             await api("/teleop/stop", { method: "POST" });
+            await refreshTeleopStatus();
+        } catch (error) {
+            showToast(error.message, true);
+        }
+    };
+    byId("teleop-engage").onclick = async () => {
+        const engaged = !!state.teleopStatus?.teleop?.engaged;
+        const endpoint = engaged ? "/teleop/disengage" : "/teleop/engage";
+        try {
+            await api(endpoint, { method: "POST" });
             await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);

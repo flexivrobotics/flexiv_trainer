@@ -193,6 +193,26 @@ def stop_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return result
 
 
+@router.post("/engage")
+def engage_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.set_engaged(True).__dict__
+    if result.get("error"):
+        error("Teleoperation engage failed", str(result.get("error")))
+    else:
+        info("Teleoperation engaged")
+    return result
+
+
+@router.post("/disengage")
+def disengage_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.set_engaged(False).__dict__
+    if result.get("error"):
+        error("Teleoperation disengage failed", str(result.get("error")))
+    else:
+        info("Teleoperation disengaged")
+    return result
+
+
 @router.post("/home")
 def reset_home(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     result = runtime.teleop.reset_home()
