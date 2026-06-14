@@ -110,6 +110,10 @@ const state = {
 
 const TELEMETRY_HISTORY_LIMIT = 90;
 const TELEMETRY_FPS_OK_MIN = 0.55;
+// How often the teleop view polls /teleop/status. This sets the telemetry
+// refresh rate (e.g. 100ms ≈ 10 FPS); refreshTeleopStatus() self-throttles via
+// a queue, so requests never pile up if the backend is briefly slower.
+const TELEOP_POLL_INTERVAL_MS = 100;
 const RECORDING_ENTRY_OPTIONS = [
     {
         id: "observation.images.ego",
@@ -922,7 +926,7 @@ function startTeleopPolling() {
             stopTeleopPolling();
             showToast(error.message, true);
         });
-    }, 1500);
+    }, TELEOP_POLL_INTERVAL_MS);
 }
 
 function normalizePercent(value) {
@@ -1516,16 +1520,22 @@ function appendTelemetrySample(side, telemetry) {
     return history;
 }
 
-// Force magnitude (N) that maps to a full-length arrow; larger forces saturate.
-const FORCE_VECTOR_SATURATION_N = 30;
-// Max arrow length in viewBox units (keeps the tip inside the 240x160 panel).
-const FORCE_VECTOR_MAX_LENGTH = 64;
+// Force magnitude (N) at which the arrow reaches the panel border; larger
+// forces saturate at the edge.
+const FORCE_VECTOR_SATURATION_N = 10;
+// Inset (viewBox units) kept between the arrow tip and the panel border so the
+// arrowhead stays fully visible.
+const FORCE_VECTOR_MARGIN = 16;
 
 function buildVectorGeometry(side, vector) {
     // Root is pinned at the panel center; the arrow points along the force
-    // vector with a length proportional to its magnitude.
+    // vector and, at the saturation force, reaches the edge of the panel.
     const baseX = 120;
     const baseY = 80;
+    const minX = FORCE_VECTOR_MARGIN;
+    const maxX = 240 - FORCE_VECTOR_MARGIN;
+    const minY = FORCE_VECTOR_MARGIN;
+    const maxY = 160 - FORCE_VECTOR_MARGIN;
     let dx = 0;
     let dy = 0;
     let magnitude = null;
@@ -1535,19 +1545,22 @@ function buildVectorGeometry(side, vector) {
         magnitude = Math.hypot(fx, fy, fz);
         const planarMagnitude = Math.hypot(fx, fy);
         if (planarMagnitude > 1e-6) {
-            const length = clamp(
-                (planarMagnitude / FORCE_VECTOR_SATURATION_N) * FORCE_VECTOR_MAX_LENGTH,
-                0,
-                FORCE_VECTOR_MAX_LENGTH,
-            );
             // +fx points right, +fy points up (SVG y grows downward).
-            dx = (fx / planarMagnitude) * length;
-            dy = (-fy / planarMagnitude) * length;
+            const ux = fx / planarMagnitude;
+            const uy = -fy / planarMagnitude;
+            // Distance from center to the panel border along this direction, so
+            // the saturation force fills the scope regardless of orientation.
+            const reachX = ux === 0 ? Infinity : (ux > 0 ? maxX - baseX : baseX - minX) / Math.abs(ux);
+            const reachY = uy === 0 ? Infinity : (uy > 0 ? maxY - baseY : baseY - minY) / Math.abs(uy);
+            const borderReach = Math.min(reachX, reachY);
+            const fraction = clamp(planarMagnitude / FORCE_VECTOR_SATURATION_N, 0, 1);
+            dx = ux * borderReach * fraction;
+            dy = uy * borderReach * fraction;
         }
     }
 
-    const tipX = clamp(baseX + dx, 16, 224);
-    const tipY = clamp(baseY + dy, 16, 144);
+    const tipX = clamp(baseX + dx, minX, maxX);
+    const tipY = clamp(baseY + dy, minY, maxY);
     const length = Math.hypot(tipX - baseX, tipY - baseY);
     const angle = Math.atan2(tipY - baseY, tipX - baseX);
     // Arrowhead shrinks with the shaft so a near-zero force doesn't leave a

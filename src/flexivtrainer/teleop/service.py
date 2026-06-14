@@ -113,106 +113,13 @@ class TeleopService:
             raw = getattr(source, field, None)
         return self._coerce_numeric_vector(_serialize_value(raw))
 
-    def _robot_connected(self, robot: Any) -> bool:
-        connected_member = getattr(robot, "connected", None)
-        if callable(connected_member):
-            try:
-                return bool(connected_member())
-            except Exception:
-                return False
-
-        if connected_member is None:
-            return True
-        return bool(connected_member)
-
-    def _instance_provider_results(self, provider: Any) -> list[Any]:
-        if not callable(provider):
-            return []
-
-        try:
-            result = provider()
-        except TypeError:
-            result = None
-        except Exception:
-            result = None
-        else:
-            return [result]
-
-        results: list[Any] = []
-        for index in range(8):
-            try:
-                result = provider(index)
-            except TypeError:
-                break
-            except Exception:
-                break
-
-            results.append(result)
-        return results
-
-    def _extract_robot_handles(self, value: Any) -> list[Any]:
-        handles: list[Any] = []
-        stack = [value]
-        seen: set[int] = set()
-
-        while stack:
-            current = stack.pop()
-            if current is None:
-                continue
-
-            marker = id(current)
-            if marker in seen:
-                continue
-            seen.add(marker)
-
-            if callable(getattr(current, "ExecutePrimitive", None)):
-                handles.append(current)
-                continue
-
-            if isinstance(current, dict):
-                stack.extend(current.values())
-                continue
-
-            if isinstance(current, (list, tuple, set)):
-                stack.extend(current)
-                continue
-
-            for attr_name in (
-                "robot",
-                "robots",
-                "leader",
-                "follower",
-                "leader_robot",
-                "follower_robot",
-                "rdk_robot",
-                "rdk_robots",
-            ):
-                if hasattr(current, attr_name):
-                    stack.append(getattr(current, attr_name))
-
-        return handles
-
-    def _home_robot_handles(self) -> list[Any]:
-        if self._controller is None:
-            return []
-
-        provider_results: list[Any] = [self._controller]
-        provider_results.extend(
-            self._instance_provider_results(
-                getattr(self._controller, "instances", None)
-            )
-        )
-
-        robots = self._extract_robot_handles(provider_results)
-        deduped: list[Any] = []
-        seen: set[int] = set()
-        for robot in robots:
-            marker = id(robot)
-            if marker in seen:
-                continue
-            deduped.append(robot)
-            seen.add(marker)
-        return deduped
+    def _follower_of(self, pair: Any) -> Any:
+        # ``robot_states(idx)`` and ``instances(idx)`` both return the (leader,
+        # follower) robot of the pair. These widgets/recordings use the follower
+        # (the remote robot being teleoperated), so pick the second element.
+        if isinstance(pair, (tuple, list)) and len(pair) >= 2:
+            return pair[1]
+        return pair
 
     def robot_data_snapshot(
         self,
@@ -223,33 +130,37 @@ class TeleopService:
         if self._controller is None:
             return {"robots": {}, "errors": {}}
 
-        robots = self._home_robot_handles()
-        if not robots:
+        configured_serials = self._configured_remote_serials()
+        if not configured_serials:
             return {"robots": {}, "errors": {}}
 
-        configured_serials = self._configured_remote_serials()
+        # Read each pair explicitly by index via instances(idx), which returns
+        # the (leader, follower) rdk::Robot handles, and take the follower (the
+        # remote robot being teleoperated). The previous approach flattened
+        # every handle into one list, so the follower telemetry could be
+        # mislabeled (or a leader's ~0 wrench shown under a follower serial).
+        instances_reader = getattr(self._controller, "instances", None)
+        if not callable(instances_reader):
+            return {"robots": {}, "errors": {}}
+
         snapshot_robots: dict[str, Any] = {}
         errors: dict[str, str] = {}
 
-        for index, robot in enumerate(robots):
-            base_name = (
-                configured_serials[index]
-                if index < len(configured_serials)
-                else f"robot_{index}"
-            )
+        for index, serial in enumerate(configured_serials):
+            base_name = serial or f"robot_{index}"
             robot_name = base_name
             suffix = 1
             while robot_name in snapshot_robots:
                 robot_name = f"{base_name}_{suffix}"
                 suffix += 1
 
-            payload: dict[str, Any] = {
-                "connected": self._robot_connected(robot),
-            }
+            payload: dict[str, Any] = {"connected": True}
 
             try:
+                follower = self._follower_of(instances_reader(index))
+
                 if include_states:
-                    states_reader = getattr(robot, "states", None)
+                    states_reader = getattr(follower, "states", None)
                     if callable(states_reader):
                         raw_states = states_reader()
                         states: dict[str, list[float]] = {}
@@ -261,7 +172,7 @@ class TeleopService:
                             payload["states"] = states
 
                 if include_actions:
-                    actions_reader = getattr(robot, "actions", None)
+                    actions_reader = getattr(follower, "actions", None)
                     if callable(actions_reader):
                         raw_actions = actions_reader()
                         actions: dict[str, list[float]] = {}

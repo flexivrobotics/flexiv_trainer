@@ -47,12 +47,17 @@ class FakeRobot:
 
 
 class FakeController:
+    """Mimics the TDK ``instances(idx)`` accessor, which returns the
+    (leader, follower) rdk::Robot handles of the pair."""
+
     def __init__(self, robots: tuple[FakeRobot, ...]) -> None:
+        # Treat each robot as the follower of its pair.
         self._robots = robots
         self.home_all_calls = 0
 
-    def instances(self) -> tuple[FakeRobot, ...]:
-        return self._robots
+    def instances(self, idx: int):
+        follower = self._robots[idx]
+        return (follower, follower)
 
     def HomeAll(self) -> None:
         self.home_all_calls += 1
