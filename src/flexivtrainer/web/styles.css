@@ -641,14 +641,21 @@ button:disabled {
     fill: #f0b97d;
 }
 
-.force-gauge {
-    position: relative;
+.wrench-gauges {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+}
+
+.wrench-gauge {
+    display: grid;
+    justify-items: center;
 }
 
 .force-gauge__svg {
     width: 100%;
-    min-height: 190px;
-    max-height: 240px;
+    min-height: 210px;
+    max-height: 320px;
     overflow: visible;
 }
 
@@ -664,20 +671,23 @@ button:disabled {
 
 .force-gauge__axis {
     fill: rgba(251, 247, 240, 0.55);
-    font-size: 9px;
+    font-size: 10px;
 }
 
 .force-gauge__label {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 700;
 }
 
-.force-gauge__range {
-    position: absolute;
-    top: 6px;
-    right: 10px;
-    font-size: 0.72rem;
-    color: rgba(251, 247, 240, 0.7);
+.force-gauge__chip {
+    fill: rgba(255, 255, 255, 0.04);
+    stroke: rgba(141, 224, 255, 0.18);
+    stroke-width: 1;
+}
+
+.force-gauge__chip-text {
+    fill: rgba(251, 247, 240, 0.9);
+    font-size: 12px;
 }
 
 .vector-panel__meta {

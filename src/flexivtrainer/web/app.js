@@ -264,7 +264,9 @@ const TELEMETRY_SERIES = {
         title: "Cartesian Moment",
         units: "Nm",
         labels: ["m<sub>x</sub>", "m<sub>y</sub>", "m<sub>z</sub>"],
-        colors: ["#8de0ff", "#86e4a8", "#ffbf7a"],
+        // Distinct from the force palette (blue/green/orange) so wrench bars and
+        // the moment trend graphs are easy to tell apart.
+        colors: ["#b89cff", "#ff9ecb", "#ffe08a"],
     },
 };
 
@@ -1520,12 +1522,16 @@ function appendTelemetrySample(side, telemetry) {
     return history;
 }
 
-// Default full-scale of the force gauge (N). The range auto-scales up in 5 N
-// steps when any component exceeds this.
+// Default full-scale of each gauge and the increment it auto-scales up by when
+// any component exceeds the current range.
 const FORCE_GAUGE_DEFAULT_RANGE_N = 10;
+const FORCE_GAUGE_STEP_N = 5;
+const MOMENT_GAUGE_DEFAULT_RANGE_NM = 1;
+const MOMENT_GAUGE_STEP_NM = 1;
 const FORCE_BAR_LABELS = ["Fx", "Fy", "Fz"];
+const MOMENT_BAR_LABELS = ["Mx", "My", "Mz"];
 
-function computeForceGaugeRange(history, currentVector) {
+function computeGaugeRange(history, kind, currentVector, defaultRange, step) {
     let maxAbs = 0;
     const consider = (value) => {
         if (Number.isFinite(value)) {
@@ -1533,41 +1539,45 @@ function computeForceGaugeRange(history, currentVector) {
         }
     };
     history.forEach((sample) => {
-        if (sample.force) {
-            sample.force.forEach(consider);
+        if (sample[kind]) {
+            sample[kind].forEach(consider);
         }
     });
     if (currentVector) {
         currentVector.forEach(consider);
     }
-    return Math.max(FORCE_GAUGE_DEFAULT_RANGE_N, Math.ceil(maxAbs / 5) * 5);
+    return Math.max(defaultRange, Math.ceil(maxAbs / step) * step);
 }
 
-function buildForceBarsMarkup(vector, range) {
-    const colors = TELEMETRY_SERIES.force.colors;
-    const width = 240;
-    const height = 200;
-    const axisX = 34;
-    const right = 12;
-    const top = 16;
-    const bottom = 26;
-    const plotBottom = height - bottom;
-    const zeroY = (top + plotBottom) / 2;
-    const halfHeight = (plotBottom - top) / 2;
+function buildBarGauge(vector, range, colors, labels, unit) {
+    const width = 150;
+    const height = 248;
+    const axisX = 38;
+    const right = 6;
+    const plotTop = 10;
+    const plotBottom = 188;
+    const zeroY = (plotTop + plotBottom) / 2;
+    const halfHeight = (plotBottom - plotTop) / 2;
     const columnWidth = (width - axisX - right) / 3;
-    const barWidth = Math.min(34, columnWidth * 0.52);
-    const safeRange = range > 0 ? range : FORCE_GAUGE_DEFAULT_RANGE_N;
+    const barWidth = Math.min(32, columnWidth * 0.66);
+    const labelY = 208;
+    const chipY = 216;
+    const chipHeight = 24;
+    const chipWidth = Math.min(columnWidth - 2, 46);
+    const safeRange = range > 0 ? range : 1;
 
     const parts = [
-        `<line class="force-gauge__axis-line" x1="${axisX}" y1="${top}" x2="${axisX}" y2="${plotBottom}"></line>`,
+        `<line class="force-gauge__axis-line" x1="${axisX}" y1="${plotTop}" x2="${axisX}" y2="${plotBottom}"></line>`,
         `<line class="force-gauge__zero" x1="${axisX}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}"></line>`,
-        `<text class="force-gauge__axis" x="${axisX - 5}" y="${top + 4}" text-anchor="end">${safeRange}</text>`,
+        `<text class="force-gauge__axis" x="${axisX - 5}" y="${plotTop + 4}" text-anchor="end">${safeRange} ${unit}</text>`,
         `<text class="force-gauge__axis" x="${axisX - 5}" y="${zeroY + 3}" text-anchor="end">0</text>`,
-        `<text class="force-gauge__axis" x="${axisX - 5}" y="${plotBottom}" text-anchor="end">-${safeRange}</text>`,
+        `<text class="force-gauge__axis" x="${axisX - 5}" y="${plotBottom}" text-anchor="end">-${safeRange} ${unit}</text>`,
     ];
 
     for (let index = 0; index < 3; index += 1) {
-        const value = Number.isFinite(vector?.[index]) ? vector[index] : 0;
+        const raw = vector?.[index];
+        const hasValue = Number.isFinite(raw);
+        const value = hasValue ? raw : 0;
         const fraction = clamp(Math.abs(value) / safeRange, 0, 1);
         const barHeight = fraction * halfHeight;
         const centerX = axisX + columnWidth * (index + 0.5);
@@ -1578,21 +1588,18 @@ function buildForceBarsMarkup(vector, range) {
             `<rect class="force-gauge__bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${Math.max(barHeight, 0.6).toFixed(1)}" rx="3" fill="${color}"></rect>`,
         );
         parts.push(
-            `<text class="force-gauge__label" x="${centerX.toFixed(1)}" y="${height - 8}" text-anchor="middle" fill="${color}">${FORCE_BAR_LABELS[index]}</text>`,
+            `<text class="force-gauge__label" x="${centerX.toFixed(1)}" y="${labelY}" text-anchor="middle" fill="${color}">${labels[index]}</text>`,
+        );
+        // Value readout in a rounded "chip" directly under its bar.
+        parts.push(
+            `<rect class="force-gauge__chip" x="${(centerX - chipWidth / 2).toFixed(1)}" y="${chipY}" width="${chipWidth.toFixed(1)}" height="${chipHeight}" rx="8"></rect>`,
+        );
+        parts.push(
+            `<text class="force-gauge__chip-text" x="${centerX.toFixed(1)}" y="${chipY + 16}" text-anchor="middle">${hasValue ? value.toFixed(1) : "--"}</text>`,
         );
     }
 
     return `<svg class="force-gauge__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true">${parts.join("")}</svg>`;
-}
-
-function formatComponentChips(vector, kind) {
-    const meta = TELEMETRY_SERIES[kind];
-    return meta.labels.map((label, index) => `
-        <span class="telemetry-chip">
-            <strong>${label}</strong>
-            <span>${vector ? `${vector[index].toFixed(1)} ${meta.units}` : "--"}</span>
-        </span>
-    `).join("");
 }
 
 function resolveFpsTone(fps, okMin) {
@@ -2073,7 +2080,7 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
         return;
     }
 
-    const title = `${side.toUpperCase()} FORCE VECTOR`;
+    const title = `${side.toUpperCase()} WRENCH`;
     const fpsMarkup = buildFpsBadgeMarkup(
         computeTelemetryStreamFps(history, "force", telemetry.force),
         TELEMETRY_FPS_OK_MIN,
@@ -2097,9 +2104,10 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
         return;
     }
 
-    // Per-axis signed bars (Fx/Fy/Fz) with an auto-scaling gauge range; a flat
-    // 3D arrow was ambiguous to read from an angle.
-    const range = computeForceGaugeRange(history, telemetry.force);
+    // Per-axis signed bars for the full wrench: force (N) and moment (Nm) shown
+    // as two side-by-side gauges, each with its own auto-scaling range.
+    const forceRange = computeGaugeRange(history, "force", telemetry.force, FORCE_GAUGE_DEFAULT_RANGE_N, FORCE_GAUGE_STEP_N);
+    const momentRange = computeGaugeRange(history, "moment", telemetry.moment, MOMENT_GAUGE_DEFAULT_RANGE_NM, MOMENT_GAUGE_STEP_NM);
     delete panel.dataset.renderKey;
     panel.innerHTML = `
         <div class="telemetry-card__header">
@@ -2109,12 +2117,13 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
             ${fpsMarkup}
         </div>
         <div class="vector-panel vector-panel--live">
-            <div class="force-gauge">
-                ${buildForceBarsMarkup(telemetry.force, range)}
-                <span class="force-gauge__range">±${range} N</span>
-            </div>
-            <div class="vector-panel__meta">
-                <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
+            <div class="wrench-gauges">
+                <div class="wrench-gauge">
+                    ${buildBarGauge(telemetry.force, forceRange, TELEMETRY_SERIES.force.colors, FORCE_BAR_LABELS, TELEMETRY_SERIES.force.units)}
+                </div>
+                <div class="wrench-gauge">
+                    ${buildBarGauge(telemetry.moment, momentRange, TELEMETRY_SERIES.moment.colors, MOMENT_BAR_LABELS, TELEMETRY_SERIES.moment.units)}
+                </div>
             </div>
         </div>
     `;
