@@ -1984,7 +1984,9 @@ function updateTeleopControlButtons(teleopStatus) {
     const teleopResetBusy = !!state.ui.serviceResetBusy.teleop_service;
     const canStart = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
     const canStop = !!teleop.started || state.ui.teleopHomeBusy;
-    const canHome = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
+    // Home is gated behind Stop: the loop must have been started and then
+    // stopped (robots initialized, loop halted) before HomeAll() is allowed.
+    const canHome = !!teleop.can_home && !teleop.fault && !state.ui.teleopHomeBusy && !teleopResetBusy;
     // Engaging requires the control loop to be running; the button toggles
     // between engage and disengage based on the current engagement state.
     const canEngage = !!teleop.started && !state.ui.teleopHomeBusy && !teleopResetBusy;
@@ -3117,7 +3119,9 @@ function bindGlobalEvents() {
         try {
             setTeleopHomeBusy(true);
             const result = await api("/teleop/home", { method: "POST" });
-            if (result.warnings?.length) {
+            if (result.error) {
+                showToast(result.error, true);
+            } else if (result.warnings?.length) {
                 showToast(result.warnings.join(" | "), true);
             } else {
                 showToast("Home reset command sent.");

@@ -17,7 +17,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 from typing import Callable
-import time
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.observability import describe_exception
@@ -62,6 +61,7 @@ class TeleopSnapshot:
     started: bool
     stopped: bool
     engaged: bool
+    can_home: bool
     fault: str | None
     error: str | None
 
@@ -213,27 +213,6 @@ class TeleopService:
             deduped.append(robot)
             seen.add(marker)
         return deduped
-
-    def _wait_for_home_completion(self, robot: Any, timeout_s: float = 60.0) -> None:
-        states_reader = getattr(robot, "primitive_states", None) or getattr(
-            robot, "primitiveStates", None
-        )
-        if not callable(states_reader):
-            return
-
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            states = states_reader()
-            reached_target = (
-                states.get("reachedTarget") if isinstance(states, dict) else None
-            )
-            if isinstance(reached_target, list):
-                reached_target = reached_target[0] if reached_target else False
-            if reached_target:
-                return
-            time.sleep(0.2)
-
-        raise TimeoutError("Timed out while waiting for Home primitive to finish")
 
     def robot_data_snapshot(
         self,
@@ -421,46 +400,29 @@ class TeleopService:
     def reset_home(self) -> dict[str, Any]:
         if self._controller is None:
             return {"ok": False, "error": "Teleoperation controller is not initialized"}
-
-        robots = self._home_robot_handles()
-        if not robots:
+        if self._started:
+            # HomeAll() throws if the teleop control loop is running. The UI
+            # gates the Home button behind Stop, but guard here as well.
             return {
                 "ok": False,
-                "error": "Unable to access robot instances from TransparentCartesianTeleopLAN.instances()",
+                "error": "Stop teleoperation before homing the robots",
             }
 
-        warnings: list[str] = []
-        for index, robot in enumerate(robots):
-            primitive_sent = False
-            last_error: Exception | None = None
-            for primitive_name in ("Home", "Home()"):
-                try:
-                    robot.ExecutePrimitive(primitive_name, dict())
-                    primitive_sent = True
-                    break
-                except TypeError:
-                    try:
-                        robot.ExecutePrimitive(primitive_name)
-                        primitive_sent = True
-                        break
-                    except Exception as exc:  # pragma: no cover - hardware specific
-                        last_error = exc
-                except Exception as exc:  # pragma: no cover - hardware specific
-                    last_error = exc
-            if not primitive_sent:
-                warnings.append(
-                    f"Home primitive failed for robot {index}: {describe_exception(last_error or RuntimeError('Home primitive invocation failed'))}"
-                )
-                continue
+        home_all = getattr(self._controller, "HomeAll", None)
+        if not callable(home_all):
+            return {
+                "ok": False,
+                "error": "Connected controller does not support HomeAll()",
+            }
 
-            try:
-                self._wait_for_home_completion(robot)
-            except Exception as exc:  # pragma: no cover - hardware specific
-                warnings.append(
-                    f"Home completion failed for robot {index}: {describe_exception(exc)}"
-                )
+        try:
+            # HomeAll() is blocking and moves every connected robot to its home
+            # posture simultaneously, so no per-robot wait is needed.
+            home_all()
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
 
-        return {"ok": not warnings, "warnings": warnings}
+        return {"ok": True, "warnings": []}
 
     def _read_fault(self) -> str | None:
         """Return a fault message if the controller reports a fault.
@@ -495,6 +457,12 @@ class TeleopService:
         stopped = not started
         engaged = self._engaged and self._controller is not None
         fault: str | None = self._read_fault()
+        # Home is offered whenever the robots are connected and the teleop
+        # control loop is not running (HomeAll() throws if it is). It is
+        # available right after Connect, before the first Start.
+        can_home = (
+            self._initialized and not started and self._controller is not None
+        )
         return TeleopSnapshot(
             configured=configured,
             available=TransparentCartesianTeleopLAN is not None,
@@ -502,6 +470,7 @@ class TeleopService:
             started=started,
             stopped=stopped,
             engaged=engaged,
+            can_home=can_home,
             fault=fault,
             error=self._error,
         )

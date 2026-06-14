@@ -49,9 +49,13 @@ class FakeRobot:
 class FakeController:
     def __init__(self, robots: tuple[FakeRobot, ...]) -> None:
         self._robots = robots
+        self.home_all_calls = 0
 
     def instances(self) -> tuple[FakeRobot, ...]:
         return self._robots
+
+    def HomeAll(self) -> None:
+        self.home_all_calls += 1
 
 
 class _StructStates:
@@ -254,26 +258,50 @@ def test_shutdown_stops_the_control_loop(tmp_path) -> None:
     assert service._controller is None
 
 
-def test_reset_home_executes_home_primitive_for_all_robot_instances(tmp_path) -> None:
+def test_can_home_when_connected_and_not_running(tmp_path) -> None:
+    service = _configured_service(tmp_path)
+
+    # Connected but not started: homing is available right after Connect.
+    assert service.snapshot().can_home is True
+
+    # Running: homing is disabled.
+    assert service.start().can_home is False
+
+    # Stopped again: homing is available.
+    assert service.stop().can_home is True
+
+
+def test_reset_home_calls_home_all_when_stopped(tmp_path) -> None:
     service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
-    robots = (FakeRobot(), FakeRobot(), FakeRobot(), FakeRobot())
-    service._controller = FakeController(robots)
+    controller = FakeController((FakeRobot(), FakeRobot()))
+    service._controller = controller
 
     result = service.reset_home()
 
     assert result == {"ok": True, "warnings": []}
-    for robot in robots:
-        assert robot.calls == [("Home", {})]
+    assert controller.home_all_calls == 1
 
 
-def test_reset_home_returns_error_when_no_robot_instances_are_exposed(tmp_path) -> None:
+def test_reset_home_is_blocked_while_teleop_running(tmp_path) -> None:
     service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
-    service._controller = SimpleNamespace(instances=lambda: ())
+    controller = FakeController((FakeRobot(),))
+    service._controller = controller
+    service._started = True
 
     result = service.reset_home()
 
     assert result["ok"] is False
-    assert "TransparentCartesianTeleopLAN.instances()" in str(result["error"])
+    assert controller.home_all_calls == 0
+
+
+def test_reset_home_errors_when_home_all_unsupported(tmp_path) -> None:
+    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    service._controller = SimpleNamespace()
+
+    result = service.reset_home()
+
+    assert result["ok"] is False
+    assert "HomeAll" in str(result["error"])
 
 
 def test_robot_data_snapshot_uses_instance_states_and_actions(tmp_path) -> None:
