@@ -1520,66 +1520,69 @@ function appendTelemetrySample(side, telemetry) {
     return history;
 }
 
-// Force magnitude (N) at which the arrow reaches the panel border; larger
-// forces saturate at the edge.
-const FORCE_VECTOR_SATURATION_N = 10;
-// Inset (viewBox units) kept between the arrow tip and the panel border so the
-// arrowhead stays fully visible.
-const FORCE_VECTOR_MARGIN = 16;
+// Default full-scale of the force gauge (N). The range auto-scales up in 5 N
+// steps when any component exceeds this.
+const FORCE_GAUGE_DEFAULT_RANGE_N = 10;
+const FORCE_BAR_LABELS = ["Fx", "Fy", "Fz"];
 
-function buildVectorGeometry(side, vector) {
-    // Root is pinned at the panel center; the arrow points along the force
-    // vector and, at the saturation force, reaches the edge of the panel.
-    const baseX = 120;
-    const baseY = 80;
-    const minX = FORCE_VECTOR_MARGIN;
-    const maxX = 240 - FORCE_VECTOR_MARGIN;
-    const minY = FORCE_VECTOR_MARGIN;
-    const maxY = 160 - FORCE_VECTOR_MARGIN;
-    let dx = 0;
-    let dy = 0;
-    let magnitude = null;
-
-    if (vector) {
-        const [fx, fy, fz] = vector;
-        magnitude = Math.hypot(fx, fy, fz);
-        const planarMagnitude = Math.hypot(fx, fy);
-        if (planarMagnitude > 1e-6) {
-            // +fx points right, +fy points up (SVG y grows downward).
-            const ux = fx / planarMagnitude;
-            const uy = -fy / planarMagnitude;
-            // Distance from center to the panel border along this direction, so
-            // the saturation force fills the scope regardless of orientation.
-            const reachX = ux === 0 ? Infinity : (ux > 0 ? maxX - baseX : baseX - minX) / Math.abs(ux);
-            const reachY = uy === 0 ? Infinity : (uy > 0 ? maxY - baseY : baseY - minY) / Math.abs(uy);
-            const borderReach = Math.min(reachX, reachY);
-            const fraction = clamp(planarMagnitude / FORCE_VECTOR_SATURATION_N, 0, 1);
-            dx = ux * borderReach * fraction;
-            dy = uy * borderReach * fraction;
+function computeForceGaugeRange(history, currentVector) {
+    let maxAbs = 0;
+    const consider = (value) => {
+        if (Number.isFinite(value)) {
+            maxAbs = Math.max(maxAbs, Math.abs(value));
         }
+    };
+    history.forEach((sample) => {
+        if (sample.force) {
+            sample.force.forEach(consider);
+        }
+    });
+    if (currentVector) {
+        currentVector.forEach(consider);
+    }
+    return Math.max(FORCE_GAUGE_DEFAULT_RANGE_N, Math.ceil(maxAbs / 5) * 5);
+}
+
+function buildForceBarsMarkup(vector, range) {
+    const colors = TELEMETRY_SERIES.force.colors;
+    const width = 240;
+    const height = 200;
+    const axisX = 34;
+    const right = 12;
+    const top = 16;
+    const bottom = 26;
+    const plotBottom = height - bottom;
+    const zeroY = (top + plotBottom) / 2;
+    const halfHeight = (plotBottom - top) / 2;
+    const columnWidth = (width - axisX - right) / 3;
+    const barWidth = Math.min(34, columnWidth * 0.52);
+    const safeRange = range > 0 ? range : FORCE_GAUGE_DEFAULT_RANGE_N;
+
+    const parts = [
+        `<line class="force-gauge__axis-line" x1="${axisX}" y1="${top}" x2="${axisX}" y2="${plotBottom}"></line>`,
+        `<line class="force-gauge__zero" x1="${axisX}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}"></line>`,
+        `<text class="force-gauge__axis" x="${axisX - 5}" y="${top + 4}" text-anchor="end">${safeRange}</text>`,
+        `<text class="force-gauge__axis" x="${axisX - 5}" y="${zeroY + 3}" text-anchor="end">0</text>`,
+        `<text class="force-gauge__axis" x="${axisX - 5}" y="${plotBottom}" text-anchor="end">-${safeRange}</text>`,
+    ];
+
+    for (let index = 0; index < 3; index += 1) {
+        const value = Number.isFinite(vector?.[index]) ? vector[index] : 0;
+        const fraction = clamp(Math.abs(value) / safeRange, 0, 1);
+        const barHeight = fraction * halfHeight;
+        const centerX = axisX + columnWidth * (index + 0.5);
+        const x = centerX - barWidth / 2;
+        const y = value >= 0 ? zeroY - barHeight : zeroY;
+        const color = colors[index];
+        parts.push(
+            `<rect class="force-gauge__bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${Math.max(barHeight, 0.6).toFixed(1)}" rx="3" fill="${color}"></rect>`,
+        );
+        parts.push(
+            `<text class="force-gauge__label" x="${centerX.toFixed(1)}" y="${height - 8}" text-anchor="middle" fill="${color}">${FORCE_BAR_LABELS[index]}</text>`,
+        );
     }
 
-    const tipX = clamp(baseX + dx, minX, maxX);
-    const tipY = clamp(baseY + dy, minY, maxY);
-    const length = Math.hypot(tipX - baseX, tipY - baseY);
-    const angle = Math.atan2(tipY - baseY, tipX - baseX);
-    // Arrowhead shrinks with the shaft so a near-zero force doesn't leave a
-    // stray head at the center.
-    const headLength = clamp(length * 0.32, 0, 18);
-    const headWidth = headLength * 0.62;
-    const leftX = tipX - Math.cos(angle) * headLength + Math.sin(angle) * headWidth;
-    const leftY = tipY - Math.sin(angle) * headLength - Math.cos(angle) * headWidth;
-    const rightX = tipX - Math.cos(angle) * headLength - Math.sin(angle) * headWidth;
-    const rightY = tipY - Math.sin(angle) * headLength + Math.cos(angle) * headWidth;
-
-    return {
-        magnitude,
-        baseX,
-        baseY,
-        tipX,
-        tipY,
-        points: `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`,
-    };
+    return `<svg class="force-gauge__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true">${parts.join("")}</svg>`;
 }
 
 function formatComponentChips(vector, kind) {
@@ -2070,13 +2073,12 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
         return;
     }
 
-    const geometry = buildVectorGeometry(side, telemetry.force);
     const title = `${side.toUpperCase()} FORCE VECTOR`;
     const fpsMarkup = buildFpsBadgeMarkup(
         computeTelemetryStreamFps(history, "force", telemetry.force),
         TELEMETRY_FPS_OK_MIN,
     );
-    if (geometry.magnitude === null) {
+    if (!telemetry.force) {
         setMarkupIfChanged(
             panel,
             `${side}:force:awaiting`,
@@ -2095,6 +2097,9 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
         return;
     }
 
+    // Per-axis signed bars (Fx/Fy/Fz) with an auto-scaling gauge range; a flat
+    // 3D arrow was ambiguous to read from an angle.
+    const range = computeForceGaugeRange(history, telemetry.force);
     delete panel.dataset.renderKey;
     panel.innerHTML = `
         <div class="telemetry-card__header">
@@ -2104,10 +2109,10 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
             ${fpsMarkup}
         </div>
         <div class="vector-panel vector-panel--live">
-            <svg class="vector-panel__svg" viewBox="0 0 240 160" aria-hidden="true">
-                <line class="vector-panel__shaft" x1="${geometry.baseX}" y1="${geometry.baseY}" x2="${geometry.tipX}" y2="${geometry.tipY}"></line>
-                <polygon class="vector-panel__head" points="${geometry.points}"></polygon>
-            </svg>
+            <div class="force-gauge">
+                ${buildForceBarsMarkup(telemetry.force, range)}
+                <span class="force-gauge__range">±${range} N</span>
+            </div>
             <div class="vector-panel__meta">
                 <div class="telemetry-chip-row">${formatComponentChips(telemetry.force, "force")}</div>
             </div>

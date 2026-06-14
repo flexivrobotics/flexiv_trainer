@@ -641,6 +641,45 @@ button:disabled {
     fill: #f0b97d;
 }
 
+.force-gauge {
+    position: relative;
+}
+
+.force-gauge__svg {
+    width: 100%;
+    min-height: 190px;
+    max-height: 240px;
+    overflow: visible;
+}
+
+.force-gauge__axis-line {
+    stroke: rgba(141, 224, 255, 0.22);
+    stroke-width: 1;
+}
+
+.force-gauge__zero {
+    stroke: rgba(141, 224, 255, 0.4);
+    stroke-width: 1;
+}
+
+.force-gauge__axis {
+    fill: rgba(251, 247, 240, 0.55);
+    font-size: 9px;
+}
+
+.force-gauge__label {
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.force-gauge__range {
+    position: absolute;
+    top: 6px;
+    right: 10px;
+    font-size: 0.72rem;
+    color: rgba(251, 247, 240, 0.7);
+}
+
 .vector-panel__meta {
     display: grid;
     gap: 0.7rem;
