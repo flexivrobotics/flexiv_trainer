@@ -27,7 +27,6 @@ from flexivtrainer.config import (
     TeleopRobotPair,
     get_settings,
 )
-from flexivtrainer.ddk.service import DDKService
 from flexivtrainer.jobs.train import TrainingService
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.teleop.service import TeleopService
@@ -78,7 +77,6 @@ class RuntimeManager:
         self.settings = settings
         self._robot_config = self._load_robot_config()
         self.teleop = TeleopService(settings, self.get_teleop_robot_pairs)
-        self.ddk = DDKService(settings, self.get_remote_robot_serials)
         self.cameras = RealSenseService(settings)
         self._load_camera_config()
         try:
@@ -151,9 +149,6 @@ class RuntimeManager:
             "services": self.service_summary(),
         }
 
-    def get_remote_robot_serials(self) -> list[str]:
-        return [serial for serial in self._robot_config.remote_robot_serials if serial]
-
     def get_teleop_robot_pairs(self) -> list[TeleopRobotPair]:
         defaults = self.settings.teleop_robot_pairs
         pairs: list[TeleopRobotPair] = []
@@ -179,7 +174,6 @@ class RuntimeManager:
         if changed:
             self.recording.shutdown()
             self.teleop.shutdown()
-            self.ddk.shutdown()
         return {
             "robot_config": self.robot_config_snapshot(),
             "services": self.service_summary(),
@@ -308,12 +302,6 @@ class RuntimeManager:
                 result = self.teleop.initialize().__dict__
             else:
                 result = self.teleop.shutdown() or {"disconnected": True}
-        elif service_name == "ddk":
-            result = (
-                self.ddk.initialize()
-                if action == "connect"
-                else (self.ddk.shutdown() or {"disconnected": True})
-            )
         elif service_name == "cameras":
             if action == "connect":
                 result = self.cameras.start_streams()
@@ -353,7 +341,6 @@ class RuntimeManager:
             ("Recording service", self.recording.shutdown),
             ("Teleoperation service", self.teleop.shutdown),
             ("Camera service", self.cameras.stop_streams),
-            ("DDK service", self.ddk.shutdown),
         ]
         for label, action in shutdown_steps:
             try:

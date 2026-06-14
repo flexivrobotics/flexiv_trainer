@@ -85,7 +85,6 @@ const state = {
         recordingSaveProgress: 0,
         serviceResetBusy: {
             teleop_service: false,
-            robot_data_service: false,
             cameras: false,
         },
         serviceConnectBusy: {
@@ -175,17 +174,14 @@ const RECORDING_ENTRY_OPTIONS = [
 const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
 const SERVICE_RESET_TARGETS = {
     teleop_service: "teleop",
-    robot_data_service: "ddk",
     cameras: "cameras",
 };
 const SERVICE_NAME_TO_KEY = {
     teleop: "teleop_service",
-    ddk: "robot_data_service",
     cameras: "cameras",
 };
 const SERVICE_RESET_MESSAGES = {
     teleop_service: "Reconnect teleoperation service",
-    robot_data_service: "Reconnect robot data service",
     cameras: "Reconnect cameras",
 };
 const RESET_ICON_SVG = `
@@ -966,23 +962,32 @@ function createTeleopSystemCard(serviceKey, service = {}) {
     const tone = service.tone || "neutral";
     const resetBusy = !!state.ui.serviceResetBusy[serviceKey];
     const serviceState = formatValue(service.state);
+    // Only services backed by a controllable connection expose a reconnect
+    // button. The robot data service mirrors the teleoperation (TDK) status and
+    // has no connection of its own to reset.
+    const canReset = serviceKey in SERVICE_RESET_TARGETS;
     const reconnectMessage = SERVICE_RESET_MESSAGES[serviceKey] || `Reconnect ${service.label || serviceKey}`;
     const card = document.createElement("div");
     card.className = "status-card teleop-system-card";
+    const resetButtonMarkup = canReset
+        ? `<button class="secondary-button icon-button teleop-system-card__reset ${resetBusy ? "icon-button--spinning" : ""}" type="button" aria-label="${reconnectMessage}" title="${reconnectMessage}" ${resetBusy ? "disabled" : ""}>
+                ${RESET_ICON_SVG}
+            </button>`
+        : "";
     card.innerHTML = `
         <div class="teleop-system-card__header">
             <div class="teleop-system-card__title">
                 <span class="teleop-system-card__dot teleop-system-card__dot--${tone}" role="img" aria-label="${serviceState}" title="${serviceState}"></span>
                 <span class="eyebrow teleop-system-card__label">${service.label || serviceKey}</span>
             </div>
-            <button class="secondary-button icon-button teleop-system-card__reset ${resetBusy ? "icon-button--spinning" : ""}" type="button" aria-label="${reconnectMessage}" title="${reconnectMessage}" ${resetBusy ? "disabled" : ""}>
-                ${RESET_ICON_SVG}
-            </button>
+            ${resetButtonMarkup}
         </div>
     `;
 
-    const resetButton = card.querySelector("button");
-    resetButton.onclick = () => resetTeleopSystemService(serviceKey).catch((error) => showToast(error.message, true));
+    if (canReset) {
+        const resetButton = card.querySelector("button");
+        resetButton.onclick = () => resetTeleopSystemService(serviceKey).catch((error) => showToast(error.message, true));
+    }
     return card;
 }
 
@@ -2252,7 +2257,6 @@ async function controlHomeService(serviceName, action, options = {}) {
     }
     const labels = {
         teleop: "Teleop service",
-        ddk: "Robot data service",
         cameras: "Cameras",
     };
     if (!options.silentToast) {

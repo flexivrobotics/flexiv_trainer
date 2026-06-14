@@ -34,9 +34,6 @@ def make_manager_with_storage(tmp_path: Path) -> RuntimeManager:
             available=False, initialized=False, started=False, error=None, fault=None
         )
     )
-    manager.ddk = SimpleNamespace(
-        status=lambda: {"available": False, "robots": {}, "errors": {}}
-    )
     manager.cameras = SimpleNamespace(
         status=lambda: {"available": False, "cameras": {}, "errors": {}}
     )

@@ -35,10 +35,6 @@ def _make_manager(tmp_path: Path) -> RuntimeManager:
             available=False, initialized=False, started=False, error=None, fault=None
         )
     )
-    manager.ddk = SimpleNamespace(
-        status=lambda: {"available": False, "robots": {}, "errors": {}},
-        shutdown=lambda: None,
-    )
     manager.cameras = SimpleNamespace(
         status=lambda: {"available": False, "cameras": {}, "errors": {}},
         stop_streams=lambda: None,

@@ -36,14 +36,6 @@ def make_manager(tmp_path, started_camera_count: int) -> RuntimeManager:
             fault=None,
         )
     )
-    manager.ddk = SimpleNamespace(
-        status=lambda: {
-            "available": True,
-            "robots": {},
-            "errors": {},
-        }
-    )
-
     camera_names = ["ego", "left_wrist", "right_wrist"]
     camera_status = {
         name: {"started": index < started_camera_count}
@@ -102,17 +94,6 @@ def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) 
             },
             "errors": {},
         },
-    )
-    manager.ddk = SimpleNamespace(
-        initialize=lambda: {
-            "available": True,
-            "configured": True,
-            "errors": {},
-            "robots": {
-                "REMOTE_A": {"connected": True},
-                "REMOTE_B": {"connected": True},
-            },
-        }
     )
     manager.cameras = SimpleNamespace(
         start_streams=lambda: {
