@@ -128,7 +128,7 @@ limitations under the License.
                                 <h2>Teleoperation Control</h2>
                             </div>
                             <div class="control-stack">
-                                <button class="start-button button-with-icon" id="teleop-start" type="button">
+                                <button class="start-button button-with-icon" id="teleop-power" type="button">
                                     <span class="button-content">
                                         <svg class="button-icon button-icon--play" viewBox="0 0 24 24"
                                             aria-hidden="true">
@@ -137,17 +137,11 @@ limitations under the License.
                                         <span>Start</span>
                                     </span>
                                 </button>
-                                <button class="stop-button button-with-icon" id="teleop-stop" type="button">
-                                    <span class="button-content">
-                                        <svg class="button-icon button-icon--stop" viewBox="0 0 24 24"
-                                            aria-hidden="true">
-                                            <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect>
-                                        </svg>
-                                        <span>Stop</span>
-                                    </span>
-                                </button>
                                 <button id="teleop-engage" type="button">Engage</button>
                                 <button id="teleop-home" type="button">Home All Robots</button>
+                            </div>
+                            <div class="teleop-start-warning hidden" id="teleop-start-warning" role="status">
+                                Zeroing force/torque sensors, make sure nothing is in contact with the robots
                             </div>
                         </section>
 

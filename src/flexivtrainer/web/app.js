@@ -79,6 +79,7 @@ const state = {
     },
     ui: {
         teleopRefreshBusy: false,
+        teleopStartBusy: false,
         teleopHomeBusy: false,
         recordingStartBusy: false,
         recordingSaveBusy: false,
@@ -199,6 +200,28 @@ const CHECK_ICON_SVG = `
 `;
 const STOP_SQUARE_ICON_SVG = `
     <span class="recording-status__stop-square" aria-hidden="true"></span>
+`;
+const TELEOP_START_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+        </svg>
+        <span>Start</span>
+    </span>
+`;
+const TELEOP_STOP_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--stop" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect>
+        </svg>
+        <span>Stop</span>
+    </span>
+`;
+const TELEOP_STARTING_MARKUP = `
+    <span class="button-content">
+        <span class="button-spinner" aria-hidden="true"></span>
+        <span>Starting…</span>
+    </span>
 `;
 const RECORD_SAVE_DEFAULT_MARKUP = `
     <span class="button-content">
@@ -821,6 +844,13 @@ function createStatusCard(label, value, tone = "neutral") {
 
 function setTeleopHomeBusy(busy) {
     state.ui.teleopHomeBusy = busy;
+    if (state.activeView === "teleoperation") {
+        renderTeleop();
+    }
+}
+
+function setTeleopStartBusy(busy) {
+    state.ui.teleopStartBusy = busy;
     if (state.activeView === "teleoperation") {
         renderTeleop();
     }
@@ -1991,8 +2021,29 @@ function updateTeleopControlButtons(teleopStatus) {
     // between engage and disengage based on the current engagement state.
     const canEngage = !!teleop.started && !state.ui.teleopHomeBusy && !teleopResetBusy;
 
-    byId("teleop-start").disabled = !canStart;
-    byId("teleop-stop").disabled = !canStop;
+    // A single button toggles between Start and Stop based on whether the
+    // control loop is running. While starting, Init() blocks (it zeroes the
+    // F/T sensors), so show a loading state and an orange warning banner.
+    const isRunning = !!teleop.started;
+    const starting = !!state.ui.teleopStartBusy;
+    const powerButton = byId("teleop-power");
+    if (starting) {
+        powerButton.disabled = true;
+        powerButton.classList.add("start-button");
+        powerButton.classList.remove("stop-button");
+        powerButton.innerHTML = TELEOP_STARTING_MARKUP;
+    } else {
+        powerButton.disabled = isRunning ? !canStop : !canStart;
+        powerButton.classList.toggle("start-button", !isRunning);
+        powerButton.classList.toggle("stop-button", isRunning);
+        powerButton.innerHTML = isRunning ? TELEOP_STOP_MARKUP : TELEOP_START_MARKUP;
+    }
+
+    const startWarning = byId("teleop-start-warning");
+    if (startWarning) {
+        startWarning.classList.toggle("hidden", !starting);
+    }
+
     byId("teleop-home").disabled = !canHome;
 
     const engageButton = byId("teleop-engage");
@@ -3089,20 +3140,26 @@ function bindGlobalEvents() {
     if (refreshButton) {
         refreshButton.onclick = () => refreshTeleopStatusWithIndicator().catch((error) => showToast(error.message, true));
     }
-    byId("teleop-start").onclick = async () => {
+    byId("teleop-power").onclick = async () => {
+        if (state.teleopStatus?.teleop?.started) {
+            try {
+                await api("/teleop/stop", { method: "POST" });
+                await refreshTeleopStatus();
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            return;
+        }
+        // Starting runs the blocking Init() (which zeroes the F/T sensors), so
+        // show the loading state and orange warning until the request returns.
+        setTeleopStartBusy(true);
         try {
             await api("/teleop/start", { method: "POST" });
             await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);
-        }
-    };
-    byId("teleop-stop").onclick = async () => {
-        try {
-            await api("/teleop/stop", { method: "POST" });
-            await refreshTeleopStatus();
-        } catch (error) {
-            showToast(error.message, true);
+        } finally {
+            setTeleopStartBusy(false);
         }
     };
     byId("teleop-engage").onclick = async () => {

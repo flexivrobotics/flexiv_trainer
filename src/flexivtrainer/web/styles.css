@@ -1407,6 +1407,18 @@ button:active {
     color: var(--working);
 }
 
+.teleop-start-warning {
+    margin-top: 0.6rem;
+    padding: 0.7rem 0.85rem;
+    border-radius: 14px;
+    border: 1px solid var(--working-line);
+    background: var(--working-soft);
+    color: var(--working);
+    font-size: 0.88rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
 .status-card--error,
 .result-pill--error,
 .toast--error,
