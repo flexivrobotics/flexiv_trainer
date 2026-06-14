@@ -205,7 +205,7 @@ class RuntimeManager:
         elif teleop_pair_count == 0:
             teleop_state = "Not configured"
             teleop_tone = "error"
-            teleop_detail = "Enter two local and two remote robot serial numbers."
+            teleop_detail = "Enter two leader and two follower robot serial numbers."
         elif teleop_snapshot.initialized:
             teleop_state = "Connected"
             teleop_tone = "ok"
@@ -216,7 +216,7 @@ class RuntimeManager:
             )
         else:
             teleop_state = "Not connected"
-            teleop_tone = "error" if teleop_errors else "neutral"
+            teleop_tone = "error"
             teleop_detail = self._service_message(
                 teleop_errors, "Press Connect to initialize TDK."
             )
@@ -228,14 +228,14 @@ class RuntimeManager:
         elif teleop_pair_count == 0:
             robot_data_state = "Not configured"
             robot_data_tone = "error"
-            robot_data_detail = "Enter two local and two remote robot serial numbers."
+            robot_data_detail = "Enter two leader and two follower robot serial numbers."
         elif teleop_snapshot.initialized:
             robot_data_state = "Connected"
             robot_data_tone = "ok"
-            robot_data_detail = "Robot states/actions are available through TDK."
+            robot_data_detail = "Service ready."
         else:
             robot_data_state = "Not connected"
-            robot_data_tone = "neutral"
+            robot_data_tone = "error"
             robot_data_detail = "Connect the teleoperation service first."
 
         camera_status = self.cameras.status()
