@@ -138,46 +138,36 @@ const RECORDING_ENTRY_OPTIONS = [
         sourceField: "right_wrist",
     },
     {
-        id: "observation.state.tcp_pose",
-        label: "observation.state.tcp_pose",
+        id: "observation.state.left_arm",
+        label: "observation.state.left_arm",
         bucket: "observation",
         payload: "states",
-        sourceField: "tcp_pose",
+        side: 0,
+        verifyField: "tcp_pose",
     },
     {
-        id: "observation.state.tcp_twist",
-        label: "observation.state.tcp_twist",
+        id: "observation.state.right_arm",
+        label: "observation.state.right_arm",
         bucket: "observation",
         payload: "states",
-        sourceField: "tcp_vel",
+        side: 1,
+        verifyField: "tcp_pose",
     },
     {
-        id: "observation.state.tcp_wrench",
-        label: "observation.state.tcp_wrench",
-        bucket: "observation",
-        payload: "states",
-        sourceField: "ext_wrench_in_world",
-    },
-    {
-        id: "action.tcp_pose",
-        label: "action.tcp_pose",
+        id: "action.left_arm",
+        label: "action.left_arm",
         bucket: "action",
         payload: "actions",
-        sourceField: "tcp_pose_d",
+        side: 0,
+        verifyField: "tcp_pose_d",
     },
     {
-        id: "action.tcp_twist",
-        label: "action.tcp_twist",
+        id: "action.right_arm",
+        label: "action.right_arm",
         bucket: "action",
         payload: "actions",
-        sourceField: "tcp_vel_d",
-    },
-    {
-        id: "action.tcp_wrench",
-        label: "action.tcp_wrench",
-        bucket: "action",
-        payload: "actions",
-        sourceField: "ext_wrench_d",
+        side: 1,
+        verifyField: "tcp_pose_d",
     },
 ];
 const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
@@ -2061,15 +2051,14 @@ function areSelectedRecordingEntriesAvailable(teleopStatus) {
             return !!camera?.started;
         }
 
-        if (!configuredRemoteSerials.length) {
+        // Each arm feature maps to one follower robot (side 0 = left, 1 = right).
+        const serial = configuredRemoteSerials[option.side];
+        if (!serial) {
             return false;
         }
-
-        return configuredRemoteSerials.every((serial) => {
-            const robot = teleopStatus?.robot_data?.robots?.[serial];
-            const payload = robot?.[option.payload];
-            return hasRecordingPayload(payload?.[option.sourceField]);
-        });
+        const robot = teleopStatus?.robot_data?.robots?.[serial];
+        const payload = robot?.[option.payload];
+        return hasRecordingPayload(payload?.[option.verifyField]);
     });
 }
 

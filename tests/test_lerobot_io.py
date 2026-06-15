@@ -78,33 +78,49 @@ def test_arm_side_label_uses_left_right_then_generic() -> None:
 def test_extract_recording_frame_values_groups_per_arm_without_serials() -> None:
     values = extract_recording_frame_values(
         make_snapshot(),
-        ["observation.state.tcp_pose", "action.tcp_wrench"],
+        ["observation.state.left_arm", "action.left_arm"],
     )
 
-    # No serial number leaks into the keys; metrics are grouped per arm.
+    # No serial leaks into the keys; the arm feature concatenates all metrics
+    # (pose 7 + twist 6 + wrench 6 = 19) into one vector.
     assert set(values) == {"observation.state.left_arm", "action.left_arm"}
-    assert values["observation.state.left_arm"] == [0, 1, 2, 3, 4, 5, 6]
-    assert values["action.left_arm"] == [50, 51, 52, 53, 54, 55]
+    assert values["observation.state.left_arm"] == list(range(0, 7)) + list(
+        range(10, 16)
+    ) + list(range(20, 26))
+    assert values["action.left_arm"] == list(range(30, 37)) + list(
+        range(40, 46)
+    ) + list(range(50, 56))
+
+
+def test_extract_recording_frame_values_records_only_selected_arms() -> None:
+    values = extract_recording_frame_values(
+        make_dual_snapshot(), ["observation.state.left_arm"]
+    )
+
+    # Only the left arm's state was requested.
+    assert set(values) == {"observation.state.left_arm"}
+    assert values["observation.state.left_arm"][:7] == [0, 1, 2, 3, 4, 5, 6]
 
 
 def test_extract_recording_frame_values_maps_two_arms_to_left_right() -> None:
     values = extract_recording_frame_values(
-        make_dual_snapshot(), ["observation.state.tcp_pose"]
+        make_dual_snapshot(),
+        ["observation.state.left_arm", "observation.state.right_arm"],
     )
 
     assert set(values) == {
         "observation.state.left_arm",
         "observation.state.right_arm",
     }
-    assert values["observation.state.left_arm"] == [0, 1, 2, 3, 4, 5, 6]
-    assert values["observation.state.right_arm"] == [100, 101, 102, 103, 104, 105, 106]
+    assert values["observation.state.left_arm"][:7] == [0, 1, 2, 3, 4, 5, 6]
+    assert values["observation.state.right_arm"][:7] == [100, 101, 102, 103, 104, 105, 106]
 
 
 def test_resolve_recording_image_names_filters_selected_cameras() -> None:
     assert resolve_recording_image_names(
         [
             "observation.images.left_wrist",
-            "action.tcp_pose",
+            "action.left_arm",
             "observation.images.ego",
         ]
     ) == ["left_wrist", "ego"]
@@ -116,7 +132,7 @@ def test_extract_recording_images_filters_to_requested_entries() -> None:
         [
             "observation.images.ego",
             "observation.images.right_wrist",
-            "action.tcp_twist",
+            "action.left_arm",
         ],
     )
 
@@ -129,8 +145,8 @@ def test_build_features_from_sample_groups_arms_with_named_axes() -> None:
         make_images(),
         [
             "observation.images.ego",
-            "observation.state.tcp_pose",
-            "action.tcp_wrench",
+            "observation.state.left_arm",
+            "action.left_arm",
         ],
     )
 
@@ -140,10 +156,11 @@ def test_build_features_from_sample_groups_arms_with_named_axes() -> None:
     assert state_keys == ["observation.state.left_arm"]
     assert action_keys == ["action.left_arm"]
 
+    # Each arm feature is one 19-dim vector (pose 7 + twist 6 + wrench 6).
     state_feature = features["observation.state.left_arm"]
     assert state_feature["dtype"] == "float32"
-    assert state_feature["shape"] == (7,)
-    assert state_feature["names"] == [
+    assert state_feature["shape"] == (19,)
+    assert state_feature["names"][:7] == [
         "tcp_pose.x",
         "tcp_pose.y",
         "tcp_pose.z",
@@ -152,34 +169,10 @@ def test_build_features_from_sample_groups_arms_with_named_axes() -> None:
         "tcp_pose.q_y",
         "tcp_pose.q_z",
     ]
+    assert state_feature["names"][7] == "tcp_twist.vx"
+    assert state_feature["names"][-1] == "tcp_wrench.mz"
 
     action_feature = features["action.left_arm"]
-    assert action_feature["shape"] == (6,)
-    assert action_feature["names"] == [
-        "tcp_wrench.fx",
-        "tcp_wrench.fy",
-        "tcp_wrench.fz",
-        "tcp_wrench.mx",
-        "tcp_wrench.my",
-        "tcp_wrench.mz",
-    ]
-
-
-def test_build_features_from_sample_combines_state_metrics_into_one_vector() -> None:
-    features, state_keys, _ = build_features_from_sample(
-        make_snapshot(),
-        {},
-        [
-            "observation.state.tcp_pose",
-            "observation.state.tcp_twist",
-            "observation.state.tcp_wrench",
-        ],
-    )
-
-    assert state_keys == ["observation.state.left_arm"]
-    feature = features["observation.state.left_arm"]
-    # 7 (pose) + 6 (twist) + 6 (wrench) concatenated into a single feature.
-    assert feature["shape"] == (19,)
-    assert feature["names"][:1] == ["tcp_pose.x"]
-    assert feature["names"][7] == "tcp_twist.vx"
-    assert feature["names"][-1] == "tcp_wrench.mz"
+    assert action_feature["shape"] == (19,)
+    assert action_feature["names"][:1] == ["tcp_pose.x"]
+    assert action_feature["names"][-1] == "tcp_wrench.mz"

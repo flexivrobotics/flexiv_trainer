@@ -21,16 +21,17 @@ from typing import Any
 
 import numpy as np
 
+# Recording entries mirror the recorded dataset features one-for-one: the three
+# camera feeds plus each arm's grouped state and action vectors. Selecting an arm
+# entry records that arm's full state/action vector (all metrics combined).
 DEFAULT_RECORDING_ENTRY_KEYS: list[str] = [
     "observation.images.ego",
     "observation.images.left_wrist",
     "observation.images.right_wrist",
-    "observation.state.tcp_pose",
-    "observation.state.tcp_twist",
-    "observation.state.tcp_wrench",
-    "action.tcp_pose",
-    "action.tcp_twist",
-    "action.tcp_wrench",
+    "observation.state.left_arm",
+    "observation.state.right_arm",
+    "action.left_arm",
+    "action.right_arm",
 ]
 
 _IMAGE_ENTRY_TO_CAMERA = {
@@ -67,22 +68,24 @@ _TCP_WRENCH_AXES = [
     "tcp_wrench.mz",
 ]
 
-# Ordered (recording-entry key, snapshot field, axis names) for each metric.
-# State and action share the same axis naming so a left_arm observation lines up
-# with its left_arm action component-for-component.
-_STATE_METRICS: list[tuple[str, str, list[str]]] = [
-    ("observation.state.tcp_pose", "tcp_pose", _TCP_POSE_AXES),
-    ("observation.state.tcp_twist", "tcp_vel", _TCP_TWIST_AXES),
-    ("observation.state.tcp_wrench", "ext_wrench_in_world", _TCP_WRENCH_AXES),
+# Ordered (snapshot field, axis names) for the metrics concatenated into each
+# arm's grouped vector. State and action share axis naming so a left_arm
+# observation lines up with its left_arm action component-for-component.
+_STATE_METRICS: list[tuple[str, list[str]]] = [
+    ("tcp_pose", _TCP_POSE_AXES),
+    ("tcp_vel", _TCP_TWIST_AXES),
+    ("ext_wrench_in_world", _TCP_WRENCH_AXES),
 ]
-_ACTION_METRICS: list[tuple[str, str, list[str]]] = [
-    ("action.tcp_pose", "tcp_pose_d", _TCP_POSE_AXES),
-    ("action.tcp_twist", "tcp_vel_d", _TCP_TWIST_AXES),
-    ("action.tcp_wrench", "ext_wrench_d", _TCP_WRENCH_AXES),
+_ACTION_METRICS: list[tuple[str, list[str]]] = [
+    ("tcp_pose_d", _TCP_POSE_AXES),
+    ("tcp_vel_d", _TCP_TWIST_AXES),
+    ("ext_wrench_d", _TCP_WRENCH_AXES),
 ]
 
-STATE_ENTRY_KEYS: set[str] = {entry for entry, _, _ in _STATE_METRICS}
-ACTION_ENTRY_KEYS: set[str] = {entry for entry, _, _ in _ACTION_METRICS}
+# Arm-level entry keys (one per recorded feature), used to gate state/action
+# capture. These match DEFAULT_RECORDING_ENTRY_KEYS for any configured arm side.
+STATE_ENTRY_KEYS: set[str] = {"observation.state.left_arm", "observation.state.right_arm"}
+ACTION_ENTRY_KEYS: set[str] = {"action.left_arm", "action.right_arm"}
 
 
 def arm_side_label(index: int) -> str:
@@ -147,19 +150,16 @@ def extract_recording_images(
 
 def _collect_arm_group(
     section: Any,
-    metrics: list[tuple[str, str, list[str]]],
-    enabled_entries: set[str],
+    metrics: list[tuple[str, list[str]]],
 ) -> tuple[list[float], list[str]]:
-    """Concatenate the enabled metrics of one arm into a single flat vector.
+    """Concatenate all of an arm's metrics into a single flat vector.
 
     Returns (values, axis_names) where axis_names labels each scalar, e.g.
     ["tcp_pose.x", ..., "tcp_pose.q_z", "tcp_twist.vx", ..., "tcp_wrench.mz"].
     """
     values: list[float] = []
     names: list[str] = []
-    for entry, field, axis_names in metrics:
-        if entry not in enabled_entries:
-            continue
+    for field, axis_names in metrics:
         vector = section.get(field) if isinstance(section, dict) else None
         if not isinstance(vector, (list, tuple)):
             continue
@@ -172,10 +172,11 @@ def _collect_arm_group(
 def _iter_arm_groups(
     robot_snapshot: dict[str, Any], enabled_entries: set[str]
 ):
-    """Yield (feature_key, values, axis_names) for each arm's state and action.
+    """Yield (feature_key, values, axis_names) for each enabled arm feature.
 
     Robots are grouped per arm by side (left_arm/right_arm) rather than by
-    serial number, so no hardware identifiers leak into the dataset.
+    serial number, so no hardware identifiers leak into the dataset. An arm's
+    state/action vector is recorded only when its feature key is enabled.
     """
     robots = robot_snapshot.get("robots") if isinstance(robot_snapshot, dict) else None
     if not isinstance(robots, dict):
@@ -184,16 +185,16 @@ def _iter_arm_groups(
         if not isinstance(payload, dict):
             continue
         side = arm_side_label(index)
-        state_values, state_names = _collect_arm_group(
-            payload.get("states"), _STATE_METRICS, enabled_entries
-        )
-        if state_values:
-            yield f"observation.state.{side}", state_values, state_names
-        action_values, action_names = _collect_arm_group(
-            payload.get("actions"), _ACTION_METRICS, enabled_entries
-        )
-        if action_values:
-            yield f"action.{side}", action_values, action_names
+        state_key = f"observation.state.{side}"
+        if state_key in enabled_entries:
+            values, names = _collect_arm_group(payload.get("states"), _STATE_METRICS)
+            if values:
+                yield state_key, values, names
+        action_key = f"action.{side}"
+        if action_key in enabled_entries:
+            values, names = _collect_arm_group(payload.get("actions"), _ACTION_METRICS)
+            if values:
+                yield action_key, values, names
 
 
 def extract_recording_frame_values(
