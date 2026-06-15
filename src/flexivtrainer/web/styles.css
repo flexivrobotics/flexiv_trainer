@@ -992,7 +992,7 @@ button:disabled {
     border-radius: 999px;
     background: rgba(47, 157, 100, 0.14);
     color: #2f9d64;
-    font-size: 0.72rem;
+    font-size: inherit;
     font-weight: 600;
     line-height: 1;
     letter-spacing: 0.02em;
