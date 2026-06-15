@@ -108,6 +108,14 @@ button:disabled {
     color: #ce4949;
 }
 
+.button-icon--bolt-engage {
+    color: #f5c518;
+}
+
+.button-icon--bolt-disengage {
+    color: #9aa0a6;
+}
+
 .hidden {
     display: none !important;
 }

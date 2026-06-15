@@ -228,6 +228,44 @@ const TELEOP_STARTING_MARKUP = `
         <span>Starting…</span>
     </span>
 `;
+const TELEOP_ENGAGE_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--bolt button-icon--bolt-engage" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 2v11h3v9l7-12h-4l4-8z" fill="currentColor"></path>
+        </svg>
+        <span>Engage</span>
+    </span>
+`;
+const TELEOP_DISENGAGE_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--bolt button-icon--bolt-disengage" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 2v11h3v9l7-12h-4l4-8z" fill="currentColor"></path>
+        </svg>
+        <span>Disengage</span>
+    </span>
+`;
+const RECORD_START_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+        </svg>
+        <span>Start</span>
+    </span>
+`;
+const RECORD_STOP_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--stop" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect>
+        </svg>
+        <span>Stop</span>
+    </span>
+`;
+const RECORD_STARTING_MARKUP = `
+    <span class="button-content">
+        <span class="button-spinner" aria-hidden="true"></span>
+        <span>Starting…</span>
+    </span>
+`;
 const RECORD_SAVE_DEFAULT_MARKUP = `
     <span class="button-content">
         <svg class="button-icon button-icon--save" viewBox="0 0 24 24" aria-hidden="true">
@@ -1999,8 +2037,37 @@ function renderRecordingStatusPanel(teleopStatus) {
         `,
     );
 
-    byId("record-start").disabled = !model.canStart;
-    byId("record-stop").disabled = !model.canStop;
+    updateRecordingToggleButton(model);
+}
+
+function updateRecordingToggleButton(model) {
+    // A single button toggles between Start and Stop based on whether a
+    // recording is in progress, mirroring the teleop power control. While the
+    // recorder is initializing, show a loading state.
+    const toggle = byId("record-toggle");
+    if (!toggle) {
+        return;
+    }
+    const starting = !!state.ui.recordingStartBusy;
+    const isRecording = !!model.canStop;
+    // Only rewrite innerHTML when the rendered content actually changes;
+    // renderTeleop runs on every poll tick, and unconditional rewrites make the
+    // button flash and drop clicks that land mid-rerender.
+    if (starting) {
+        toggle.disabled = true;
+        toggle.classList.add("start-button");
+        toggle.classList.remove("stop-button");
+        setMarkupIfChanged(toggle, "record-toggle:starting", RECORD_STARTING_MARKUP);
+        return;
+    }
+    toggle.disabled = isRecording ? !model.canStop : !model.canStart;
+    toggle.classList.toggle("start-button", !isRecording);
+    toggle.classList.toggle("stop-button", isRecording);
+    setMarkupIfChanged(
+        toggle,
+        isRecording ? "record-toggle:stop" : "record-toggle:start",
+        isRecording ? RECORD_STOP_MARKUP : RECORD_START_MARKUP,
+    );
 }
 
 function renderRecordingActionButtons(recording = {}) {
@@ -2092,7 +2159,11 @@ function updateTeleopControlButtons(teleopStatus) {
 
     const engageButton = byId("teleop-engage");
     engageButton.disabled = !canEngage;
-    engageButton.textContent = teleop.engaged ? "Disengage" : "Engage";
+    setMarkupIfChanged(
+        engageButton,
+        teleop.engaged ? "teleop-engage:disengage" : "teleop-engage:engage",
+        teleop.engaged ? TELEOP_DISENGAGE_MARKUP : TELEOP_ENGAGE_MARKUP,
+    );
 }
 
 function renderForcePanel(side, robotEntry, telemetry, history) {
@@ -3263,7 +3334,19 @@ function bindGlobalEvents() {
             setTeleopHomeBusy(false);
         }
     };
-    byId("record-start").onclick = async () => {
+    byId("record-toggle").onclick = async () => {
+        // The single toggle button stops an in-progress recording and otherwise
+        // starts a new one, mirroring the teleop power control.
+        const recording = state.teleopStatus?.recording || {};
+        if (recording.active) {
+            try {
+                await api("/teleop/recording/stop", { method: "POST" });
+                await refreshTeleopStatus();
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            return;
+        }
         try {
             if (!state.recordingEntries.length) {
                 showToast("Select at least one recording entry.", true);
@@ -3286,14 +3369,6 @@ function bindGlobalEvents() {
                 showToast(error.message, true);
             }
             setRecordingStartBusy(false);
-        }
-    };
-    byId("record-stop").onclick = async () => {
-        try {
-            await api("/teleop/recording/stop", { method: "POST" });
-            await refreshTeleopStatus();
-        } catch (error) {
-            showToast(error.message, true);
         }
     };
     byId("record-save").onclick = async () => {
