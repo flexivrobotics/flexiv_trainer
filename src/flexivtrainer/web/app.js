@@ -80,6 +80,7 @@ const state = {
     ui: {
         teleopRefreshBusy: false,
         teleopStartBusy: false,
+        teleopZeroingSensors: false,
         teleopHomeBusy: false,
         recordingStartBusy: false,
         recordingSaveBusy: false,
@@ -2082,7 +2083,9 @@ function updateTeleopControlButtons(teleopStatus) {
 
     const startWarning = byId("teleop-start-warning");
     if (startWarning) {
-        startWarning.classList.toggle("hidden", !starting);
+        // The banner announces sensor zeroing, so only show it while starting
+        // with zeroing actually requested.
+        startWarning.classList.toggle("hidden", !(starting && state.ui.teleopZeroingSensors));
     }
 
     byId("teleop-home").disabled = !canHome;
@@ -3200,11 +3203,27 @@ function bindGlobalEvents() {
             }
             return;
         }
-        // Starting runs the blocking Init() (which zeroes the F/T sensors), so
-        // show the loading state and orange warning until the request returns.
+        // The checkbox maps to Init()'s zero_ft_sensor flag. When enabled the
+        // blocking Init() zeroes the F/T sensors, so confirm first since the
+        // robots must be free of unexpected contact for the zero to be valid.
+        const zeroFtSensor = !!byId("teleop-zero-sensors")?.checked;
+        if (zeroFtSensor) {
+            const proceed = window.confirm(
+                "Force sensors will be zeroed, please make sure the robots are NOT in contact with anything other than the configured tools. Click OK to proceed.",
+            );
+            if (!proceed) {
+                return;
+            }
+        }
+        // Show the loading state and orange warning until the request returns.
+        // The warning only makes sense while zeroing is actually requested.
+        state.ui.teleopZeroingSensors = zeroFtSensor;
         setTeleopStartBusy(true);
         try {
-            await api("/teleop/start", { method: "POST" });
+            await api("/teleop/start", {
+                method: "POST",
+                body: JSON.stringify({ zero_ft_sensor: zeroFtSensor }),
+            });
             await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);

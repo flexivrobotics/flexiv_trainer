@@ -21,7 +21,7 @@ limitations under the License.
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260615-3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260615-4" />
 </head>
 
 <body>
@@ -128,6 +128,10 @@ limitations under the License.
                                 <h2>Teleoperation Control</h2>
                             </div>
                             <div class="control-stack">
+                                <label class="teleop-zero-toggle" for="teleop-zero-sensors">
+                                    <input type="checkbox" id="teleop-zero-sensors" checked />
+                                    <span>Zero force sensors on start</span>
+                                </label>
                                 <button class="start-button button-with-icon" id="teleop-power" type="button">
                                     <span class="button-content">
                                         <svg class="button-icon button-icon--play" viewBox="0 0 24 24"
@@ -141,7 +145,7 @@ limitations under the License.
                                 <button id="teleop-home" type="button">Home All Robots</button>
                             </div>
                             <div class="teleop-start-warning hidden" id="teleop-start-warning" role="status">
-                                Zeroing force/torque sensors, make sure nothing is in contact with the robots
+                                Zeroing force sensors …
                             </div>
                         </section>
 
@@ -319,7 +323,7 @@ limitations under the License.
 
     <div class="version-badge" id="version-badge" aria-hidden="true">v__FLEXIV_TRAINER_VERSION__</div>
 
-    <script type="module" src="/static/app.js?v=20260615-3"></script>
+    <script type="module" src="/static/app.js?v=20260615-5"></script>
 </body>
 
 </html>

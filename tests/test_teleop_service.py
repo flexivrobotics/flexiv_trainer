@@ -106,9 +106,11 @@ class FakeTeleopController:
         self.start_calls = 0
         self.stop_calls = 0
         self.engage_calls: list[tuple[int, bool]] = []
+        self.init_zero_ft_sensor: object = None
 
-    def Init(self) -> None:
+    def Init(self, zero_ft_sensor: object = None) -> None:
         self.init_calls += 1
+        self.init_zero_ft_sensor = zero_ft_sensor
 
     def Start(self) -> None:
         self.start_calls += 1
@@ -219,6 +221,29 @@ def test_start_always_calls_init_before_start(tmp_path) -> None:
     service.stop()
     service.start()
     assert (controller.init_calls, controller.start_calls) == (2, 2)
+
+
+def test_start_passes_zero_ft_sensor_flag_to_init(tmp_path) -> None:
+    # The Start button's "Zero force sensors on start" checkbox maps to Init()'s
+    # zero_ft_sensor flag (Enable when checked, Disable when unchecked).
+    from flexivtrainer.teleop import service as teleop_service
+
+    service = _configured_service(tmp_path)
+    controller = service._controller
+
+    service.start(zero_ft_sensor=True)
+    if teleop_service.ZeroFTSensor is not None:
+        assert controller.init_zero_ft_sensor == teleop_service.ZeroFTSensor.Enable
+    else:
+        # Without the TDK bindings available, Init() is called argument-free.
+        assert controller.init_zero_ft_sensor is None
+
+    service.stop()
+    service.start(zero_ft_sensor=False)
+    if teleop_service.ZeroFTSensor is not None:
+        assert controller.init_zero_ft_sensor == teleop_service.ZeroFTSensor.Disable
+    else:
+        assert controller.init_zero_ft_sensor is None
 
 
 def test_engage_then_disengage_toggles_every_pair(tmp_path) -> None:

@@ -37,6 +37,12 @@ class CameraConfigRequest(BaseModel):
     serials: dict[str, str] = Field(default_factory=dict)
 
 
+class StartTeleopRequest(BaseModel):
+    # Maps to TDK Init()'s zero_ft_sensor flag: True zeroes the force/torque
+    # sensors during initialization, False skips that step.
+    zero_ft_sensor: bool = True
+
+
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
@@ -172,8 +178,11 @@ def camera_frame(
 
 
 @router.post("/start")
-def start_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    result = runtime.teleop.start().__dict__
+def start_teleop(
+    request: StartTeleopRequest = StartTeleopRequest(),
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    result = runtime.teleop.start(zero_ft_sensor=request.zero_ft_sensor).__dict__
     if result.get("error"):
         error("Teleoperation start failed", str(result.get("error")))
     elif result.get("started"):

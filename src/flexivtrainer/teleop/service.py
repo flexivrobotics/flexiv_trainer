@@ -34,6 +34,11 @@ TransparentCartesianTeleopLAN = (
     else None
 )
 
+# Init()'s zero_ft_sensor parameter is a ZeroFTSensor enum (Enable/Disable).
+ZeroFTSensor = (
+    getattr(flexivtdk, "ZeroFTSensor", None) if flexivtdk is not None else None
+)
+
 
 def _serialize_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -232,19 +237,32 @@ class TeleopService:
             if pair.leader_serial and pair.follower_serial
         )
 
-    def start(self) -> TeleopSnapshot:
+    def start(self, zero_ft_sensor: bool = True) -> TeleopSnapshot:
         # The Start button always runs Init() then Start(). Per the TDK contract
         # (see TransparentCartesianTeleopLAN::Start/Stop docs), restarting after
         # a Stop() requires calling Init() again first, so Init() is run on every
         # Start rather than only when the controller is first constructed. The
         # pairs stay disengaged by default; engaging is a separate action.
+        #
+        # zero_ft_sensor maps to Init()'s flag of the same name: when enabled the
+        # force/torque sensors are zeroed during initialization (the robots must
+        # be free of unexpected contact); when disabled the zeroing step is
+        # skipped.
         self.initialize()
         if self._controller is None:
             return self.snapshot()
         try:
             init_method = getattr(self._controller, "Init", None)
             if callable(init_method):
-                init_method()
+                if ZeroFTSensor is not None:
+                    flag = (
+                        ZeroFTSensor.Enable
+                        if zero_ft_sensor
+                        else ZeroFTSensor.Disable
+                    )
+                    init_method(zero_ft_sensor=flag)
+                else:
+                    init_method()
             self._controller.Start()
             self._started = True
             self._engaged = False
