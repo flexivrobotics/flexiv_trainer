@@ -165,10 +165,14 @@ def build_features_from_sample(
             "shape": [height, width, channels],
         }
 
+    # LeRobot's add_frame validator compares the feature shape directly against
+    # the numpy value's `.shape`, which is always a tuple. A list shape ([1])
+    # never equals the tuple shape ((1,)), so every add_frame would raise and the
+    # capture loop would silently record zero frames. Use a tuple to match.
     for key in observation_values:
-        features[key] = {"dtype": "float32", "shape": [1]}
+        features[key] = {"dtype": "float32", "shape": (1,)}
     for key in action_values:
-        features[key] = {"dtype": "float32", "shape": [1]}
+        features[key] = {"dtype": "float32", "shape": (1,)}
 
     return features, observation_values, action_values
 

@@ -1956,10 +1956,17 @@ function buildRecordingStatusModel(teleopStatus) {
         : (fps > 0 ? frames / fps : 0);
 
     if (active) {
+        // Surface capture-loop errors instead of silently showing "0 frames":
+        // a failing add_frame keeps the timer ticking while no frames land.
+        const captureError =
+            typeof recording.error === "string" ? recording.error.trim() : "";
         return {
             kind: "recording",
             line1: formatElapsed(seconds),
-            line2: `${frames} frames captured`,
+            line2:
+                captureError && frames === 0
+                    ? `Capture error: ${captureError}`
+                    : `${frames} frames captured`,
             animated: false,
             canStart: false,
             canStop: true,
