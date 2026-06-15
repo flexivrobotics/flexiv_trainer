@@ -118,57 +118,54 @@ const TELEMETRY_HISTORY_LIMIT = 90;
 // refresh rate (e.g. 100ms ≈ 10 FPS); refreshTeleopStatus() self-throttles via
 // a queue, so requests never pile up if the backend is briefly slower.
 const TELEOP_POLL_INTERVAL_MS = 100;
+// Arms in capture order (index 0 = left follower, 1 = right follower) and the
+// per-metric vectors each arm exposes. The checklist offers one toggle per
+// (side, metric); selected metrics are concatenated into that arm's grouped
+// state/action feature in the dataset.
+const RECORDING_ARM_SIDES = [
+    { side: "left_arm", index: 0 },
+    { side: "right_arm", index: 1 },
+];
+const RECORDING_METRICS = [
+    { metric: "tcp_pose", stateField: "tcp_pose", actionField: "tcp_pose_d" },
+    { metric: "tcp_twist", stateField: "tcp_vel", actionField: "tcp_vel_d" },
+    { metric: "tcp_wrench", stateField: "ext_wrench_in_world", actionField: "ext_wrench_d" },
+];
+
+function buildArmMetricRecordingOptions() {
+    const options = [];
+    for (const { side, index } of RECORDING_ARM_SIDES) {
+        for (const { metric, stateField } of RECORDING_METRICS) {
+            options.push({
+                id: `observation.state.${side}.${metric}`,
+                label: `observation.state.${side}.${metric}`,
+                bucket: "observation",
+                payload: "states",
+                side: index,
+                verifyField: stateField,
+            });
+        }
+    }
+    for (const { side, index } of RECORDING_ARM_SIDES) {
+        for (const { metric, actionField } of RECORDING_METRICS) {
+            options.push({
+                id: `action.${side}.${metric}`,
+                label: `action.${side}.${metric}`,
+                bucket: "action",
+                payload: "actions",
+                side: index,
+                verifyField: actionField,
+            });
+        }
+    }
+    return options;
+}
+
 const RECORDING_ENTRY_OPTIONS = [
-    {
-        id: "observation.images.ego",
-        label: "observation.images.ego",
-        bucket: "image",
-        sourceField: "ego",
-    },
-    {
-        id: "observation.images.left_wrist",
-        label: "observation.images.left_wrist",
-        bucket: "image",
-        sourceField: "left_wrist",
-    },
-    {
-        id: "observation.images.right_wrist",
-        label: "observation.images.right_wrist",
-        bucket: "image",
-        sourceField: "right_wrist",
-    },
-    {
-        id: "observation.state.left_arm",
-        label: "observation.state.left_arm",
-        bucket: "observation",
-        payload: "states",
-        side: 0,
-        verifyField: "tcp_pose",
-    },
-    {
-        id: "observation.state.right_arm",
-        label: "observation.state.right_arm",
-        bucket: "observation",
-        payload: "states",
-        side: 1,
-        verifyField: "tcp_pose",
-    },
-    {
-        id: "action.left_arm",
-        label: "action.left_arm",
-        bucket: "action",
-        payload: "actions",
-        side: 0,
-        verifyField: "tcp_pose_d",
-    },
-    {
-        id: "action.right_arm",
-        label: "action.right_arm",
-        bucket: "action",
-        payload: "actions",
-        side: 1,
-        verifyField: "tcp_pose_d",
-    },
+    { id: "observation.images.ego", label: "observation.images.ego", bucket: "image", sourceField: "ego" },
+    { id: "observation.images.left_wrist", label: "observation.images.left_wrist", bucket: "image", sourceField: "left_wrist" },
+    { id: "observation.images.right_wrist", label: "observation.images.right_wrist", bucket: "image", sourceField: "right_wrist" },
+    ...buildArmMetricRecordingOptions(),
 ];
 const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
 const SERVICE_RESET_TARGETS = {
