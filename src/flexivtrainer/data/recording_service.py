@@ -129,6 +129,11 @@ class RecordingService:
 
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+            # Camera feeds are stored as MP4 (video dtype). Encode them in real
+            # time during capture (streaming_encoding) instead of writing
+            # per-frame images and batch encoding at save time. This keeps the
+            # capture loop fast and makes save near-instant: the alternative
+            # batch encode blocks Save for seconds while it muxes every frame.
             dataset = LeRobotDataset.create(
                 repo_id=f"local/{episode_name}",
                 fps=target_fps,
@@ -136,6 +141,7 @@ class RecordingService:
                 root=staging_path,
                 robot_type=self._settings.robot_type,
                 use_videos=True,
+                streaming_encoding=True,
             )
         except Exception as exc:
             shutil.rmtree(staging_path, ignore_errors=True)

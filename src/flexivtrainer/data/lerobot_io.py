@@ -160,8 +160,12 @@ def build_features_from_sample(
         height = int(array.shape[0]) if array.ndim >= 2 else 0
         width = int(array.shape[1]) if array.ndim >= 2 else 0
         channels = int(array.shape[2]) if array.ndim >= 3 else 1
+        # Use the "video" dtype so camera feeds are stored as MP4 (the LeRobot
+        # v3 format), not loose PNG frames. With "image", use_videos=True is
+        # effectively ignored: no video_keys are registered and every frame is
+        # written as a PNG instead of encoded into a video.
         features[f"observation.images.{camera_name}"] = {
-            "dtype": "image",
+            "dtype": "video",
             "shape": [height, width, channels],
         }
 
