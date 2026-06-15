@@ -39,17 +39,64 @@ _IMAGE_ENTRY_TO_CAMERA = {
     "observation.images.right_wrist": "right_wrist",
 }
 
-_OBSERVATION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "observation.state.tcp_pose": ("states", "tcp_pose"),
-    "observation.state.tcp_twist": ("states", "tcp_vel"),
-    "observation.state.tcp_wrench": ("states", "ext_wrench_in_world"),
-}
+# Per-metric axis names. The full sub-feature label is "<metric>.<axis>", e.g.
+# "tcp_pose.x" or "tcp_wrench.fz". tcp_pose carries position + quaternion.
+_TCP_POSE_AXES = [
+    "tcp_pose.x",
+    "tcp_pose.y",
+    "tcp_pose.z",
+    "tcp_pose.q_w",
+    "tcp_pose.q_x",
+    "tcp_pose.q_y",
+    "tcp_pose.q_z",
+]
+_TCP_TWIST_AXES = [
+    "tcp_twist.vx",
+    "tcp_twist.vy",
+    "tcp_twist.vz",
+    "tcp_twist.wx",
+    "tcp_twist.wy",
+    "tcp_twist.wz",
+]
+_TCP_WRENCH_AXES = [
+    "tcp_wrench.fx",
+    "tcp_wrench.fy",
+    "tcp_wrench.fz",
+    "tcp_wrench.mx",
+    "tcp_wrench.my",
+    "tcp_wrench.mz",
+]
 
-_ACTION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "action.tcp_pose": ("actions", "tcp_pose_d"),
-    "action.tcp_twist": ("actions", "tcp_vel_d"),
-    "action.tcp_wrench": ("actions", "ext_wrench_d"),
-}
+# Ordered (recording-entry key, snapshot field, axis names) for each metric.
+# State and action share the same axis naming so a left_arm observation lines up
+# with its left_arm action component-for-component.
+_STATE_METRICS: list[tuple[str, str, list[str]]] = [
+    ("observation.state.tcp_pose", "tcp_pose", _TCP_POSE_AXES),
+    ("observation.state.tcp_twist", "tcp_vel", _TCP_TWIST_AXES),
+    ("observation.state.tcp_wrench", "ext_wrench_in_world", _TCP_WRENCH_AXES),
+]
+_ACTION_METRICS: list[tuple[str, str, list[str]]] = [
+    ("action.tcp_pose", "tcp_pose_d", _TCP_POSE_AXES),
+    ("action.tcp_twist", "tcp_vel_d", _TCP_TWIST_AXES),
+    ("action.tcp_wrench", "ext_wrench_d", _TCP_WRENCH_AXES),
+]
+
+STATE_ENTRY_KEYS: set[str] = {entry for entry, _, _ in _STATE_METRICS}
+ACTION_ENTRY_KEYS: set[str] = {entry for entry, _, _ in _ACTION_METRICS}
+
+
+def arm_side_label(index: int) -> str:
+    """Human side label for a robot by its capture order (no serials).
+
+    Robots are captured in teleop-pair order, so index 0 is the left arm and
+    index 1 the right arm for a bimanual rig; anything beyond falls back to a
+    generic name.
+    """
+    if index == 0:
+        return "left_arm"
+    if index == 1:
+        return "right_arm"
+    return f"arm_{index + 1}"
 
 
 def _normalize_unique(items: list[str]) -> list[str]:
@@ -98,48 +145,66 @@ def extract_recording_images(
     return {name: images[name] for name in selected if name in images}
 
 
-def _flatten_numeric_labels(prefix: str, values: Any) -> list[str]:
-    if not isinstance(values, (list, tuple)):
-        return []
-    return [f"{prefix}.{index}" for index, _ in enumerate(values)]
+def _collect_arm_group(
+    section: Any,
+    metrics: list[tuple[str, str, list[str]]],
+    enabled_entries: set[str],
+) -> tuple[list[float], list[str]]:
+    """Concatenate the enabled metrics of one arm into a single flat vector.
+
+    Returns (values, axis_names) where axis_names labels each scalar, e.g.
+    ["tcp_pose.x", ..., "tcp_pose.q_z", "tcp_twist.vx", ..., "tcp_wrench.mz"].
+    """
+    values: list[float] = []
+    names: list[str] = []
+    for entry, field, axis_names in metrics:
+        if entry not in enabled_entries:
+            continue
+        vector = section.get(field) if isinstance(section, dict) else None
+        if not isinstance(vector, (list, tuple)):
+            continue
+        for index, value in enumerate(vector):
+            values.append(float(value))
+            names.append(axis_names[index] if index < len(axis_names) else f"{field}.{index}")
+    return values, names
 
 
-def extract_recording_feature_values(
-    robot_snapshot: dict[str, Any], entries: list[str] | None = None
-) -> tuple[list[str], list[str]]:
-    resolved_entries = resolve_recording_entries(entries)
+def _iter_arm_groups(
+    robot_snapshot: dict[str, Any], enabled_entries: set[str]
+):
+    """Yield (feature_key, values, axis_names) for each arm's state and action.
+
+    Robots are grouped per arm by side (left_arm/right_arm) rather than by
+    serial number, so no hardware identifiers leak into the dataset.
+    """
     robots = robot_snapshot.get("robots") if isinstance(robot_snapshot, dict) else None
     if not isinstance(robots, dict):
-        return [], []
-
-    observation_values: list[str] = []
-    action_values: list[str] = []
-
-    for robot_name, robot_payload in robots.items():
-        if not isinstance(robot_payload, dict):
+        return
+    for index, payload in enumerate(robots.values()):
+        if not isinstance(payload, dict):
             continue
+        side = arm_side_label(index)
+        state_values, state_names = _collect_arm_group(
+            payload.get("states"), _STATE_METRICS, enabled_entries
+        )
+        if state_values:
+            yield f"observation.state.{side}", state_values, state_names
+        action_values, action_names = _collect_arm_group(
+            payload.get("actions"), _ACTION_METRICS, enabled_entries
+        )
+        if action_values:
+            yield f"action.{side}", action_values, action_names
 
-        for entry, (parent_key, source_key) in _OBSERVATION_ENTRY_SPECS.items():
-            if entry not in resolved_entries:
-                continue
-            section = robot_payload.get(parent_key)
-            values = section.get(source_key) if isinstance(section, dict) else None
-            metric = entry.rsplit(".", 1)[-1]
-            observation_values.extend(
-                _flatten_numeric_labels(f"{robot_name}.state.{metric}", values)
-            )
 
-        for entry, (parent_key, source_key) in _ACTION_ENTRY_SPECS.items():
-            if entry not in resolved_entries:
-                continue
-            section = robot_payload.get(parent_key)
-            values = section.get(source_key) if isinstance(section, dict) else None
-            metric = entry.rsplit(".", 1)[-1]
-            action_values.extend(
-                _flatten_numeric_labels(f"{robot_name}.command.{metric}", values)
-            )
-
-    return observation_values, action_values
+def extract_recording_frame_values(
+    robot_snapshot: dict[str, Any], entries: list[str] | None = None
+) -> dict[str, list[float]]:
+    """Per-frame grouped vectors keyed by arm feature (state and action)."""
+    resolved_entries = set(resolve_recording_entries(entries))
+    return {
+        key: values
+        for key, values, _ in _iter_arm_groups(robot_snapshot, resolved_entries)
+    }
 
 
 def build_features_from_sample(
@@ -147,11 +212,8 @@ def build_features_from_sample(
     images: dict[str, np.ndarray],
     entries: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
-    resolved_entries = resolve_recording_entries(entries)
+    resolved_entries = set(resolve_recording_entries(entries))
     selected_images = extract_recording_images(images, resolved_entries)
-    observation_values, action_values = extract_recording_feature_values(
-        robot_snapshot, resolved_entries
-    )
 
     features: dict[str, dict[str, Any]] = {}
 
@@ -169,16 +231,21 @@ def build_features_from_sample(
             "shape": [height, width, channels],
         }
 
-    # LeRobot's add_frame validator compares the feature shape directly against
-    # the numpy value's `.shape`, which is always a tuple. A list shape ([1])
-    # never equals the tuple shape ((1,)), so every add_frame would raise and the
-    # capture loop would silently record zero frames. Use a tuple to match.
-    for key in observation_values:
-        features[key] = {"dtype": "float32", "shape": (1,)}
-    for key in action_values:
-        features[key] = {"dtype": "float32", "shape": (1,)}
+    # Each arm's state/action is one grouped vector feature (e.g.
+    # observation.state.left_arm with shape (19,)), with per-axis `names`. The
+    # shape is a tuple so it matches the numpy value's `.shape` in LeRobot's
+    # add_frame validator (a list shape never compares equal to a tuple).
+    state_keys: list[str] = []
+    action_keys: list[str] = []
+    for key, values, axis_names in _iter_arm_groups(robot_snapshot, resolved_entries):
+        features[key] = {
+            "dtype": "float32",
+            "shape": (len(values),),
+            "names": axis_names,
+        }
+        (action_keys if key.startswith("action.") else state_keys).append(key)
 
-    return features, observation_values, action_values
+    return features, state_keys, action_keys
 
 
 @dataclass(slots=True)

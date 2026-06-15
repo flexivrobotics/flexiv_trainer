@@ -17,8 +17,9 @@
 from .lerobot_io import (
     DEFAULT_RECORDING_ENTRY_KEYS,
     EpisodeManifest,
+    arm_side_label,
     build_features_from_sample,
-    extract_recording_feature_values,
+    extract_recording_frame_values,
     extract_recording_images,
     resolve_recording_entries,
     resolve_recording_image_names,
@@ -27,8 +28,9 @@ from .lerobot_io import (
 __all__ = [
     "DEFAULT_RECORDING_ENTRY_KEYS",
     "EpisodeManifest",
+    "arm_side_label",
     "build_features_from_sample",
-    "extract_recording_feature_values",
+    "extract_recording_frame_values",
     "extract_recording_images",
     "resolve_recording_entries",
     "resolve_recording_image_names",

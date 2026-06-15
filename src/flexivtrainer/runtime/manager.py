@@ -542,6 +542,41 @@ class RuntimeManager:
         self._dataset_cache[key] = (mtime, dataset)
         return dataset
 
+    _META_KEYS = {
+        "index",
+        "episode_index",
+        "frame_index",
+        "task_index",
+        "timestamp",
+    }
+
+    def _numeric_channels(self, dataset: Any) -> list[tuple[str, str, int]]:
+        """Plottable scalar channels as (series_key, feature_key, element_index).
+
+        Grouped vector features (e.g. ``observation.state.left_arm`` with
+        per-axis ``names``) are expanded into one channel per element, keyed
+        ``"<feature_key>.<name>"``. Legacy per-scalar features pass through
+        unchanged so older datasets still plot.
+        """
+        channels: list[tuple[str, str, int]] = []
+        for key, feature in dataset.features.items():
+            if feature["dtype"] in {"image", "video"} or key in self._META_KEYS:
+                continue
+            shape = feature.get("shape") or (1,)
+            size = int(shape[0]) if len(shape) else 1
+            names = feature.get("names")
+            if size <= 1:
+                channels.append((key, key, 0))
+                continue
+            for i in range(size):
+                axis = (
+                    names[i]
+                    if isinstance(names, (list, tuple)) and i < len(names)
+                    else str(i)
+                )
+                channels.append((f"{key}.{axis}", key, i))
+        return channels
+
     def preview_dataset(self, dataset_path: Path) -> dict[str, Any]:
         dataset = self._load_dataset(dataset_path)
         dataset_path, repo_id = self._resolve_dataset_repo(dataset_path)
@@ -550,18 +585,7 @@ class RuntimeManager:
             for key, feature in dataset.features.items()
             if feature["dtype"] in {"image", "video"}
         ]
-        _META_KEYS = {
-            "index",
-            "episode_index",
-            "frame_index",
-            "task_index",
-            "timestamp",
-        }
-        numeric_keys = [
-            key
-            for key, feature in dataset.features.items()
-            if feature["dtype"] not in {"image", "video"} and key not in _META_KEYS
-        ]
+        numeric_keys = [series_key for series_key, _, _ in self._numeric_channels(dataset)]
         first_item = dataset.get_raw_item(0) if dataset.num_frames else {}
         return {
             "name": dataset_path.name,
@@ -582,26 +606,28 @@ class RuntimeManager:
         dataset = self._load_dataset(dataset_path)
         dataset_path = dataset_path.resolve()
 
-        # Identify numeric keys (excluding metadata)
-        _META_KEYS = {
-            "index",
-            "episode_index",
-            "frame_index",
-            "task_index",
-            "timestamp",
-        }
-        numeric_keys = [
-            key
-            for key, feat in dataset.features.items()
-            if feat["dtype"] not in {"image", "video"} and key not in _META_KEYS
-        ]
-
-        # Read all numeric data
         import numpy as np
         import torch
 
+        channels = self._numeric_channels(dataset)
+        numeric_keys = [series_key for series_key, _, _ in channels]
         series: dict[str, list[float | None]] = {key: [] for key in numeric_keys}
         timestamps: list[float] = []
+
+        def _element(val: Any, element_index: int) -> float | None:
+            if val is None:
+                return None
+            if isinstance(val, torch.Tensor):
+                flat = val.reshape(-1)
+                return flat[element_index].item() if element_index < flat.numel() else None
+            if isinstance(val, np.ndarray):
+                flat = val.reshape(-1)
+                return float(flat[element_index]) if element_index < flat.size else None
+            if isinstance(val, (list, tuple)):
+                return float(val[element_index]) if element_index < len(val) else None
+            if element_index == 0 and isinstance(val, (int, float, np.integer, np.floating)):
+                return float(val)
+            return None
 
         for idx in range(dataset.num_frames):
             item = dataset.get_raw_item(idx)
@@ -609,16 +635,8 @@ class RuntimeManager:
             if isinstance(ts, torch.Tensor):
                 ts = ts.item()
             timestamps.append(float(ts) if ts is not None else idx / dataset.fps)
-            for key in numeric_keys:
-                val = item.get(key)
-                if val is None:
-                    series[key].append(None)
-                elif isinstance(val, torch.Tensor):
-                    series[key].append(val.item())
-                elif isinstance(val, (int, float, np.integer, np.floating)):
-                    series[key].append(float(val))
-                else:
-                    series[key].append(None)
+            for series_key, feature_key, element_index in channels:
+                series[series_key].append(_element(item.get(feature_key), element_index))
 
         return {
             "path": str(dataset_path),

@@ -29,7 +29,10 @@ import numpy as np
 
 from flexivtrainer.config import AppSettings
 from flexivtrainer.data.lerobot_io import (
+    ACTION_ENTRY_KEYS,
+    STATE_ENTRY_KEYS,
     build_features_from_sample,
+    extract_recording_frame_values,
     extract_recording_images,
     resolve_recording_entries,
     resolve_recording_image_names,
@@ -99,9 +102,9 @@ class RecordingService:
 
         entries = resolve_recording_entries(recording_entries)
         includes_observation_values = any(
-            entry in _OBSERVATION_ENTRY_SPECS for entry in entries
+            entry in STATE_ENTRY_KEYS for entry in entries
         )
-        includes_action_values = any(entry in _ACTION_ENTRY_SPECS for entry in entries)
+        includes_action_values = any(entry in ACTION_ENTRY_KEYS for entry in entries)
         requires_robot_values = includes_observation_values or includes_action_values
         target_fps = fps or 30
         episode_name, staging_path = self._create_staging_path()
@@ -418,9 +421,9 @@ class RecordingService:
         entries = list(self._recording_entries or [])
         camera_names = resolve_recording_image_names(entries)
         includes_observation_values = any(
-            entry in _OBSERVATION_ENTRY_SPECS for entry in entries
+            entry in STATE_ENTRY_KEYS for entry in entries
         )
-        includes_action_values = any(entry in _ACTION_ENTRY_SPECS for entry in entries)
+        includes_action_values = any(entry in ACTION_ENTRY_KEYS for entry in entries)
         requires_robot_values = includes_observation_values or includes_action_values
         capture_timeout_ms = max(10, int(interval * 1_000))
 
@@ -461,13 +464,11 @@ class RecordingService:
                     frame[f"observation.images.{camera_name}"] = image
 
                 if requires_robot_values:
-                    obs_values, act_values = _extract_snapshot_values(
+                    arm_values = extract_recording_frame_values(
                         robot_snapshot, entries
                     )
-                    for key, value in obs_values.items():
-                        frame[key] = np.array([value], dtype=np.float32)
-                    for key, value in act_values.items():
-                        frame[key] = np.array([value], dtype=np.float32)
+                    for key, vector in arm_values.items():
+                        frame[key] = np.array(vector, dtype=np.float32)
 
                 frame["task"] = self._task
 
@@ -539,54 +540,3 @@ class _ProgressTee:
         if callable(isatty):
             return bool(isatty())
         return False
-
-
-_OBSERVATION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "observation.state.tcp_pose": ("states", "tcp_pose"),
-    "observation.state.tcp_twist": ("states", "tcp_vel"),
-    "observation.state.tcp_wrench": ("states", "ext_wrench_in_world"),
-}
-
-_ACTION_ENTRY_SPECS: dict[str, tuple[str, str]] = {
-    "action.tcp_pose": ("actions", "tcp_pose_d"),
-    "action.tcp_twist": ("actions", "tcp_vel_d"),
-    "action.tcp_wrench": ("actions", "ext_wrench_d"),
-}
-
-
-def _extract_snapshot_values(
-    robot_snapshot: dict[str, Any], entries: list[str]
-) -> tuple[dict[str, float], dict[str, float]]:
-    """Extract actual numeric values from a robot snapshot, keyed by feature label."""
-    robots = robot_snapshot.get("robots") if isinstance(robot_snapshot, dict) else None
-    if not isinstance(robots, dict):
-        return {}, {}
-
-    observation_values: dict[str, float] = {}
-    action_values: dict[str, float] = {}
-
-    for robot_name, robot_payload in robots.items():
-        if not isinstance(robot_payload, dict):
-            continue
-
-        for entry, (parent_key, source_key) in _OBSERVATION_ENTRY_SPECS.items():
-            if entry not in entries:
-                continue
-            section = robot_payload.get(parent_key)
-            values = section.get(source_key) if isinstance(section, dict) else None
-            if isinstance(values, (list, tuple)):
-                metric = entry.rsplit(".", 1)[-1]
-                for i, v in enumerate(values):
-                    observation_values[f"{robot_name}.state.{metric}.{i}"] = float(v)
-
-        for entry, (parent_key, source_key) in _ACTION_ENTRY_SPECS.items():
-            if entry not in entries:
-                continue
-            section = robot_payload.get(parent_key)
-            values = section.get(source_key) if isinstance(section, dict) else None
-            if isinstance(values, (list, tuple)):
-                metric = entry.rsplit(".", 1)[-1]
-                for i, v in enumerate(values):
-                    action_values[f"{robot_name}.command.{metric}.{i}"] = float(v)
-
-    return observation_values, action_values

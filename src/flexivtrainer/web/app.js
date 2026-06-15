@@ -328,52 +328,68 @@ const TELEMETRY_SERIES = {
     },
 };
 
-// Recordings store numeric signals as per-robot keys of the form
-// `<robot>.state.<metric>.<i>` (observed) and `<robot>.command.<metric>.<i>`
-// (commanded). Plot groups are derived from the dataset's numeric keys so the
-// layout adapts to single-arm, bimanual, or any robot naming, and to the
-// actual dimensionality of each metric (e.g. tcp_pose carries a quaternion).
+// Recordings group each arm's signals into vector features, expanded by the
+// backend into per-axis series keyed as
+// `observation.state.<side>.<metric>.<axis>` (observed) and
+// `action.<side>.<metric>.<axis>` (commanded), e.g.
+// `observation.state.left_arm.tcp_pose.x`. Plot groups are derived from these
+// keys so the layout adapts to whatever arms/axes a dataset actually contains.
 const DATASET_METRIC_META = {
-    tcp_pose: { title: "TCP Pose", labels: ["x", "y", "z", "qw", "qx", "qy", "qz"] },
-    tcp_twist: { title: "TCP Twist", labels: ["vx", "vy", "vz", "wx", "wy", "wz"] },
-    tcp_wrench: { title: "TCP Wrench", labels: ["fx", "fy", "fz", "mx", "my", "mz"] },
+    tcp_pose: { title: "TCP Pose" },
+    tcp_twist: { title: "TCP Twist" },
+    tcp_wrench: { title: "TCP Wrench" },
 };
 const DATASET_METRIC_ORDER = { tcp_pose: 0, tcp_twist: 1, tcp_wrench: 2 };
 const DATASET_STATE_COLORS = ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff", "#ffe08a"];
 const DATASET_ACTION_COLORS = ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db", "#dbc24d"];
 
+function _datasetSideTitle(side) {
+    if (side === "left_arm") return "Left";
+    if (side === "right_arm") return "Right";
+    return side.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function buildDatasetPlotGroups(numericKeys) {
+    // gid "side|metric" -> { side, metric, axes: Map<axis, {axis, stateKey, actionKey}> }
     const groups = new Map();
+    const sideOrder = [];
     (numericKeys || []).forEach((key) => {
-        const match = key.match(/^(.+)\.(state|command)\.([a-z_]+)\.(\d+)$/);
+        const match = key.match(/^(observation\.state|action)\.([a-z0-9_]+)\.(tcp_pose|tcp_twist|tcp_wrench)\.(.+)$/);
         if (!match) return;
-        const [, robot, , metric, indexStr] = match;
+        const [, section, side, metric, axis] = match;
         if (!(metric in DATASET_METRIC_META)) return;
-        const gid = `${robot}|${metric}`;
-        const dims = parseInt(indexStr, 10) + 1;
-        const existing = groups.get(gid);
-        if (existing) {
-            existing.dims = Math.max(existing.dims, dims);
-        } else {
-            groups.set(gid, { robot, metric, dims });
+        if (!sideOrder.includes(side)) sideOrder.push(side);
+        const gid = `${side}|${metric}`;
+        let group = groups.get(gid);
+        if (!group) {
+            group = { side, metric, axes: new Map() };
+            groups.set(gid, group);
         }
+        let entry = group.axes.get(axis);
+        if (!entry) {
+            entry = { axis, stateKey: null, actionKey: null };
+            group.axes.set(axis, entry);
+        }
+        if (section === "action") entry.actionKey = key;
+        else entry.stateKey = key;
     });
 
     return [...groups.values()]
         .sort((a, b) =>
-            a.robot.localeCompare(b.robot) ||
+            sideOrder.indexOf(a.side) - sideOrder.indexOf(b.side) ||
             (DATASET_METRIC_ORDER[a.metric] ?? 99) - (DATASET_METRIC_ORDER[b.metric] ?? 99)
         )
-        .map(({ robot, metric, dims }) => {
+        .map(({ side, metric, axes }) => {
             const meta = DATASET_METRIC_META[metric];
-            const labels = Array.from({ length: dims }, (_, i) => meta.labels[i] || String(i));
+            const axisEntries = [...axes.values()];
+            const labels = axisEntries.map((e) => e.axis);
             return {
-                id: `${robot}.${metric}`,
-                title: `${robot} · ${meta.title}`,
+                id: `${side}.${metric}`,
+                title: `${_datasetSideTitle(side)} · ${meta.title}`,
                 units: "",
-                stateKey: `${robot}.state.${metric}`,
-                actionKey: `${robot}.command.${metric}`,
                 labels,
+                stateKeys: axisEntries.map((e) => e.stateKey),
+                actionKeys: axisEntries.map((e) => e.actionKey),
                 stateColors: labels.map((_, i) => DATASET_STATE_COLORS[i % DATASET_STATE_COLORS.length]),
                 actionColors: labels.map((_, i) => DATASET_ACTION_COLORS[i % DATASET_ACTION_COLORS.length]),
             };
@@ -400,14 +416,13 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
 
     // Collect all values for scale
     const allValues = [];
-    for (const prefix of [group.stateKey, group.actionKey]) {
-        for (let i = 0; i < group.labels.length; i++) {
-            const key = `${prefix}.${i}`;
-            const arr = seriesData[key];
+    for (const keys of [group.stateKeys, group.actionKeys]) {
+        keys.forEach((key) => {
+            const arr = key && seriesData[key];
             if (arr) {
                 arr.forEach((v) => { if (v !== null && Number.isFinite(v)) allValues.push(v); });
             }
-        }
+        });
     }
 
     let min, max;
@@ -448,10 +463,10 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
 
     // Paths
     const paths = [];
-    const drawSeries = (prefix, colors, dash) => {
-        for (let ci = 0; ci < group.labels.length; ci++) {
-            const key = `${prefix}.${ci}`;
-            const arr = seriesData[key];
+    const drawSeries = (keys, colors, dash) => {
+        for (let ci = 0; ci < keys.length; ci++) {
+            const key = keys[ci];
+            const arr = key && seriesData[key];
             if (!arr) continue;
             let d = "";
             let drawing = false;
@@ -469,36 +484,28 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
             }
         }
     };
-    drawSeries(group.stateKey, group.stateColors, false);
-    drawSeries(group.actionKey, group.actionColors, true);
+    drawSeries(group.stateKeys, group.stateColors, false);
+    drawSeries(group.actionKeys, group.actionColors, true);
 
     return `<svg class="trend-chart__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true"><g>${lines.join("")}</g>${paths.join("")}</svg>`;
 }
 
 function _buildDatasetPlotLegend(seriesData, group) {
     const items = [];
-    // State legends
-    for (let i = 0; i < group.labels.length; i++) {
-        const key = `${group.stateKey}.${i}`;
-        const hasData = !!(seriesData[key] && seriesData[key].some((v) => v !== null));
-        items.push(`
-            <span class="trend-chart__legend-item${hasData ? "" : " trend-chart__legend-item--dim"}">
-                <span class="trend-chart__swatch" style="--swatch:${group.stateColors[i]}"></span>
-                <strong>state.${group.labels[i]}</strong>
-            </span>
-        `);
-    }
-    // Command legends (dashed indicator)
-    for (let i = 0; i < group.labels.length; i++) {
-        const key = `${group.actionKey}.${i}`;
-        const hasData = !!(seriesData[key] && seriesData[key].some((v) => v !== null));
-        items.push(`
-            <span class="trend-chart__legend-item${hasData ? "" : " trend-chart__legend-item--dim"}">
-                <span class="trend-chart__swatch trend-chart__swatch--dashed" style="--swatch:${group.actionColors[i]}"></span>
-                <strong>command.${group.labels[i]}</strong>
-            </span>
-        `);
-    }
+    const pushItems = (keys, colors, prefix, dashed) => {
+        for (let i = 0; i < group.labels.length; i++) {
+            const key = keys[i];
+            const hasData = !!(key && seriesData[key] && seriesData[key].some((v) => v !== null));
+            items.push(`
+                <span class="trend-chart__legend-item${hasData ? "" : " trend-chart__legend-item--dim"}">
+                    <span class="trend-chart__swatch${dashed ? " trend-chart__swatch--dashed" : ""}" style="--swatch:${colors[i]}"></span>
+                    <strong>${prefix}.${group.labels[i]}</strong>
+                </span>
+            `);
+        }
+    };
+    pushItems(group.stateKeys, group.stateColors, "state", false);
+    pushItems(group.actionKeys, group.actionColors, "command", true);
     return items.join("");
 }
 
@@ -604,11 +611,8 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
         // Check if any data exists for this group
         let hasAnyData = false;
         if (seriesData) {
-            for (const prefix of [group.stateKey, group.actionKey]) {
-                for (let i = 0; i < group.labels.length; i++) {
-                    if (seriesData[`${prefix}.${i}`]) { hasAnyData = true; break; }
-                }
-                if (hasAnyData) break;
+            for (const keys of [group.stateKeys, group.actionKeys]) {
+                if (keys.some((key) => key && seriesData[key])) { hasAnyData = true; break; }
             }
         }
         const svg = seriesData ? _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) : "";
@@ -706,11 +710,8 @@ function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
         chartDiv.innerHTML = _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame);
         // Re-add "no data" overlay if needed
         let hasAnyData = false;
-        for (const prefix of [group.stateKey, group.actionKey]) {
-            for (let i = 0; i < group.labels.length; i++) {
-                if (seriesData[`${prefix}.${i}`]) { hasAnyData = true; break; }
-            }
-            if (hasAnyData) break;
+        for (const keys of [group.stateKeys, group.actionKeys]) {
+            if (keys.some((key) => key && seriesData[key])) { hasAnyData = true; break; }
         }
         if (!hasAnyData) {
             chartDiv.innerHTML += `<div class="trend-chart__empty">No data available</div>`;

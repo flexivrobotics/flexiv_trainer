@@ -16,31 +16,36 @@ import numpy as np
 
 from flexivtrainer.data.lerobot_io import (
     DEFAULT_RECORDING_ENTRY_KEYS,
+    arm_side_label,
     build_features_from_sample,
+    extract_recording_frame_values,
     extract_recording_images,
-    extract_recording_feature_values,
     resolve_recording_image_names,
     resolve_recording_entries,
 )
 
 
-def make_snapshot() -> dict:
+def _arm_payload(base: int) -> dict:
     return {
-        "robots": {
-            "REMOTE_A": {
-                "states": {
-                    "tcp_pose": [0, 1, 2, 3, 4, 5, 6],
-                    "tcp_vel": [10, 11, 12, 13, 14, 15],
-                    "ext_wrench_in_world": [20, 21, 22, 23, 24, 25],
-                },
-                "actions": {
-                    "tcp_pose_d": [30, 31, 32, 33, 34, 35, 36],
-                    "tcp_vel_d": [40, 41, 42, 43, 44, 45],
-                    "ext_wrench_d": [50, 51, 52, 53, 54, 55],
-                },
-            }
-        }
+        "states": {
+            "tcp_pose": list(range(base, base + 7)),
+            "tcp_vel": list(range(base + 10, base + 16)),
+            "ext_wrench_in_world": list(range(base + 20, base + 26)),
+        },
+        "actions": {
+            "tcp_pose_d": list(range(base + 30, base + 37)),
+            "tcp_vel_d": list(range(base + 40, base + 46)),
+            "ext_wrench_d": list(range(base + 50, base + 56)),
+        },
     }
+
+
+def make_snapshot() -> dict:
+    return {"robots": {"REMOTE_A": _arm_payload(0)}}
+
+
+def make_dual_snapshot() -> dict:
+    return {"robots": {"REMOTE_A": _arm_payload(0), "REMOTE_B": _arm_payload(100)}}
 
 
 def make_images() -> dict[str, np.ndarray]:
@@ -64,32 +69,35 @@ def test_resolve_recording_entries_rejects_unknown_values() -> None:
         raise AssertionError("Expected ValueError for unsupported recording entry")
 
 
-def test_extract_recording_feature_values_filters_to_requested_entries() -> None:
-    observation_values, action_values = extract_recording_feature_values(
+def test_arm_side_label_uses_left_right_then_generic() -> None:
+    assert arm_side_label(0) == "left_arm"
+    assert arm_side_label(1) == "right_arm"
+    assert arm_side_label(2) == "arm_3"
+
+
+def test_extract_recording_frame_values_groups_per_arm_without_serials() -> None:
+    values = extract_recording_frame_values(
         make_snapshot(),
-        [
-            "observation.state.tcp_pose",
-            "action.tcp_wrench",
-        ],
+        ["observation.state.tcp_pose", "action.tcp_wrench"],
     )
 
-    assert sorted(observation_values) == [
-        "REMOTE_A.state.tcp_pose.0",
-        "REMOTE_A.state.tcp_pose.1",
-        "REMOTE_A.state.tcp_pose.2",
-        "REMOTE_A.state.tcp_pose.3",
-        "REMOTE_A.state.tcp_pose.4",
-        "REMOTE_A.state.tcp_pose.5",
-        "REMOTE_A.state.tcp_pose.6",
-    ]
-    assert sorted(action_values) == [
-        "REMOTE_A.command.tcp_wrench.0",
-        "REMOTE_A.command.tcp_wrench.1",
-        "REMOTE_A.command.tcp_wrench.2",
-        "REMOTE_A.command.tcp_wrench.3",
-        "REMOTE_A.command.tcp_wrench.4",
-        "REMOTE_A.command.tcp_wrench.5",
-    ]
+    # No serial number leaks into the keys; metrics are grouped per arm.
+    assert set(values) == {"observation.state.left_arm", "action.left_arm"}
+    assert values["observation.state.left_arm"] == [0, 1, 2, 3, 4, 5, 6]
+    assert values["action.left_arm"] == [50, 51, 52, 53, 54, 55]
+
+
+def test_extract_recording_frame_values_maps_two_arms_to_left_right() -> None:
+    values = extract_recording_frame_values(
+        make_dual_snapshot(), ["observation.state.tcp_pose"]
+    )
+
+    assert set(values) == {
+        "observation.state.left_arm",
+        "observation.state.right_arm",
+    }
+    assert values["observation.state.left_arm"] == [0, 1, 2, 3, 4, 5, 6]
+    assert values["observation.state.right_arm"] == [100, 101, 102, 103, 104, 105, 106]
 
 
 def test_resolve_recording_image_names_filters_selected_cameras() -> None:
@@ -115,25 +123,63 @@ def test_extract_recording_images_filters_to_requested_entries() -> None:
     assert sorted(images) == ["ego", "right_wrist"]
 
 
-def test_build_features_from_sample_only_includes_selected_images() -> None:
-    features, observation_values, action_values = build_features_from_sample(
+def test_build_features_from_sample_groups_arms_with_named_axes() -> None:
+    features, state_keys, action_keys = build_features_from_sample(
         make_snapshot(),
         make_images(),
         [
             "observation.images.ego",
+            "observation.state.tcp_pose",
             "action.tcp_wrench",
         ],
     )
 
     assert "observation.images.ego" in features
     assert "observation.images.left_wrist" not in features
-    assert "observation.images.right_wrist" not in features
-    assert observation_values == []
-    assert action_values == [
-        "REMOTE_A.command.tcp_wrench.0",
-        "REMOTE_A.command.tcp_wrench.1",
-        "REMOTE_A.command.tcp_wrench.2",
-        "REMOTE_A.command.tcp_wrench.3",
-        "REMOTE_A.command.tcp_wrench.4",
-        "REMOTE_A.command.tcp_wrench.5",
+
+    assert state_keys == ["observation.state.left_arm"]
+    assert action_keys == ["action.left_arm"]
+
+    state_feature = features["observation.state.left_arm"]
+    assert state_feature["dtype"] == "float32"
+    assert state_feature["shape"] == (7,)
+    assert state_feature["names"] == [
+        "tcp_pose.x",
+        "tcp_pose.y",
+        "tcp_pose.z",
+        "tcp_pose.q_w",
+        "tcp_pose.q_x",
+        "tcp_pose.q_y",
+        "tcp_pose.q_z",
     ]
+
+    action_feature = features["action.left_arm"]
+    assert action_feature["shape"] == (6,)
+    assert action_feature["names"] == [
+        "tcp_wrench.fx",
+        "tcp_wrench.fy",
+        "tcp_wrench.fz",
+        "tcp_wrench.mx",
+        "tcp_wrench.my",
+        "tcp_wrench.mz",
+    ]
+
+
+def test_build_features_from_sample_combines_state_metrics_into_one_vector() -> None:
+    features, state_keys, _ = build_features_from_sample(
+        make_snapshot(),
+        {},
+        [
+            "observation.state.tcp_pose",
+            "observation.state.tcp_twist",
+            "observation.state.tcp_wrench",
+        ],
+    )
+
+    assert state_keys == ["observation.state.left_arm"]
+    feature = features["observation.state.left_arm"]
+    # 7 (pose) + 6 (twist) + 6 (wrench) concatenated into a single feature.
+    assert feature["shape"] == (19,)
+    assert feature["names"][:1] == ["tcp_pose.x"]
+    assert feature["names"][7] == "tcp_twist.vx"
+    assert feature["names"][-1] == "tcp_wrench.mz"
