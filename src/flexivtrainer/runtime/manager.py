@@ -88,6 +88,10 @@ class RuntimeManager:
         else:
             self.recording = RecordingService(settings, self.teleop, self.cameras)
         self.training = TrainingService(settings)
+        # Cache of constructed LeRobotDataset objects keyed by resolved path.
+        # Building one parses metadata and the parquet index, which is far too
+        # costly to repeat for every frame request during preview playback.
+        self._dataset_cache: dict[str, tuple[int, Any]] = {}
 
     def _load_robot_config(self) -> RobotSerialConfig:
         path = self.settings.storage.runtime_config_path
@@ -494,14 +498,8 @@ class RuntimeManager:
             roots, self.settings.storage.combined_root, output_name, on_progress
         )
 
-    def preview_dataset(self, dataset_path: Path) -> dict[str, Any]:
-        try:
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        except ImportError as exc:
-            raise RuntimeError(
-                _optional_dependency_error("Dataset preview", exc)
-            ) from exc
-
+    def _resolve_dataset_repo(self, dataset_path: Path) -> tuple[Path, str]:
+        """Validate the path against the storage root and resolve its repo id."""
         storage_root = self.settings.storage.root.expanduser().resolve()
         dataset_path = dataset_path.resolve()
         if not str(dataset_path).startswith(str(storage_root)):
@@ -514,12 +512,39 @@ class RuntimeManager:
 
         repo_id = f"local/{dataset_path.name}"
         if manifest_path.exists():
-            import json
-
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             repo_id = manifest.get("repo_id", repo_id)
+        return dataset_path, repo_id
 
+    def _load_dataset(self, dataset_path: Path) -> Any:
+        """Return a cached LeRobotDataset for the given path.
+
+        The cache is invalidated when the dataset directory's mtime changes, so
+        a regenerated combined dataset under the same name is picked up.
+        """
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError as exc:
+            raise RuntimeError(
+                _optional_dependency_error("Dataset access", exc)
+            ) from exc
+
+        dataset_path, repo_id = self._resolve_dataset_repo(dataset_path)
+        key = str(dataset_path)
+        try:
+            mtime = dataset_path.stat().st_mtime_ns
+        except OSError:
+            mtime = 0
+        cached = self._dataset_cache.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
         dataset = LeRobotDataset(repo_id, root=dataset_path)
+        self._dataset_cache[key] = (mtime, dataset)
+        return dataset
+
+    def preview_dataset(self, dataset_path: Path) -> dict[str, Any]:
+        dataset = self._load_dataset(dataset_path)
+        dataset_path, repo_id = self._resolve_dataset_repo(dataset_path)
         camera_keys = [
             key
             for key, feature in dataset.features.items()
@@ -554,32 +579,8 @@ class RuntimeManager:
 
     def dataset_series(self, dataset_path: Path) -> dict[str, Any]:
         """Return all numeric time-series data from a dataset for plotting."""
-        try:
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        except ImportError as exc:
-            raise RuntimeError(
-                _optional_dependency_error("Dataset series", exc)
-            ) from exc
-
-        import json
-
-        storage_root = self.settings.storage.root.expanduser().resolve()
+        dataset = self._load_dataset(dataset_path)
         dataset_path = dataset_path.resolve()
-        if not str(dataset_path).startswith(str(storage_root)):
-            raise ValueError(
-                f"Access denied: path must be within storage root ({storage_root})"
-            )
-
-        manifest_path = dataset_path / "episode.json"
-        if not manifest_path.exists():
-            manifest_path = dataset_path / "combined.json"
-
-        repo_id = f"local/{dataset_path.name}"
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            repo_id = manifest.get("repo_id", repo_id)
-
-        dataset = LeRobotDataset(repo_id, root=dataset_path)
 
         # Identify numeric keys (excluding metadata)
         _META_KEYS = {
@@ -632,37 +633,13 @@ class RuntimeManager:
         self, dataset_path: Path, camera_key: str, frame_index: int
     ) -> bytes:
         """Return a single frame image as JPEG bytes."""
-        try:
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        except ImportError as exc:
-            raise RuntimeError(
-                _optional_dependency_error("Dataset frame image", exc)
-            ) from exc
-
         import io
-        import json
 
         import numpy as np
         import torch
         from PIL import Image
 
-        storage_root = self.settings.storage.root.expanduser().resolve()
-        dataset_path = dataset_path.resolve()
-        if not str(dataset_path).startswith(str(storage_root)):
-            raise ValueError(
-                f"Access denied: path must be within storage root ({storage_root})"
-            )
-
-        manifest_path = dataset_path / "episode.json"
-        if not manifest_path.exists():
-            manifest_path = dataset_path / "combined.json"
-
-        repo_id = f"local/{dataset_path.name}"
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            repo_id = manifest.get("repo_id", repo_id)
-
-        dataset = LeRobotDataset(repo_id, root=dataset_path)
+        dataset = self._load_dataset(dataset_path)
 
         if frame_index < 0 or frame_index >= dataset.num_frames:
             raise IndexError(
@@ -672,7 +649,10 @@ class RuntimeManager:
         if camera_key not in dataset.features:
             raise KeyError(f"Camera key '{camera_key}' not found in dataset")
 
-        item = dataset.get_raw_item(frame_index)
+        # Use __getitem__ rather than get_raw_item: the latter only returns the
+        # parquet (numeric) columns, while video frames are decoded lazily on
+        # item access. get_raw_item would yield no image for video features.
+        item = dataset[frame_index]
         image_data = item.get(camera_key)
         if image_data is None:
             raise KeyError(

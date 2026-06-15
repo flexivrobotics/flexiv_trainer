@@ -1713,6 +1713,14 @@ button:active {
     display: grid;
     grid-template-columns: minmax(200px, 240px) minmax(0, 3fr);
     gap: 1rem;
+    align-items: start;
+}
+
+/* Keep the Episodes sidebar sized to its own content. Without this the grid
+   stretches it to match the (much taller) preview column, leaving a large
+   empty panel below the episode list. */
+.training-layout > aside {
+    align-self: start;
 }
 
 .training-main {
@@ -1744,6 +1752,14 @@ button:active {
 
 #processing-content .episode-list {
     margin-top: 0.7rem;
+}
+
+/* In the narrow Episodes sidebar the toggle-all button must not wrap to two
+   lines ("Select / All"), which threw off the header's vertical alignment. */
+#processing-content .panel-header .secondary-button,
+#training-content .panel-header .secondary-button {
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 #processing-content .control-bar {

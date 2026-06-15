@@ -312,41 +312,65 @@ const TELEMETRY_SERIES = {
     },
 };
 
-const DATASET_PLOT_GROUPS = [
-    {
-        id: "tcp_pose",
-        title: "TCP Pose",
-        units: "",
-        stateKey: "observation.state.tcp_pose",
-        actionKey: "action.tcp_pose",
-        labels: ["x", "y", "z", "rx", "ry", "rz"],
-        stateColors: ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff"],
-        actionColors: ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db"],
-    },
-    {
-        id: "tcp_twist",
-        title: "TCP Twist",
-        units: "",
-        stateKey: "observation.state.tcp_twist",
-        actionKey: "action.tcp_twist",
-        labels: ["vx", "vy", "vz", "wx", "wy", "wz"],
-        stateColors: ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff"],
-        actionColors: ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db"],
-    },
-    {
-        id: "tcp_wrench",
-        title: "TCP Wrench",
-        units: "",
-        stateKey: "observation.state.tcp_wrench",
-        actionKey: "action.tcp_wrench",
-        labels: ["fx", "fy", "fz", "mx", "my", "mz"],
-        stateColors: ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff"],
-        actionColors: ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db"],
-    },
-];
+// Recordings store numeric signals as per-robot keys of the form
+// `<robot>.state.<metric>.<i>` (observed) and `<robot>.command.<metric>.<i>`
+// (commanded). Plot groups are derived from the dataset's numeric keys so the
+// layout adapts to single-arm, bimanual, or any robot naming, and to the
+// actual dimensionality of each metric (e.g. tcp_pose carries a quaternion).
+const DATASET_METRIC_META = {
+    tcp_pose: { title: "TCP Pose", labels: ["x", "y", "z", "qw", "qx", "qy", "qz"] },
+    tcp_twist: { title: "TCP Twist", labels: ["vx", "vy", "vz", "wx", "wy", "wz"] },
+    tcp_wrench: { title: "TCP Wrench", labels: ["fx", "fy", "fz", "mx", "my", "mz"] },
+};
+const DATASET_METRIC_ORDER = { tcp_pose: 0, tcp_twist: 1, tcp_wrench: 2 };
+const DATASET_STATE_COLORS = ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff", "#ffe08a"];
+const DATASET_ACTION_COLORS = ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db", "#dbc24d"];
 
-let _previewAnimFrame = null;
-let _combinedAnimFrame = null;
+function buildDatasetPlotGroups(numericKeys) {
+    const groups = new Map();
+    (numericKeys || []).forEach((key) => {
+        const match = key.match(/^(.+)\.(state|command)\.([a-z_]+)\.(\d+)$/);
+        if (!match) return;
+        const [, robot, , metric, indexStr] = match;
+        if (!(metric in DATASET_METRIC_META)) return;
+        const gid = `${robot}|${metric}`;
+        const dims = parseInt(indexStr, 10) + 1;
+        const existing = groups.get(gid);
+        if (existing) {
+            existing.dims = Math.max(existing.dims, dims);
+        } else {
+            groups.set(gid, { robot, metric, dims });
+        }
+    });
+
+    return [...groups.values()]
+        .sort((a, b) =>
+            a.robot.localeCompare(b.robot) ||
+            (DATASET_METRIC_ORDER[a.metric] ?? 99) - (DATASET_METRIC_ORDER[b.metric] ?? 99)
+        )
+        .map(({ robot, metric, dims }) => {
+            const meta = DATASET_METRIC_META[metric];
+            const labels = Array.from({ length: dims }, (_, i) => meta.labels[i] || String(i));
+            return {
+                id: `${robot}.${metric}`,
+                title: `${robot} · ${meta.title}`,
+                units: "",
+                stateKey: `${robot}.state.${metric}`,
+                actionKey: `${robot}.command.${metric}`,
+                labels,
+                stateColors: labels.map((_, i) => DATASET_STATE_COLORS[i % DATASET_STATE_COLORS.length]),
+                actionColors: labels.map((_, i) => DATASET_ACTION_COLORS[i % DATASET_ACTION_COLORS.length]),
+            };
+        });
+}
+
+// Pending pacing-timer handle per playback context (keyed by its playingKey:
+// "previewPlaying", "combinedPlaying", "mergedDatasetPlaying").
+const _datasetPlaybackTimers = {};
+// Monotonic generation per playback context. Bumped whenever playback is
+// (re)started or stopped, so a loop awaiting an image load can detect that it
+// has been superseded (e.g. by a re-render) and exit instead of racing.
+const _datasetPlaybackGen = {};
 
 function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
     const width = 960;
@@ -448,14 +472,14 @@ function _buildDatasetPlotLegend(seriesData, group) {
             </span>
         `);
     }
-    // Action legends (dashed indicator)
+    // Command legends (dashed indicator)
     for (let i = 0; i < group.labels.length; i++) {
         const key = `${group.actionKey}.${i}`;
         const hasData = !!(seriesData[key] && seriesData[key].some((v) => v !== null));
         items.push(`
             <span class="trend-chart__legend-item${hasData ? "" : " trend-chart__legend-item--dim"}">
                 <span class="trend-chart__swatch trend-chart__swatch--dashed" style="--swatch:${group.actionColors[i]}"></span>
-                <strong>action.${group.labels[i]}</strong>
+                <strong>command.${group.labels[i]}</strong>
             </span>
         `);
     }
@@ -561,7 +585,8 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     `;
 
     // Plots
-    const plotsHtml = DATASET_PLOT_GROUPS.map((group) => {
+    const plotGroups = buildDatasetPlotGroups(preview.numeric_keys);
+    const plotsHtml = plotGroups.map((group) => {
         // Check if any data exists for this group
         let hasAnyData = false;
         if (seriesData) {
@@ -622,16 +647,34 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     }
 }
 
-function _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey) {
+// Point every camera <img> at the given frame and resolve once they have all
+// finished loading (or errored). Returning a promise lets playback wait for the
+// server to actually deliver each frame instead of firing requests on a blind
+// timer — the latter aborts each in-flight request as the next src is set, so
+// no frame ever finishes (playback appears frozen) while the server keeps
+// decoding the abandoned requests (which pile up and flood the shutdown log).
+function _loadDatasetFrameImages(container, preview, frameIndex) {
+    const datasetPath = preview.path;
+    const imgs = [...container.querySelectorAll(".dataset-frame-img")];
+    return Promise.all(
+        imgs.map(
+            (img) =>
+                new Promise((resolve) => {
+                    const key = img.dataset.cameraKey;
+                    img.onload = img.onerror = () => {
+                        img.onload = img.onerror = null;
+                        resolve();
+                    };
+                    img.alt = `${key} frame ${frameIndex}`;
+                    img.src = `/datasets/frame-image?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(key)}&index=${frameIndex}`;
+                })
+        )
+    );
+}
+
+function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
     const currentFrame = state[frameKey];
     const numFrames = preview.num_frames || 0;
-    const datasetPath = preview.path;
-
-    // Update images
-    container.querySelectorAll(".dataset-frame-img").forEach((img) => {
-        const key = img.dataset.cameraKey;
-        img.src = `/datasets/frame-image?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(key)}&index=${currentFrame}`;
-    });
 
     // Update slider and counter
     const slider = container.querySelector(".dataset-playback__slider");
@@ -640,8 +683,9 @@ function _updateDatasetFrames(container, preview, seriesData, frameKey, playingK
     if (counter) counter.textContent = `${currentFrame + 1} / ${numFrames}`;
 
     // Update playheads in SVGs
+    const plotGroups = buildDatasetPlotGroups(preview.numeric_keys);
     container.querySelectorAll(".dataset-plot-card").forEach((card, gi) => {
-        const group = DATASET_PLOT_GROUPS[gi];
+        const group = plotGroups[gi];
         if (!group || !seriesData) return;
         const chartDiv = card.querySelector(".trend-chart");
         if (!chartDiv) return;
@@ -660,42 +704,50 @@ function _updateDatasetFrames(container, preview, seriesData, frameKey, playingK
     });
 }
 
+// Used for manual scrubbing (slider): update meta immediately and request the
+// frame images without waiting (a single jump, so no pile-up risk).
+function _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey) {
+    _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+    _loadDatasetFrameImages(container, preview, state[frameKey]);
+}
+
 function _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey) {
-    const animKey = playingKey === "previewPlaying" ? "_previewAnimFrame" : "_combinedAnimFrame";
     _stopDatasetPlayback(playingKey);
     const fps = preview.fps || 30;
     const numFrames = preview.num_frames || 0;
+    if (numFrames <= 0) return;
     const interval = 1000 / fps;
-    let lastTime = 0;
+    const gen = _datasetPlaybackGen[playingKey];
+    const live = () => state[playingKey] && _datasetPlaybackGen[playingKey] === gen;
 
-    function tick(timestamp) {
-        if (!state[playingKey]) return;
-        if (timestamp - lastTime >= interval) {
-            lastTime = timestamp;
+    // Load-gated loop: advance, render meta, wait for the frame's images to
+    // arrive, then pace to the target fps. Only one frame's requests are ever
+    // in flight, so playback can't outrun the decoder.
+    async function loop() {
+        while (live()) {
+            const start = performance.now();
             state[frameKey] = (state[frameKey] + 1) % numFrames;
-            _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey);
-        }
-        if (playingKey === "previewPlaying") {
-            _previewAnimFrame = requestAnimationFrame(tick);
-        } else {
-            _combinedAnimFrame = requestAnimationFrame(tick);
+            _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+            await _loadDatasetFrameImages(container, preview, state[frameKey]);
+            if (!live()) return;
+            const elapsed = performance.now() - start;
+            if (elapsed < interval) {
+                await new Promise((resolve) => {
+                    _datasetPlaybackTimers[playingKey] = setTimeout(resolve, interval - elapsed);
+                });
+            }
         }
     }
-
-    if (playingKey === "previewPlaying") {
-        _previewAnimFrame = requestAnimationFrame(tick);
-    } else {
-        _combinedAnimFrame = requestAnimationFrame(tick);
-    }
+    loop();
 }
 
 function _stopDatasetPlayback(playingKey) {
-    if (playingKey === "previewPlaying" && _previewAnimFrame) {
-        cancelAnimationFrame(_previewAnimFrame);
-        _previewAnimFrame = null;
-    } else if (playingKey === "combinedPlaying" && _combinedAnimFrame) {
-        cancelAnimationFrame(_combinedAnimFrame);
-        _combinedAnimFrame = null;
+    // Bump the generation so any loop currently awaiting an image load exits.
+    _datasetPlaybackGen[playingKey] = (_datasetPlaybackGen[playingKey] || 0) + 1;
+    const timer = _datasetPlaybackTimers[playingKey];
+    if (timer) {
+        clearTimeout(timer);
+        _datasetPlaybackTimers[playingKey] = null;
     }
 }
 
@@ -1677,12 +1729,25 @@ function resolveFpsTone(fps, okMin) {
     return fps < okMin ? "warning" : "ok";
 }
 
+// Telemetry polls at 10 Hz, but a number that reflows 10×/second is unreadable.
+// Refresh the FPS text at most this often so the eye can actually catch it.
+const FPS_BADGE_REFRESH_MS = 1000;
+const fpsBadgeRenderState = new WeakMap();
+
 function setFpsBadge(element, fps, okMin) {
     if (!element) {
         return;
     }
     const safeFps = Number.isFinite(fps) && fps > 0 ? fps : 0;
     const tone = resolveFpsTone(safeFps, okMin);
+    const now = Date.now();
+    const last = fpsBadgeRenderState.get(element);
+    // Throttle the number itself, but repaint immediately when the tone changes
+    // (e.g. camera goes offline/warning) so status stays responsive.
+    if (last && last.tone === tone && now - last.renderedAt < FPS_BADGE_REFRESH_MS) {
+        return;
+    }
+    fpsBadgeRenderState.set(element, { tone, renderedAt: now });
     element.className = `feed__fps feed__fps--${tone}`;
     element.innerHTML = `
         <span class="feed__fps-dot" aria-hidden="true"></span>

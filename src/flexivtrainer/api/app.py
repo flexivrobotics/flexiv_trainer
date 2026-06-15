@@ -127,5 +127,8 @@ def run() -> None:
         port=settings.port,
         log_level="warning",
         access_log=False,
-        timeout_graceful_shutdown=1,
+        # Give in-flight requests (e.g. a frame decode) a moment to finish on
+        # Ctrl+C so they aren't force-cancelled into a wall of CancelledError
+        # tracebacks. Playback is load-gated, so only a couple are ever active.
+        timeout_graceful_shutdown=5,
     )
