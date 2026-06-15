@@ -2214,7 +2214,7 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
         return;
     }
 
-    const title = `${side.toUpperCase()} WRENCH`;
+    const title = `${side.toUpperCase()} CARTESIAN WRENCH`;
     if (!telemetry.force) {
         setMarkupIfChanged(
             panel,
@@ -2373,7 +2373,7 @@ function renderTrendGraph(side, kind, history, currentVector) {
     }
 
     const meta = TELEMETRY_SERIES[kind];
-    const title = `${side.toUpperCase()} ${kind === "force" ? "FORCE" : "MOMENT"}`;
+    const title = `${side.toUpperCase()} CARTESIAN ${kind === "force" ? "FORCE" : "MOMENT"}`;
     const hasLiveData = Array.isArray(currentVector);
     const scale = hasLiveData
         ? computeTelemetryScale(history, kind)
