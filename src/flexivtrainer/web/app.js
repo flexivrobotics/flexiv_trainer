@@ -209,6 +209,22 @@ const CHECK_ICON_SVG = `
 const STOP_SQUARE_ICON_SVG = `
     <span class="recording-status__stop-square" aria-hidden="true"></span>
 `;
+// Crisp, centered play/pause glyphs for the dataset playback button. Unicode
+// "▶"/"⏸" render as off-center colored emoji on some platforms.
+// Inline width/height/flex via style (not presentation attributes): SVGs sized
+// only by attributes collapse to ~0 inside a flex container in Chrome.
+const DATASET_ICON_STYLE = "width:22px;height:22px;flex:0 0 auto;display:block";
+const DATASET_PLAY_ICON = `
+    <svg class="dataset-playback__icon" style="${DATASET_ICON_STYLE}" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 5 20 12 7 19Z" fill="currentColor"></path>
+    </svg>
+`;
+const DATASET_PAUSE_ICON = `
+    <svg class="dataset-playback__icon" style="${DATASET_ICON_STYLE}" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect>
+        <rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect>
+    </svg>
+`;
 const TELEOP_START_MARKUP = `
     <span class="button-content">
         <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
@@ -576,9 +592,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     // Playback controls
     const playbackHtml = `
         <div class="dataset-playback">
-            <button class="dataset-playback__btn" data-action="${isPlaying ? "pause" : "play"}" type="button" aria-label="${isPlaying ? "Pause" : "Play"}">
-                ${isPlaying ? "⏸" : "▶"}
-            </button>
+            <button class="dataset-playback__btn" data-action="${isPlaying ? "pause" : "play"}" type="button" aria-label="${isPlaying ? "Pause" : "Play"}" style="display:inline-flex;align-items:center;justify-content:center">${isPlaying ? DATASET_PAUSE_ICON : DATASET_PLAY_ICON}</button>
             <input type="range" class="dataset-playback__slider" min="0" max="${Math.max(numFrames - 1, 0)}" value="${currentFrame}" />
             <span class="dataset-playback__counter">${currentFrame + 1} / ${numFrames}</span>
         </div>
@@ -635,7 +649,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
                 _stopDatasetPlayback(playingKey);
             }
             // Update button
-            playBtn.textContent = state[playingKey] ? "⏸" : "▶";
+            playBtn.innerHTML = state[playingKey] ? DATASET_PAUSE_ICON : DATASET_PLAY_ICON;
             playBtn.dataset.action = state[playingKey] ? "pause" : "play";
             playBtn.ariaLabel = state[playingKey] ? "Pause" : "Play";
         };
@@ -647,14 +661,14 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     }
 }
 
+function _frameImageUrl(preview, cameraKey, frameIndex) {
+    return `/datasets/frame-image?path=${encodeURIComponent(preview.path)}&key=${encodeURIComponent(cameraKey)}&index=${frameIndex}`;
+}
+
 // Point every camera <img> at the given frame and resolve once they have all
-// finished loading (or errored). Returning a promise lets playback wait for the
-// server to actually deliver each frame instead of firing requests on a blind
-// timer — the latter aborts each in-flight request as the next src is set, so
-// no frame ever finishes (playback appears frozen) while the server keeps
-// decoding the abandoned requests (which pile up and flood the shutdown log).
+// finished loading (or errored). Used for manual scrubbing; playback prefetches
+// instead (see _startDatasetPlayback).
 function _loadDatasetFrameImages(container, preview, frameIndex) {
-    const datasetPath = preview.path;
     const imgs = [...container.querySelectorAll(".dataset-frame-img")];
     return Promise.all(
         imgs.map(
@@ -666,7 +680,7 @@ function _loadDatasetFrameImages(container, preview, frameIndex) {
                         resolve();
                     };
                     img.alt = `${key} frame ${frameIndex}`;
-                    img.src = `/datasets/frame-image?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(key)}&index=${frameIndex}`;
+                    img.src = _frameImageUrl(preview, key, frameIndex);
                 })
         )
     );
@@ -711,25 +725,68 @@ function _updateDatasetFrames(container, preview, seriesData, frameKey, playingK
     _loadDatasetFrameImages(container, preview, state[frameKey]);
 }
 
+// How many frames ahead of the playhead to prefetch. Decoding a frame
+// server-side (~tens of ms per camera) is far slower than the 33 ms target
+// frame budget, so a single in-flight frame caps playback at the serial decode
+// rate (~7 fps). Prefetching a window keeps several decodes running in parallel
+// (the browser caps concurrent connections, so this can't flood the server) and
+// lets display tick at the target fps, pulling each frame from cache.
+const DATASET_PREFETCH_AHEAD = 16;
+
 function _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey) {
     _stopDatasetPlayback(playingKey);
     const fps = preview.fps || 30;
     const numFrames = preview.num_frames || 0;
     if (numFrames <= 0) return;
     const interval = 1000 / fps;
+    const cameraKeys = preview.camera_keys || [];
     const gen = _datasetPlaybackGen[playingKey];
     const live = () => state[playingKey] && _datasetPlaybackGen[playingKey] === gen;
 
-    // Load-gated loop: advance, render meta, wait for the frame's images to
-    // arrive, then pace to the target fps. Only one frame's requests are ever
-    // in flight, so playback can't outrun the decoder.
+    // index -> Promise that resolves once that frame's images are cached.
+    const buffer = new Map();
+    const warm = (index) => {
+        if (buffer.has(index)) return buffer.get(index);
+        const ready = Promise.all(
+            cameraKeys.map(
+                (key) =>
+                    new Promise((resolve) => {
+                        const img = new Image();
+                        img.onload = img.onerror = () => resolve();
+                        img.src = _frameImageUrl(preview, key, index);
+                    })
+            )
+        );
+        buffer.set(index, ready);
+        return ready;
+    };
+    const fillWindow = (from) => {
+        const keep = new Set();
+        for (let k = -1; k < DATASET_PREFETCH_AHEAD; k++) {
+            const idx = ((from + k) % numFrames + numFrames) % numFrames;
+            keep.add(idx);
+            if (k >= 0) warm(idx);
+        }
+        // Drop frames outside the window so prefetched images can be released.
+        for (const idx of [...buffer.keys()]) {
+            if (!keep.has(idx)) buffer.delete(idx);
+        }
+    };
+
     async function loop() {
+        fillWindow(state[frameKey]); // prime the buffer before the first frame
         while (live()) {
             const start = performance.now();
-            state[frameKey] = (state[frameKey] + 1) % numFrames;
-            _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
-            await _loadDatasetFrameImages(container, preview, state[frameKey]);
+            const frame = (state[frameKey] + 1) % numFrames;
+            state[frameKey] = frame;
+            fillWindow(frame);
+            await warm(frame); // usually already resolved from a prior window
             if (!live()) return;
+            _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+            container.querySelectorAll(".dataset-frame-img").forEach((img) => {
+                img.alt = `${img.dataset.cameraKey} frame ${frame}`;
+                img.src = _frameImageUrl(preview, img.dataset.cameraKey, frame);
+            });
             const elapsed = performance.now() - start;
             if (elapsed < interval) {
                 await new Promise((resolve) => {
@@ -2746,7 +2803,6 @@ function renderProcessing() {
             row.innerHTML = `
         <div class="episode-row__main">
           <input data-toggle-episode="${episode.path}" type="checkbox" ${state.selectedEpisodes.includes(episode.path) ? "checked" : ""} />
-          <strong>${index + 1}</strong>
           <span>${escapeHtml(episode.name)}</span>
         </div>
       `;

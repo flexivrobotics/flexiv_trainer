@@ -168,4 +168,11 @@ def frame_image(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (RuntimeError, IndexError, KeyError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return Response(content=data, media_type="image/jpeg")
+    # A frame's pixels never change for a given (path, key, index), so let the
+    # browser cache aggressively. Playback prefetches frames ahead and relies on
+    # this cache to display them without re-hitting the decoder.
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600, immutable"},
+    )

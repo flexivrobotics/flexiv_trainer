@@ -1762,6 +1762,25 @@ button:active {
     flex: 0 0 auto;
 }
 
+/* Keep even padding on both sides of the episode picker rows in the narrow
+   sidebar: shrink the (monospace) episode name so it doesn't crowd the right
+   edge, and let it ellipsize rather than overflow. */
+#processing-content .episode-row__main {
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+#processing-content .episode-row__main span {
+    font-size: 0.82rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#processing-content .episode-row__main input[type="checkbox"] {
+    flex: 0 0 auto;
+}
+
 #processing-content .control-bar {
     margin-top: 0.2rem;
 }
@@ -1796,7 +1815,24 @@ button:active {
 .dataset-feed-row {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 1rem;
+    gap: 0.3rem;
+}
+
+/* Maximize the video area in the dataset preview: tighter card padding, a
+   smaller header, and minimal spacing between the three feeds. */
+.dataset-feed-row .feed {
+    padding: 0.4rem;
+    gap: 0.3rem;
+    border-radius: 12px;
+}
+
+.dataset-feed-row .feed__header span {
+    font-size: 0.7rem;
+}
+
+.dataset-feed-row .feed__image,
+.dataset-feed-row .feed__placeholder {
+    border-radius: 8px;
 }
 
 .dataset-playback {
@@ -1825,6 +1861,13 @@ button:active {
 
 .dataset-playback__btn:hover {
     background: var(--accent-soft);
+}
+
+.dataset-playback__icon {
+    width: 1.35rem;
+    height: 1.35rem;
+    color: var(--ink);
+    display: block;
 }
 
 .dataset-playback__slider {
