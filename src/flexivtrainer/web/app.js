@@ -1043,6 +1043,10 @@ async function resetTeleopSystemService(serviceKey) {
     if (!serviceName || state.ui.serviceResetBusy[serviceKey]) {
         return;
     }
+    if (serviceKey === "teleop_service" && !allRobotSerialsConfigured()) {
+        showToast(ROBOT_SERIALS_REQUIRED_MESSAGE, true);
+        return;
+    }
 
     const label = state.teleopStatus?.services?.[serviceKey]?.label
         || state.summary?.services?.[serviceKey]?.label
@@ -1174,14 +1178,20 @@ function updateTeleopSystemCard(card, serviceKey, service = {}) {
     const canReset = serviceKey in SERVICE_RESET_TARGETS;
     const reconnectMessage = SERVICE_RESET_MESSAGES[serviceKey] || `Reconnect ${service.label || serviceKey}`;
     const label = service.label || serviceKey;
+    // Reconnecting the teleop service re-pairs the robots, so it needs all four
+    // serials just like the initial connect.
+    const serialsReady =
+        serviceKey === "teleop_service" ? allRobotSerialsConfigured() : true;
+    const resetDisabled = resetBusy || !serialsReady;
+    const resetTitle = serialsReady ? reconnectMessage : ROBOT_SERIALS_REQUIRED_MESSAGE;
     const resetButtonMarkup = canReset
-        ? `<button class="secondary-button icon-button teleop-system-card__reset ${resetBusy ? "icon-button--spinning" : ""}" type="button" aria-label="${reconnectMessage}" title="${reconnectMessage}" ${resetBusy ? "disabled" : ""}>
+        ? `<button class="secondary-button icon-button teleop-system-card__reset ${resetBusy ? "icon-button--spinning" : ""}" type="button" aria-label="${reconnectMessage}" title="${resetTitle}" ${resetDisabled ? "disabled" : ""}>
                 ${RESET_ICON_SVG}
             </button>`
         : "";
     // Key on everything that affects the markup so the button node (and its
     // click handler) survive across ticks whenever nothing visible changed.
-    const signature = `${tone}:${serviceState}:${label}:${canReset ? "reset" : "noreset"}:${resetBusy ? "busy" : "idle"}`;
+    const signature = `${tone}:${serviceState}:${label}:${canReset ? "reset" : "noreset"}:${resetBusy ? "busy" : "idle"}:${serialsReady ? "ready" : "blocked"}`;
     const rewritten = setMarkupIfChanged(
         card,
         signature,
@@ -1240,6 +1250,15 @@ function createServiceStatusCard(serviceKey, service) {
             button.textContent = definition.label;
             // While a connect is in progress, keep the sibling actions inert too.
             button.disabled = connecting;
+        }
+        // The teleop service can only connect once all four robot serials are set.
+        if (
+            definition.serviceName === "teleop" &&
+            definition.control === "connect" &&
+            !allRobotSerialsConfigured()
+        ) {
+            button.disabled = true;
+            button.title = ROBOT_SERIALS_REQUIRED_MESSAGE;
         }
         button.onclick = () => controlHomeService(definition.serviceName, definition.control);
         actions.appendChild(button);
@@ -1311,6 +1330,24 @@ function setComponentLoading(wrapperId, loading, label = "Initializing") {
     }
 }
 
+const ROBOT_SERIALS_REQUIRED_MESSAGE =
+    "Enter all four robot serial numbers (LEFT/RIGHT leader and follower) before connecting the teleop service.";
+
+// Teleoperation needs both leader and both follower serials. Require all four
+// before the teleop service can be connected or reconnected, so a half-typed
+// configuration can't start a pairing with a missing arm.
+function allRobotSerialsConfigured() {
+    const config = state.summary?.robot_config;
+    if (!config) return false;
+    const required = [
+        config.local_robot_serials?.[0],
+        config.local_robot_serials?.[1],
+        config.remote_robot_serials?.[0],
+        config.remote_robot_serials?.[1],
+    ];
+    return required.every((serial) => typeof serial === "string" && serial.trim() !== "");
+}
+
 function renderHomeRobotConfigInputs() {
     if (!state.summary) {
         return;
@@ -1337,6 +1374,9 @@ function renderHomeRobotConfigInputs() {
             const input = field.querySelector("input");
             input.oninput = () => {
                 state.summary.robot_config[key][index] = input.value;
+                // Refresh the service cards (not the inputs) so the teleop
+                // Connect button enables/disables live as serials are typed.
+                renderHomeStatus();
                 queueRobotConfigSave();
             };
             container.appendChild(field);
@@ -2560,6 +2600,12 @@ async function fetchAndRenderTeleopStatus() {
 }
 
 async function controlHomeService(serviceName, action, options = {}) {
+    if (serviceName === "teleop" && action === "connect" && !allRobotSerialsConfigured()) {
+        if (!options.silentToast) {
+            showToast(ROBOT_SERIALS_REQUIRED_MESSAGE, true);
+        }
+        return;
+    }
     const tracksBusy = action === "connect" && serviceName in state.ui.serviceConnectBusy;
     if (tracksBusy) {
         state.ui.serviceConnectBusy[serviceName] = true;
