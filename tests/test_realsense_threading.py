@@ -30,7 +30,7 @@ def _make_service(tmp_path, monkeypatch):
 
     class FakeColorFrame:
         def get_data(self):
-            return np.zeros((480, 848, 3), dtype=np.uint8)
+            return np.zeros((480, 640, 3), dtype=np.uint8)
 
         def get_timestamp(self):
             return time.time() * 1000

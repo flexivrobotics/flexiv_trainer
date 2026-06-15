@@ -146,7 +146,7 @@ class AppSettings(BaseSettings):
     teleop_robot_pairs: list[TeleopRobotPair] = Field(default_factory=list)
     cameras: list[CameraConfig] = Field(
         default_factory=lambda: [
-            CameraConfig(name="ego", fps=30, width=848, height=480),
+            CameraConfig(name="ego", fps=30, width=640, height=480),
             CameraConfig(name="left_wrist", fps=30, width=640, height=480),
             CameraConfig(name="right_wrist", fps=30, width=640, height=480),
         ]
