@@ -85,6 +85,10 @@ const state = {
         recordingStartBusy: false,
         recordingSaveBusy: false,
         recordingSaveProgress: 0,
+        // Smoothed realtime recording FPS, derived from the change in captured
+        // frames between status polls. Reset whenever a recording (re)starts.
+        recordingFps: 0,
+        recordingFpsSample: null,
         serviceResetBusy: {
             teleop_service: false,
             cameras: false,
@@ -1944,6 +1948,37 @@ function recordingStatusIconMarkup(kind) {
     `;
 }
 
+// Derive a smoothed realtime recording FPS from how many frames landed between
+// status polls. Cumulative frames/elapsed would lag behind the current rate, so
+// we track the delta since the previous poll and smooth it with an EMA. Returns
+// 0 until enough time has elapsed to take a stable first measurement.
+function updateRecordingFps(frames, seconds) {
+    const prev = state.ui.recordingFpsSample;
+    if (!prev || frames < prev.frames || seconds < prev.seconds) {
+        // First sample of a (re)started recording — seed without a rate yet.
+        state.ui.recordingFpsSample = { frames, seconds };
+        state.ui.recordingFps = 0;
+        return 0;
+    }
+    const deltaFrames = frames - prev.frames;
+    const deltaSeconds = seconds - prev.seconds;
+    if (deltaSeconds >= 0.25) {
+        const instant = deltaFrames / deltaSeconds;
+        const alpha = 0.4;
+        state.ui.recordingFps =
+            state.ui.recordingFps > 0
+                ? alpha * instant + (1 - alpha) * state.ui.recordingFps
+                : instant;
+        state.ui.recordingFpsSample = { frames, seconds };
+    }
+    return state.ui.recordingFps;
+}
+
+function resetRecordingFps() {
+    state.ui.recordingFpsSample = null;
+    state.ui.recordingFps = 0;
+}
+
 function buildRecordingStatusModel(teleopStatus) {
     const recording = teleopStatus?.recording || {};
     const active = !!recording.active;
@@ -1960,6 +1995,7 @@ function buildRecordingStatusModel(teleopStatus) {
         // a failing add_frame keeps the timer ticking while no frames land.
         const captureError =
             typeof recording.error === "string" ? recording.error.trim() : "";
+        const liveFps = updateRecordingFps(frames, seconds);
         return {
             kind: "recording",
             line1: formatElapsed(seconds),
@@ -1967,11 +2003,14 @@ function buildRecordingStatusModel(teleopStatus) {
                 captureError && frames === 0
                     ? `Capture error: ${captureError}`
                     : `${frames} frames captured`,
+            fps: liveFps > 0 ? liveFps : null,
             animated: false,
             canStart: false,
             canStop: true,
         };
     }
+
+    resetRecordingFps();
 
     if (awaitingSave) {
         return {
@@ -2027,17 +2066,26 @@ function renderRecordingStatusPanel(teleopStatus) {
     if (status.className !== nextClassName) {
         status.className = nextClassName;
     }
+    // Show the realtime capture rate right next to the timer while recording.
+    const fpsBadge =
+        model.fps != null
+            ? `<span class="recording-status__fps">${model.fps.toFixed(1)} FPS</span>`
+            : "";
+    const primaryLine = fpsBadge
+        ? `<span class="recording-status__primary"><span>${model.line1}</span>${fpsBadge}</span>`
+        : model.line1;
     const textMarkup = model.line2
         ? `
             <span class="recording-status__text recording-status__text--stacked">
-                <span class="recording-status__line">${model.line1}</span>
+                <span class="recording-status__line">${primaryLine}</span>
                 <span class="recording-status__line recording-status__line--secondary">${model.line2}</span>
             </span>
         `
-        : `<span class="recording-status__text">${model.line1}</span>`;
+        : `<span class="recording-status__text">${primaryLine}</span>`;
+    const fpsKey = model.fps != null ? model.fps.toFixed(1) : "";
     setMarkupIfChanged(
         status,
-        `${model.kind}:${model.line1}:${model.line2 || ""}:${model.animated ? "animated" : "static"}`,
+        `${model.kind}:${model.line1}:${fpsKey}:${model.line2 || ""}:${model.animated ? "animated" : "static"}`,
         `
             ${recordingStatusIconMarkup(model.kind)}
             ${textMarkup}

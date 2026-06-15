@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -42,6 +42,8 @@ class CameraRuntime:
     frame_count: int = 0
     last_frame_time: float | None = None
     fps: float = 0.0
+    capture_thread: Any | None = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
 
 
 class RealSenseService:
@@ -173,6 +175,19 @@ class RealSenseService:
         return [serial for serial in available if serial not in occupied]
 
     def _stop_runtime(self, runtime: CameraRuntime) -> None:
+        # Signal the acquisition thread to exit and let it drain its in-flight
+        # wait_for_frames() before stopping the pipeline it owns. Release the
+        # service lock while joining so the thread can grab it to store its
+        # final frame, otherwise stop_streams would deadlock against it.
+        runtime.stop_event.set()
+        thread = runtime.capture_thread
+        runtime.capture_thread = None
+        if thread is not None and thread.is_alive():
+            self._lock.release()
+            try:
+                thread.join(timeout=2.0)
+            finally:
+                self._lock.acquire()
         if runtime.pipeline is not None:
             try:
                 runtime.pipeline.stop()
@@ -234,6 +249,19 @@ class RealSenseService:
             except Exception:  # pragma: no cover - hardware specific
                 runtime.actual_serial = serial
             self._errors.pop(runtime.config.name, None)
+            # A single background thread owns the pipeline and continuously
+            # pulls frames into the cache. Consumers (live preview + recording)
+            # read the cached frame instead of polling the pipeline themselves,
+            # which previously made two readers contend for frames and made the
+            # measured FPS swing wildly whenever recording started.
+            runtime.stop_event = threading.Event()
+            runtime.capture_thread = threading.Thread(
+                target=self._acquire_loop,
+                args=(runtime,),
+                name=f"camera-acquire-{runtime.config.name}",
+                daemon=True,
+            )
+            runtime.capture_thread.start()
         except Exception as exc:  # pragma: no cover - hardware specific
             runtime.pipeline = None
             runtime.started = False
@@ -330,6 +358,45 @@ class RealSenseService:
             "errors": dict(self._errors),
         }
 
+    def _acquire_loop(self, runtime: CameraRuntime) -> None:
+        """Continuously pull frames for a single camera into the cache.
+
+        This is the only place the pipeline is read, so frame delivery and the
+        measured FPS reflect the camera's true production cadence regardless of
+        how many consumers (live preview, recording) are reading concurrently.
+        """
+        pipeline = runtime.pipeline
+        name = runtime.config.name
+        while not runtime.stop_event.is_set():
+            try:
+                raw_frames = pipeline.wait_for_frames(1_000)
+                if not raw_frames:
+                    continue
+                color_frame = raw_frames.get_color_frame()
+                if color_frame is None:
+                    continue
+
+                image = np.asanyarray(color_frame.get_data())
+                timestamp_ms = color_frame.get_timestamp()
+                now = time.monotonic()
+                with self._lock:
+                    if runtime.last_frame_time is not None:
+                        delta = max(now - runtime.last_frame_time, 1e-6)
+                        alpha = 0.3
+                        runtime.fps = alpha * (1.0 / delta) + (1 - alpha) * runtime.fps
+                    runtime.last_frame_time = now
+                    runtime.frame_count += 1
+                    self._last_frames[name] = {
+                        "image": image,
+                        "timestamp_ms": timestamp_ms,
+                        "fps": runtime.fps,
+                        "width": image.shape[1],
+                        "height": image.shape[0],
+                    }
+            except Exception as exc:  # pragma: no cover - hardware specific
+                self._errors[name] = describe_exception(exc)
+                runtime.stop_event.wait(timeout=0.05)
+
     def read_frames(
         self,
         block: bool = False,
@@ -339,47 +406,26 @@ class RealSenseService:
         if rs is None:
             raise RuntimeError("pyrealsense2 is not available")
 
-        frames: dict[str, dict[str, Any]] = {}
-        for name in self._resolve_camera_names(camera_names):
-            runtime = self._runtimes[name]
-            if runtime.pipeline is None:
-                continue
+        names = self._resolve_camera_names(camera_names)
 
-            try:
-                raw_frames = (
-                    runtime.pipeline.wait_for_frames(timeout_ms)
-                    if block
-                    else runtime.pipeline.poll_for_frames()
-                )
-                if not raw_frames:
-                    continue
-                color_frame = raw_frames.get_color_frame()
-                if color_frame is None:
-                    continue
-
-                image = np.asanyarray(color_frame.get_data())
-                now = time.monotonic()
-                with self._lock:
-                    if runtime.last_frame_time is not None:
-                        delta = max(now - runtime.last_frame_time, 1e-6)
-                        alpha = 0.3
-                        runtime.fps = alpha * (1.0 / delta) + (1 - alpha) * runtime.fps
-                    runtime.last_frame_time = now
-                    runtime.frame_count += 1
-
-                frames[name] = {
-                    "image": image,
-                    "timestamp_ms": color_frame.get_timestamp(),
-                    "fps": runtime.fps,
-                    "width": image.shape[1],
-                    "height": image.shape[0],
-                }
-            except Exception as exc:  # pragma: no cover - hardware specific
-                self._errors[name] = describe_exception(exc)
-
-        with self._lock:
-            self._last_frames.update(frames)
-        return frames
+        # The acquisition threads own the pipelines; consumers just read the
+        # latest cached frame. When blocking, wait briefly for the first frame
+        # to land instead of polling the pipeline directly (which would race the
+        # acquisition thread and reintroduce the FPS jitter this design avoids).
+        deadline = time.monotonic() + max(0, timeout_ms) / 1_000.0
+        while True:
+            frames: dict[str, dict[str, Any]] = {}
+            with self._lock:
+                for name in names:
+                    runtime = self._runtimes[name]
+                    if runtime.pipeline is None:
+                        continue
+                    cached = self._last_frames.get(name)
+                    if cached is not None:
+                        frames[name] = dict(cached)
+            if not block or frames or time.monotonic() >= deadline:
+                return frames
+            time.sleep(0.002)
 
     def capture_frame(
         self,

@@ -85,19 +85,25 @@ def _make_service(tmp_path, monkeypatch):
 
 
 def test_fps_uses_exponential_moving_average(tmp_path, monkeypatch) -> None:
-    """FPS should use EMA smoothing, not raw instantaneous delta."""
+    """FPS should use EMA smoothing, measured by the background acquisition thread."""
     service = _make_service(tmp_path, monkeypatch)
 
-    # Read multiple frames to build up FPS history
-    for _ in range(10):
-        service.read_frames(block=True, timeout_ms=100, camera_names=["ego"])
-
     runtime = service._runtimes["ego"]
+    # The acquisition thread populates FPS on its own cadence; wait for it to
+    # build up history rather than driving it from read_frames calls.
+    deadline = time.monotonic() + 2.0
+    while runtime.fps <= 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
     # FPS should be positive and reasonable (not jumping wildly)
     assert runtime.fps > 0
     # With 5ms sleep per frame, theoretical max is ~200fps
     # EMA should produce a stable value
     assert runtime.fps < 300
+
+    # Consumers read the latest cached frame without touching the pipeline.
+    frames = service.read_frames(block=True, timeout_ms=100, camera_names=["ego"])
+    assert "ego" in frames
 
 
 def test_concurrent_read_frames_does_not_crash(tmp_path, monkeypatch) -> None:

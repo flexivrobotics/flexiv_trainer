@@ -979,6 +979,26 @@ button:disabled {
     opacity: 0.9;
 }
 
+.recording-status__primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.recording-status__fps {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: rgba(47, 157, 100, 0.14);
+    color: #2f9d64;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
 .recording-status__dot {
     width: 0.58rem;
     height: 0.58rem;
