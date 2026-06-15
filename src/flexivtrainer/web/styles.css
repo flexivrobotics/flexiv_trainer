@@ -1725,6 +1725,7 @@ button:active {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: 400;
 }
 
 .browser-item__meta {
@@ -1788,11 +1789,16 @@ button:active {
 }
 
 /* In the narrow Episodes sidebar the toggle-all button must not wrap to two
-   lines ("Select / All"), which threw off the header's vertical alignment. */
+   lines ("Select / All"), which threw off the header's vertical alignment.
+   A slightly tighter horizontal padding and small right inset bring the
+   button's right edge in line with the episode cards below it. */
 #processing-content .panel-header .secondary-button,
 #training-content .panel-header .secondary-button {
     white-space: nowrap;
     flex: 0 0 auto;
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+    margin-right: 0.3rem;
 }
 
 /* Keep even padding on both sides of the episode picker rows in the narrow
@@ -1804,7 +1810,6 @@ button:active {
 }
 
 #processing-content .episode-row__main span {
-    font-size: 0.82rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
