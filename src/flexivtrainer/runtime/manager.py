@@ -538,7 +538,9 @@ class RuntimeManager:
         cached = self._dataset_cache.get(key)
         if cached is not None and cached[0] == mtime:
             return cached[1]
-        dataset = LeRobotDataset(repo_id, root=dataset_path)
+        # LeRobot marks torchcodec unsupported on linux/aarch64. Explicitly
+        # use the PyAV backend so frame preview decoding is stable here.
+        dataset = LeRobotDataset(repo_id, root=dataset_path, video_backend="pyav")
         self._dataset_cache[key] = (mtime, dataset)
         return dataset
 

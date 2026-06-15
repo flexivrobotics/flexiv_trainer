@@ -331,8 +331,8 @@ const DATASET_STATE_COLORS = ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8d
 const DATASET_ACTION_COLORS = ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db", "#dbc24d"];
 
 function _datasetSideTitle(side) {
-    if (side === "left_arm") return "Left";
-    if (side === "right_arm") return "Right";
+    if (side === "left_arm") return "Left Arm";
+    if (side === "right_arm") return "Right Arm";
     return side.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
