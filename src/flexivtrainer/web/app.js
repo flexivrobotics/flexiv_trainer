@@ -114,7 +114,6 @@ const state = {
 };
 
 const TELEMETRY_HISTORY_LIMIT = 90;
-const TELEMETRY_FPS_OK_MIN = 0.55;
 // How often the teleop view polls /teleop/status. This sets the telemetry
 // refresh rate (e.g. 100ms ≈ 10 FPS); refreshTeleopStatus() self-throttles via
 // a queue, so requests never pile up if the backend is briefly slower.
@@ -1691,17 +1690,6 @@ function setFpsBadge(element, fps, okMin) {
     `;
 }
 
-function buildFpsBadgeMarkup(fps, okMin) {
-    const safeFps = Number.isFinite(fps) && fps > 0 ? fps : 0;
-    const tone = resolveFpsTone(safeFps, okMin);
-    return `
-        <strong class="feed__fps feed__fps--${tone}">
-            <span class="feed__fps-dot" aria-hidden="true"></span>
-            <span>${safeFps.toFixed(1)} FPS</span>
-        </strong>
-    `;
-}
-
 function buildAwaitingDataMarkup() {
     return `
         <div class="telemetry-empty-state telemetry-empty-state--breathing">
@@ -1783,33 +1771,6 @@ function ensureCameraFeedRunning(cameraName, image) {
     const feed = { lastUrl: "", failed: false, stopped: false, retryTimer: null, image };
     state.cameraFeeds[cameraName] = feed;
     startCameraFeedPump(cameraName, image);
-}
-
-function computeTelemetryStreamFps(history, kind, currentVector) {
-    if (!Array.isArray(currentVector)) {
-        return 0;
-    }
-
-    const validSamples = history.filter((sample) => Array.isArray(sample[kind]));
-    if (validSamples.length < 2) {
-        return 0;
-    }
-
-    const recentSamples = validSamples.slice(-6);
-    const deltas = [];
-    for (let index = 1; index < recentSamples.length; index += 1) {
-        const delta = recentSamples[index].timestamp - recentSamples[index - 1].timestamp;
-        if (delta > 0) {
-            deltas.push(delta);
-        }
-    }
-
-    if (!deltas.length) {
-        return 0;
-    }
-
-    const averageDeltaMs = deltas.reduce((sum, value) => sum + value, 0) / deltas.length;
-    return averageDeltaMs > 0 ? 1000 / averageDeltaMs : 0;
 }
 
 function renderCameraFps(elementId, cameraName, camera) {
@@ -2254,10 +2215,6 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
     }
 
     const title = `${side.toUpperCase()} WRENCH`;
-    const fpsMarkup = buildFpsBadgeMarkup(
-        computeTelemetryStreamFps(history, "force", telemetry.force),
-        TELEMETRY_FPS_OK_MIN,
-    );
     if (!telemetry.force) {
         setMarkupIfChanged(
             panel,
@@ -2267,7 +2224,6 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
                     <div>
                         <span class="eyebrow">${title}</span>
                     </div>
-                    ${fpsMarkup}
                 </div>
                 <div class="vector-panel vector-panel--empty">
                     ${buildAwaitingDataMarkup()}
@@ -2287,7 +2243,6 @@ function renderForcePanel(side, robotEntry, telemetry, history) {
             <div>
                 <span class="eyebrow">${title}</span>
             </div>
-            ${fpsMarkup}
         </div>
         <div class="vector-panel vector-panel--live">
             <div class="wrench-gauges">
@@ -2427,10 +2382,6 @@ function renderTrendGraph(side, kind, history, currentVector) {
         const d = buildTrendPath(history, kind, index, scale);
         return d ? `<path class="trend-chart__line" style="--trend-color:${color}" d="${d}"></path>` : "";
     }).join("");
-    const fpsMarkup = buildFpsBadgeMarkup(
-        computeTelemetryStreamFps(history, kind, currentVector),
-        TELEMETRY_FPS_OK_MIN,
-    );
     // Time spanned by the plotted samples (oldest at the left edge, newest at
     // the right). Falls back to the full rolling-window duration before data
     // arrives so the awaiting-state axis still reads sensibly.
@@ -2448,7 +2399,6 @@ function renderTrendGraph(side, kind, history, currentVector) {
                     <div>
                         <span class="eyebrow">${title}</span>
                     </div>
-                    ${fpsMarkup}
                 </div>
                 <div class="trend-chart">
                     <svg class="trend-chart__svg" viewBox="0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}" aria-hidden="true">
@@ -2467,7 +2417,6 @@ function renderTrendGraph(side, kind, history, currentVector) {
             <div>
                 <span class="eyebrow">${title}</span>
             </div>
-            ${fpsMarkup}
         </div>
         <div class="trend-chart">
             <svg class="trend-chart__svg" viewBox="0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}" aria-hidden="true">
