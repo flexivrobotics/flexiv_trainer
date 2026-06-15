@@ -1037,7 +1037,25 @@ function hasActiveTeleopServices(teleopStatus) {
     return !!recording.active || !!recording.awaiting_save;
 }
 
-function createTeleopSystemCard(serviceKey, service = {}) {
+// Render the System Status cards in place. renderTeleop runs on every poll
+// tick (~10x/sec); wiping and rebuilding the grid each time detached the reset
+// button between a click's mousedown and mouseup, so the click event never
+// fired and users had to click repeatedly. Reuse each card node and only
+// rewrite its markup when the rendered content actually changes.
+function renderTeleopSystemCards(grid, services = {}) {
+    ["teleop_service", "robot_data_service", "cameras"].forEach((serviceKey) => {
+        let card = grid.querySelector(`[data-service-key="${serviceKey}"]`);
+        if (!card) {
+            card = document.createElement("div");
+            card.dataset.serviceKey = serviceKey;
+            card.className = "status-card teleop-system-card";
+            grid.appendChild(card);
+        }
+        updateTeleopSystemCard(card, serviceKey, services[serviceKey] || {});
+    });
+}
+
+function updateTeleopSystemCard(card, serviceKey, service = {}) {
     const tone = service.tone || "neutral";
     const resetBusy = !!state.ui.serviceResetBusy[serviceKey];
     const serviceState = formatValue(service.state);
@@ -1046,28 +1064,36 @@ function createTeleopSystemCard(serviceKey, service = {}) {
     // has no connection of its own to reset.
     const canReset = serviceKey in SERVICE_RESET_TARGETS;
     const reconnectMessage = SERVICE_RESET_MESSAGES[serviceKey] || `Reconnect ${service.label || serviceKey}`;
-    const card = document.createElement("div");
-    card.className = "status-card teleop-system-card";
+    const label = service.label || serviceKey;
     const resetButtonMarkup = canReset
         ? `<button class="secondary-button icon-button teleop-system-card__reset ${resetBusy ? "icon-button--spinning" : ""}" type="button" aria-label="${reconnectMessage}" title="${reconnectMessage}" ${resetBusy ? "disabled" : ""}>
                 ${RESET_ICON_SVG}
             </button>`
         : "";
-    card.innerHTML = `
+    // Key on everything that affects the markup so the button node (and its
+    // click handler) survive across ticks whenever nothing visible changed.
+    const signature = `${tone}:${serviceState}:${label}:${canReset ? "reset" : "noreset"}:${resetBusy ? "busy" : "idle"}`;
+    const rewritten = setMarkupIfChanged(
+        card,
+        signature,
+        `
         <div class="teleop-system-card__header">
             <div class="teleop-system-card__title">
                 <span class="teleop-system-card__dot teleop-system-card__dot--${tone}" role="img" aria-label="${serviceState}" title="${serviceState}"></span>
-                <span class="eyebrow teleop-system-card__label">${service.label || serviceKey}</span>
+                <span class="eyebrow teleop-system-card__label">${label}</span>
             </div>
             ${resetButtonMarkup}
         </div>
-    `;
+    `,
+    );
 
-    if (canReset) {
+    if (rewritten && canReset) {
         const resetButton = card.querySelector("button");
-        resetButton.onclick = () => resetTeleopSystemService(serviceKey).catch((error) => showToast(error.message, true));
+        if (resetButton) {
+            resetButton.onclick = () =>
+                resetTeleopSystemService(serviceKey).catch((error) => showToast(error.message, true));
+        }
     }
-    return card;
 }
 
 function createServiceStatusCard(serviceKey, service) {
@@ -2543,11 +2569,8 @@ function renderTeleop() {
     renderTrendGraph("right", "moment", state.telemetryHistory.right, rightTelemetry.moment);
 
     const grid = byId("teleop-status-grid");
-    grid.innerHTML = "";
     const services = teleopStatus.services || state.summary?.services || {};
-    ["teleop_service", "robot_data_service", "cameras"].forEach((serviceKey) => {
-        grid.appendChild(createTeleopSystemCard(serviceKey, services[serviceKey] || {}));
-    });
+    renderTeleopSystemCards(grid, services);
 
     renderRecordingStatusPanel(teleopStatus);
     renderRecordingActionButtons(teleopStatus.recording || {});
