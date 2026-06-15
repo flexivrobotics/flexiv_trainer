@@ -761,6 +761,18 @@ button:disabled {
     stroke-dasharray: 10 10;
 }
 
+.trend-chart__axis {
+    fill: rgba(251, 247, 240, 0.55);
+    font-size: 16px;
+}
+
+.trend-chart__axis-title {
+    fill: rgba(216, 245, 255, 0.72);
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
 .trend-chart__line {
     fill: none;
     stroke: var(--trend-color);

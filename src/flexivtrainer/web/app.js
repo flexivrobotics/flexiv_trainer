@@ -2161,30 +2161,50 @@ function computeTelemetryScale(history, kind) {
     return { min, max, hasData: true };
 }
 
-function buildTrendGrid(scale) {
-    const width = 960;
-    const height = 540;
-    const left = 34;
-    const right = 18;
-    const top = 18;
-    const bottom = 24;
+// Shared geometry for the wrench trend charts. Margins leave room on the left
+// for the magnitude (y) axis labels and along the bottom for the time (x) axis
+// labels; buildTrendGrid and buildTrendPath must use the same values.
+const TREND_CHART_WIDTH = 960;
+const TREND_CHART_HEIGHT = 540;
+const TREND_CHART_MARGIN = { left: 64, right: 22, top: 20, bottom: 50 };
+
+function buildTrendGrid(scale, units, spanSeconds) {
+    const width = TREND_CHART_WIDTH;
+    const height = TREND_CHART_HEIGHT;
+    const { left, right, top, bottom } = TREND_CHART_MARGIN;
     const innerWidth = width - left - right;
     const innerHeight = height - top - bottom;
     const lines = [];
+    const labels = [];
 
+    // Vertical grid lines + time (x) axis ticks. The newest sample sits at the
+    // right edge (0 s) and the window stretches back in time to the left.
     for (let index = 0; index <= 5; index += 1) {
         const x = left + (innerWidth * index) / 5;
         lines.push(`<line class="trend-chart__grid-line" x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}"></line>`);
+        const secondsAgo = spanSeconds * (1 - index / 5);
+        const tick = index === 5 ? "0" : `-${secondsAgo.toFixed(1)}`;
+        labels.push(`<text class="trend-chart__axis" x="${x.toFixed(1)}" y="${height - bottom + 18}" text-anchor="middle">${tick}</text>`);
     }
+    // Horizontal grid lines + magnitude (y) axis ticks (top = max, bottom = min).
     for (let index = 0; index <= 4; index += 1) {
         const y = top + (innerHeight * index) / 4;
         lines.push(`<line class="trend-chart__grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}"></line>`);
+        const value = scale.max - (scale.max - scale.min) * (index / 4);
+        labels.push(`<text class="trend-chart__axis" x="${left - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end">${value.toFixed(1)}</text>`);
     }
     if (scale.hasData && scale.min < 0 && scale.max > 0) {
         const zeroY = top + (1 - ((0 - scale.min) / (scale.max - scale.min))) * innerHeight;
         lines.push(`<line class="trend-chart__zero" x1="${left}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}"></line>`);
     }
-    return `<g>${lines.join("")}</g>`;
+
+    // Axis titles.
+    labels.push(`<text class="trend-chart__axis-title" x="${(left + innerWidth / 2).toFixed(1)}" y="${height - 8}" text-anchor="middle">Time (s)</text>`);
+    const titleX = 16;
+    const titleY = top + innerHeight / 2;
+    labels.push(`<text class="trend-chart__axis-title" x="${titleX}" y="${titleY.toFixed(1)}" text-anchor="middle" transform="rotate(-90 ${titleX} ${titleY.toFixed(1)})">Magnitude (${units})</text>`);
+
+    return `<g>${lines.join("")}${labels.join("")}</g>`;
 }
 
 function buildTrendPath(history, kind, componentIndex, scale) {
@@ -2192,12 +2212,9 @@ function buildTrendPath(history, kind, componentIndex, scale) {
         return "";
     }
 
-    const width = 960;
-    const height = 540;
-    const left = 34;
-    const right = 18;
-    const top = 18;
-    const bottom = 24;
+    const width = TREND_CHART_WIDTH;
+    const height = TREND_CHART_HEIGHT;
+    const { left, right, top, bottom } = TREND_CHART_MARGIN;
     const innerWidth = width - left - right;
     const innerHeight = height - top - bottom;
     let drawing = false;
@@ -2241,6 +2258,13 @@ function renderTrendGraph(side, kind, history, currentVector) {
         computeTelemetryStreamFps(history, kind, currentVector),
         TELEMETRY_FPS_OK_MIN,
     );
+    // Time spanned by the plotted samples (oldest at the left edge, newest at
+    // the right). Falls back to the full rolling-window duration before data
+    // arrives so the awaiting-state axis still reads sensibly.
+    const windowSeconds = ((TELEMETRY_HISTORY_LIMIT - 1) * TELEOP_POLL_INTERVAL_MS) / 1000;
+    const spanSeconds = history.length > 1
+        ? ((history.length - 1) * TELEOP_POLL_INTERVAL_MS) / 1000
+        : windowSeconds;
 
     if (!scale.hasData) {
         setMarkupIfChanged(
@@ -2254,19 +2278,10 @@ function renderTrendGraph(side, kind, history, currentVector) {
                     ${fpsMarkup}
                 </div>
                 <div class="trend-chart">
-                    <svg class="trend-chart__svg" viewBox="0 0 960 540" aria-hidden="true">
-                        ${buildTrendGrid(scale)}
+                    <svg class="trend-chart__svg" viewBox="0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}" aria-hidden="true">
+                        ${buildTrendGrid(scale, meta.units, windowSeconds)}
                     </svg>
                     <div class="trend-chart__empty">${buildAwaitingDataMarkup()}</div>
-                </div>
-                <div class="trend-chart__legend">
-                    ${meta.labels.map((label, index) => `
-                        <span class="trend-chart__legend-item">
-                            <span class="trend-chart__swatch" style="--swatch:${meta.colors[index]}"></span>
-                            <strong>${label}</strong>
-                            <span>--</span>
-                        </span>
-                    `).join("")}
                 </div>
             `,
         );
@@ -2282,20 +2297,10 @@ function renderTrendGraph(side, kind, history, currentVector) {
             ${fpsMarkup}
         </div>
         <div class="trend-chart">
-            <svg class="trend-chart__svg" viewBox="0 0 960 540" aria-hidden="true">
-                ${buildTrendGrid(scale)}
+            <svg class="trend-chart__svg" viewBox="0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}" aria-hidden="true">
+                ${buildTrendGrid(scale, meta.units, spanSeconds)}
                 ${paths}
             </svg>
-            ${scale.hasData ? "" : `<div class="trend-chart__empty">${buildAwaitingDataMarkup()}</div>`}
-        </div>
-        <div class="trend-chart__legend">
-            ${meta.labels.map((label, index) => `
-                <span class="trend-chart__legend-item">
-                    <span class="trend-chart__swatch" style="--swatch:${meta.colors[index]}"></span>
-                    <strong>${label}</strong>
-                    <span>${currentVector ? `${currentVector[index].toFixed(1)} ${meta.units}` : "--"}</span>
-                </span>
-            `).join("")}
         </div>
     `;
 }
