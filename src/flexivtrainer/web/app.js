@@ -1787,9 +1787,19 @@ function renderRecordingOptions(recording = {}) {
     }
 
     const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
-    container.innerHTML = "";
     const selected = new Set(state.recordingEntries);
     const allSelected = DEFAULT_RECORDING_ENTRY_IDS.every((entryId) => selected.has(entryId));
+
+    // renderTeleop runs on every poll tick (~10x/sec). Rebuilding these
+    // controls unconditionally made the Select All button and checkboxes flash
+    // and swallowed clicks landing mid-rerender. Only rebuild when something
+    // that affects the rendered output actually changed.
+    const renderKey = `${locked ? 1 : 0}|${state.recordingEntries.join(",")}`;
+    if (container.dataset.renderKey === renderKey) {
+        return;
+    }
+    container.dataset.renderKey = renderKey;
+    container.innerHTML = "";
 
     const selectAllButton = document.createElement("button");
     selectAllButton.className = "secondary-button recording-select-all-button";
@@ -2050,16 +2060,24 @@ function updateTeleopControlButtons(teleopStatus) {
     const isRunning = !!teleop.started;
     const starting = !!state.ui.teleopStartBusy;
     const powerButton = byId("teleop-power");
+    // Only rewrite innerHTML when the rendered content actually changes.
+    // renderTeleop runs on every poll tick (~10x/sec); replacing innerHTML
+    // unconditionally made the button flash and dropped clicks that landed
+    // mid-rerender (the clicked node gets detached before the click fires).
     if (starting) {
         powerButton.disabled = true;
         powerButton.classList.add("start-button");
         powerButton.classList.remove("stop-button");
-        powerButton.innerHTML = TELEOP_STARTING_MARKUP;
+        setMarkupIfChanged(powerButton, "teleop-power:starting", TELEOP_STARTING_MARKUP);
     } else {
         powerButton.disabled = isRunning ? !canStop : !canStart;
         powerButton.classList.toggle("start-button", !isRunning);
         powerButton.classList.toggle("stop-button", isRunning);
-        powerButton.innerHTML = isRunning ? TELEOP_STOP_MARKUP : TELEOP_START_MARKUP;
+        setMarkupIfChanged(
+            powerButton,
+            isRunning ? "teleop-power:stop" : "teleop-power:start",
+            isRunning ? TELEOP_STOP_MARKUP : TELEOP_START_MARKUP,
+        );
     }
 
     const startWarning = byId("teleop-start-warning");
@@ -2245,7 +2263,7 @@ function renderTrendGraph(side, kind, history, currentVector) {
     }
 
     const meta = TELEMETRY_SERIES[kind];
-    const title = `${side.toUpperCase()} ${kind === "force" ? "CARTESIAN FORCE" : "CARTESIAN MOMENT"}`;
+    const title = `${side.toUpperCase()} ${kind === "force" ? "FORCE" : "MOMENT"}`;
     const hasLiveData = Array.isArray(currentVector);
     const scale = hasLiveData
         ? computeTelemetryScale(history, kind)
