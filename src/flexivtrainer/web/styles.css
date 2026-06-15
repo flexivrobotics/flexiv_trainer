@@ -491,7 +491,33 @@ button:disabled {
 
 #teleop-cameras-wrap {
     display: grid;
-    gap: 1rem;
+    gap: 0.3rem;
+}
+
+/* Slim spacing between the Data Collection canvases/cards, matching the slim
+   card framing. */
+#teleop-cameras-wrap .feed-row,
+#teleop-cameras-wrap .wrist-column {
+    gap: 0.3rem;
+}
+
+/* Slim framing for the Data Collection camera feeds (matching the dataset
+   preview): tighter padding so the video fills more of the card, the title
+   pulled up tight against the top edge, and a bold title. */
+#teleop-cameras-wrap .feed {
+    padding: 0.4rem;
+    gap: 0.3rem;
+    border-radius: 12px;
+}
+
+#teleop-cameras-wrap .feed__placeholder,
+#teleop-cameras-wrap .feed__image {
+    border-radius: 8px;
+}
+
+#teleop-cameras-wrap .feed__title {
+    font-weight: 700;
+    padding-left: 0.4rem;
 }
 
 .feed {
@@ -583,16 +609,23 @@ button:disabled {
 }
 
 .telemetry-card {
-    --teleop-card-gap: 0.58rem;
+    --teleop-card-gap: 0.3rem;
     display: flex;
     flex-direction: column;
     gap: var(--teleop-card-gap);
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 22px;
+    border-radius: 12px;
     background: var(--teleop-surface);
     color: #fbf7f0;
-    padding: 1rem;
+    padding: 0.4rem;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+/* Match the slim camera-feed framing: bold scope title pulled tight to the top. */
+.telemetry-card .eyebrow {
+    margin-bottom: 0.2rem;
+    font-weight: 700;
+    padding-left: 0.4rem;
 }
 
 .telemetry-card__header {
