@@ -179,9 +179,9 @@ function buildArmMetricRecordingOptions() {
 }
 
 const RECORDING_ENTRY_OPTIONS = [
-    { id: "observation.images.ego", label: "observation.images.ego", group: "Images", bucket: "image", sourceField: "ego" },
-    { id: "observation.images.left_wrist", label: "observation.images.left_wrist", group: "Images", bucket: "image", sourceField: "left_wrist" },
-    { id: "observation.images.right_wrist", label: "observation.images.right_wrist", group: "Images", bucket: "image", sourceField: "right_wrist" },
+    { id: "observation.images.ego", label: "ego", group: "observation.images", bucket: "image", sourceField: "ego" },
+    { id: "observation.images.left_wrist", label: "left_wrist", group: "observation.images", bucket: "image", sourceField: "left_wrist" },
+    { id: "observation.images.right_wrist", label: "right_wrist", group: "observation.images", bucket: "image", sourceField: "right_wrist" },
     ...buildArmMetricRecordingOptions(),
 ];
 const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
@@ -2297,7 +2297,7 @@ function renderRecordingOptions(recording = {}) {
     let currentGroup = null;
     RECORDING_ENTRY_OPTIONS.forEach((option) => {
         // Section header whenever the feature group changes, so the list reads
-        // as Images / observation.state / action.
+        // as observation.images / observation.state / action.
         if (option.group && option.group !== currentGroup) {
             currentGroup = option.group;
             const heading = document.createElement("div");
