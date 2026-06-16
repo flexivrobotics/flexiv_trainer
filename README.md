@@ -13,7 +13,7 @@ The steps to set up and use this software can be summarized as:
 
 ## Software Requirements
 
-1. OS: Ubuntu 22.04 or newer
+1. OS: Ubuntu 22.04+ (x86-64 or NVIDIA Jetson/aarch64) for the full workflow; macOS (Apple Silicon) is supported for training and data processing (see [Install](#install))
 2. Environment: Python 3.12 or newer
 3. System config: see below
 
@@ -39,20 +39,109 @@ echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
 
 ## Install
 
-Create and activate a virtual environment first:
+Flexiv Trainer needs Python 3.12+. For GPU-accelerated training it also needs a PyTorch build that matches your hardware, so the prerequisite steps differ by platform. Every platform finishes the same way — create a virtual environment, then `pip install .` from the project directory, which automatically installs the Python dependencies declared in `pyproject.toml` (you do not need to install them manually).
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
+After installing, continue to [Start Flexiv Trainer](#start-flexiv-trainer).
 
-Then install Flexiv Trainer:
+### Ubuntu 22.04+ (x86-64)
 
-```bash
-pip install .
-```
+1. Install system prerequisites:
 
-When you install `flexivtrainer`, `pip` automatically installs the Python dependencies declared in `pyproject.toml`. You do not need to install them manually.
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y python3.12 python3.12-venv python3-pip git libopenblas-dev
+   ```
+
+2. Create and activate a virtual environment, then install (from the project directory):
+
+   ```bash
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install .
+   ```
+
+3. (NVIDIA GPU) The x86-64 PyPI PyTorch already ships with CUDA, so no extra wheel is needed. Verify the GPU is visible:
+
+   ```bash
+   python -c "import torch; print(torch.cuda.is_available())"
+   ```
+
+> For teleoperation, also grant realtime privileges (see [Software Requirements](#software-requirements)), then restart your computer.
+
+### macOS (Apple Silicon)
+
+> macOS is suited to training and data processing. Live teleoperation and RealSense capture require the Flexiv robot SDK and RealSense, which target Linux.
+
+1. Install prerequisites with Homebrew:
+
+   ```bash
+   brew install python@3.12 git
+   ```
+
+2. Create and activate a virtual environment, then install (from the project directory):
+
+   ```bash
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install .
+   ```
+
+3. PyTorch uses the Apple GPU (Metal/MPS) automatically. Verify:
+
+   ```bash
+   python -c "import torch; print(torch.backends.mps.is_available())"
+   ```
+
+### NVIDIA Jetson (AGX Thor / JetPack 7 / CUDA 13)
+
+> The generic PyPI PyTorch is CPU-only on aarch64. Install NVIDIA's Jetson PyTorch wheel plus the CUDA math libraries it links against, otherwise training falls back to CPU.
+
+1. Install system prerequisites:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y python3.12 python3.12-venv python3-pip git libopenblas-dev
+   ```
+
+2. Install the CUDA math libraries the Jetson PyTorch wheel links against. Get **cuSPARSELt** and **NVPL** from NVIDIA's official download pages — select Linux, arm64-sbsa, Ubuntu, your version, and deb (network), then run the commands each page generates:
+
+   - cuSPARSELt: <https://developer.nvidia.com/cusparselt-downloads>
+   - NVPL: <https://developer.nvidia.com/nvpl-downloads>
+
+   Those pages also configure NVIDIA's apt repositories. With them in place, install NVPL and cuDSS, then register cuDSS with the dynamic linker (it installs into a versioned directory the loader does not scan by default):
+
+   ```bash
+   sudo apt-get install -y nvpl libcudss0-cuda-13
+   echo "/usr/lib/aarch64-linux-gnu/libcudss/13" | sudo tee /etc/ld.so.conf.d/cudss.conf
+   sudo ldconfig
+   ```
+
+3. Create and activate a virtual environment, then install the project (from the project directory):
+
+   ```bash
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install .
+   ```
+
+4. Replace the CPU PyTorch with the CUDA build for Thor (from the NVIDIA Jetson AI Lab index):
+
+   ```bash
+   pip install --no-deps --force-reinstall \
+     --index-url https://pypi.jetson-ai-lab.io/sbsa/cu130 \
+     torch==2.10.0 torchvision==0.25.0
+   ```
+
+5. Verify the GPU is visible (expect `True NVIDIA Thor`):
+
+   ```bash
+   python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+   ```
+
+> For teleoperation, also grant realtime privileges (see [Software Requirements](#software-requirements)), then log out and back in.
 
 ## Start Flexiv Trainer
 
