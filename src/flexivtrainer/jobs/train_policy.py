@@ -371,6 +371,8 @@ class TrainingService:
                 self._update_job_from_log(job, text)
                 stream("TRAIN", text, detail=f"job_id={job.job_id}")
             job.return_code = job.process.wait()
+            if job.status == "stopped":
+                return
             job.status = "completed" if job.return_code == 0 else "failed"
             if job.return_code != 0:
                 job.error = f"Training exited with code {job.return_code}"
@@ -409,6 +411,8 @@ class TrainingService:
             )
             ok("Training artifacts ready", f"output={job.output_dir}")
         except Exception as exc:  # pragma: no cover - subprocess specific
+            if job.status == "stopped":
+                return
             job.status = "failed"
             job.error = str(exc)
             if job.pulse is not None:
@@ -477,6 +481,40 @@ class TrainingService:
                 _set_process_tree_suspended(job.process.pid, suspend=False)
                 job.paused = False
                 info("Training job resumed", f"job_id={job.job_id}")
+            return job.snapshot()
+
+    def stop(self) -> dict[str, Any]:
+        """Terminate the running training process and keep its final snapshot."""
+        with self._lock:
+            job = self._job
+            if job is None or job.status != "running" or job.process is None:
+                raise RuntimeError("No running training job to stop")
+
+            info("Stopping training process", f"job_id={job.job_id}")
+            job.status = "stopped"
+            job.error = None
+            job.last_event = "training_stopped"
+            if job.paused:
+                _set_process_tree_suspended(job.process.pid, suspend=False)
+                job.paused = False
+            job.process.terminate()
+            try:
+                job.process.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                job.process.kill()
+                job.process.wait(timeout=1.0)
+            job.return_code = job.process.returncode
+
+            if job.pulse is not None:
+                job.pulse.stop(
+                    level="WARN",
+                    message="Training job stopped",
+                    detail=(
+                        f"job_id={job.job_id} elapsed={format_elapsed(time.monotonic() - job.started_at)} "
+                        "reason=user request"
+                    ),
+                )
+                job.pulse = None
             return job.snapshot()
 
     def status(self) -> dict[str, Any]:

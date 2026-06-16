@@ -89,6 +89,16 @@ def resume_training(runtime: RuntimeManager = Depends(get_runtime_manager)) -> d
     return result
 
 
+@router.post("/stop")
+def stop_training(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    try:
+        result = runtime.training.stop()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Training job stopped")
+    return result
+
+
 @router.get("/status")
 def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return runtime.training.status()

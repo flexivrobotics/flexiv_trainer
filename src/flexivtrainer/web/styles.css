@@ -1509,6 +1509,21 @@ button:active {
     box-shadow: 0 1px 8px rgba(60, 159, 213, 0.45);
 }
 
+.progress-bar--thick.progress-bar--error {
+    background: rgba(225, 74, 74, 0.16);
+    box-shadow: inset 0 1px 3px rgba(133, 39, 39, 0.18);
+}
+
+.progress-bar--thick.progress-bar--error span:first-child {
+    background: linear-gradient(90deg, #ef8b8b, #d84b4b);
+    box-shadow: 0 1px 8px rgba(216, 75, 75, 0.4);
+}
+
+.progress-bar--thick.progress-bar--error .progress-bar__text {
+    color: #5a1414;
+    text-shadow: 0 1px 2px rgba(255, 238, 238, 0.68);
+}
+
 .progress-bar--thick .progress-bar__text {
     /* Override the shared `.progress-bar span` rule (higher specificity): span
        the full track and center the label, but stay transparent so only the
@@ -1901,6 +1916,7 @@ button:active {
 .training-main {
     display: grid;
     gap: 1rem;
+    min-height: 0;
 }
 
 /* Left-side control panel on the Training Run step. */
@@ -2185,8 +2201,10 @@ button:active {
 
 .log-pane {
     margin-top: 1rem;
-    min-height: 320px;
-    overflow: auto;
+    min-height: 0;
+    max-height: calc(100vh - 14rem);
+    overflow-x: auto;
+    overflow-y: auto;
     border-radius: 20px;
     padding: 1rem;
     background: rgba(29, 44, 54, 0.98);

@@ -56,6 +56,10 @@ const state = {
     mergedDatasetScopeCache: {},
     selectedPolicy: "diffusion",
     trainingOutputStamp: "",
+    trainingLogView: {
+        stickToBottom: true,
+        distanceFromBottom: 0,
+    },
     pathBrowser: {
         mode: "generic",
         title: "",
@@ -267,6 +271,31 @@ const TELEOP_STOP_MARKUP = `
             <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect>
         </svg>
         <span>Stop</span>
+    </span>
+`;
+const TRAINING_RESUME_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+        </svg>
+        <span>Resume</span>
+    </span>
+`;
+const TRAINING_PAUSE_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect>
+            <rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect>
+        </svg>
+        <span>Pause</span>
+    </span>
+`;
+const TRAINING_RESTART_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+        </svg>
+        <span>Restart</span>
     </span>
 `;
 const TELEOP_STARTING_MARKUP = `
@@ -3250,6 +3279,7 @@ function renderProcessing() {
 
 function renderTraining() {
     const container = byId("training-content");
+    _captureTrainingLogView(container);
     // The playback bar (and its bottom-padding reservation) only appears on
     // step 1 once a dataset is loaded and previewed.
     container.classList.toggle(
@@ -3335,16 +3365,7 @@ function renderTraining() {
     if (state.trainingStep === 2) {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
         const policiesReady = !!state.trainingPolicies;
-        // The output directory is derived (not user-chosen): a per-run folder
-        // under the configured training root, named by dataset + policy + a run
-        // stamp. The stamp keeps each run unique (lerobot refuses to overwrite an
-        // existing output dir); it is generated once per visit and reset on Start.
-        const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
-        const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
-        if (!state.trainingOutputStamp) state.trainingOutputStamp = _timestampSuffix();
-        const outputDir = trainingRoot && datasetName
-            ? `${trainingRoot}/${datasetName}-${state.selectedPolicy}_${state.trainingOutputStamp}`
-            : trainingRoot;
+        const outputDir = getTrainingOutputDir();
         container.innerHTML = `
             <div class="panel-header"><div><h2>Choose Training Policy</h2></div></div>
             <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
@@ -3371,30 +3392,7 @@ function renderTraining() {
             renderTraining();
         };
         byId("policy-start").onclick = async () => {
-            // Consume the current run stamp so the next visit/run gets a fresh,
-            // non-colliding output directory. (outputDir was already built above.)
-            state.trainingOutputStamp = "";
-            try {
-                state.trainingStep = 3;
-                renderTraining();
-                state.trainingStatus = await api("/training/start", {
-                    method: "POST",
-                    body: JSON.stringify({ dataset_path: state.mergedDatasetPath, output_dir: outputDir, policy_type: state.selectedPolicy }),
-                });
-                renderTraining();
-                window.clearInterval(state.intervals.training);
-                state.intervals.training = window.setInterval(async () => {
-                    if (state.activeView !== "training" || state.trainingStep !== 3) {
-                        return;
-                    }
-                    state.trainingStatus = await api("/training/status");
-                    renderTraining();
-                }, 2000);
-            } catch (error) {
-                showToast(error.message, true);
-                state.trainingStep = 2;
-                renderTraining();
-            }
+            await startTrainingRun(outputDir);
         };
         return;
     }
@@ -3407,26 +3405,37 @@ function renderTraining() {
     // status === "running" even while suspended; `paused` is a separate flag.
     const isRunning = status.status === "running";
     const isPaused = !!status.paused;
-    const toggleIcon = isPaused ? DATASET_PLAY_ICON : DATASET_PAUSE_ICON;
-    const toggleLabel = isPaused ? "Resume" : "Pause";
-    const stateLabel = isPaused ? "Paused" : isRunning ? "Running" : (status.status || "—");
+    const isStopped = status.status === "stopped";
+    const isFailed = status.status === "failed";
+    const stateLabel = isPaused
+        ? "Paused"
+        : isRunning
+            ? "Running"
+            : isStopped
+                ? "Stopped"
+                : _formatTrainingStatusLabel(status.status);
     container.innerHTML = `
         <div class="training-layout">
-            <aside class="panel training-controls">
-                <div class="panel-header"><h2>Controls</h2></div>
-                <button id="training-pause-resume" class="button-with-icon training-controls__toggle" type="button" ${isRunning ? "" : "disabled"}>
-                    <span class="button-content">${toggleIcon}<span>${toggleLabel}</span></span>
-                </button>
+            <aside class="panel panel--soft control-panel training-controls">
+                <div class="panel-header"><h2>Training Control</h2></div>
+                <div class="control-stack">
+                    <button id="training-pause-resume" class="button-with-icon" type="button" ${isRunning ? "" : "disabled"}>
+                        ${isPaused ? TRAINING_RESUME_MARKUP : TRAINING_PAUSE_MARKUP}
+                    </button>
+                    <button id="training-stop" class="button-with-icon ${isStopped ? "start-button" : "stop-button"}" type="button" ${isRunning || isStopped ? "" : "disabled"}>
+                        ${isStopped ? TRAINING_RESTART_MARKUP : TELEOP_STOP_MARKUP}
+                    </button>
+                </div>
                 <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
             </aside>
             <div class="training-main">
-                <div class="panel-header"><div><h2>Training Run</h2></div></div>
-                <div class="progress-bar progress-bar--thick"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
+                <div class="progress-bar progress-bar--thick ${isFailed ? "progress-bar--error" : ""}"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
                 <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
                 <div class="control-bar"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
             </div>
         </div>
     `;
+    _restoreTrainingLogView(container);
     const pauseResumeBtn = byId("training-pause-resume");
     if (pauseResumeBtn) {
         pauseResumeBtn.onclick = async () => {
@@ -3442,10 +3451,132 @@ function renderTraining() {
             renderTraining();
         };
     }
+    const stopBtn = byId("training-stop");
+    if (stopBtn) {
+        stopBtn.onclick = async () => {
+            stopBtn.disabled = true;
+            if (pauseResumeBtn) {
+                pauseResumeBtn.disabled = true;
+            }
+            try {
+                if (isStopped) {
+                    await startTrainingRun(getTrainingOutputDir());
+                    return;
+                }
+                state.trainingStatus = await api("/training/stop", { method: "POST" });
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            renderTraining();
+        };
+    }
     byId("training-run-prev").onclick = () => {
         state.trainingStep = 2;
         renderTraining();
     };
+}
+
+function _formatTrainingStatusLabel(status) {
+    if (!status) {
+        return "—";
+    }
+    const text = String(status).trim();
+    if (!text) {
+        return "—";
+    }
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function _isScrolledToBottom(element, threshold = 8) {
+    return element.scrollHeight - element.clientHeight - element.scrollTop <= threshold;
+}
+
+function _captureTrainingLogView(container) {
+    const logPane = container ? container.querySelector(".log-pane") : null;
+    if (!logPane) {
+        return;
+    }
+    const distanceFromBottom = Math.max(
+        0,
+        logPane.scrollHeight - logPane.clientHeight - logPane.scrollTop,
+    );
+    state.trainingLogView = {
+        stickToBottom: _isScrolledToBottom(logPane),
+        distanceFromBottom,
+    };
+}
+
+function _restoreTrainingLogView(container) {
+    const logPane = container ? container.querySelector(".log-pane") : null;
+    if (!logPane) {
+        return;
+    }
+
+    const updateScrollState = () => {
+        const distanceFromBottom = Math.max(
+            0,
+            logPane.scrollHeight - logPane.clientHeight - logPane.scrollTop,
+        );
+        state.trainingLogView = {
+            stickToBottom: _isScrolledToBottom(logPane),
+            distanceFromBottom,
+        };
+    };
+
+    logPane.onscroll = updateScrollState;
+    requestAnimationFrame(() => {
+        const view = state.trainingLogView || { stickToBottom: true, distanceFromBottom: 0 };
+        if (view.stickToBottom) {
+            logPane.scrollTop = logPane.scrollHeight;
+        } else {
+            logPane.scrollTop = Math.max(
+                0,
+                logPane.scrollHeight - logPane.clientHeight - view.distanceFromBottom,
+            );
+        }
+        updateScrollState();
+    });
+}
+
+function getTrainingOutputDir() {
+    const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
+    const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
+    if (!state.trainingOutputStamp) {
+        state.trainingOutputStamp = _timestampSuffix();
+    }
+    return trainingRoot && datasetName
+        ? `${trainingRoot}/${datasetName}-${state.selectedPolicy}_${state.trainingOutputStamp}`
+        : trainingRoot;
+}
+
+async function startTrainingRun(outputDir) {
+    state.trainingOutputStamp = "";
+    try {
+        state.trainingStep = 3;
+        renderTraining();
+        state.trainingStatus = await api("/training/start", {
+            method: "POST",
+            body: JSON.stringify({
+                dataset_path: state.mergedDatasetPath,
+                output_dir: outputDir,
+                policy_type: state.selectedPolicy,
+            }),
+        });
+        renderTraining();
+        window.clearInterval(state.intervals.training);
+        state.intervals.training = window.setInterval(async () => {
+            if (state.activeView !== "training" || state.trainingStep !== 3) {
+                return;
+            }
+            state.trainingStatus = await api("/training/status");
+            renderTraining();
+        }, 2000);
+    } catch (error) {
+        showToast(error.message, true);
+        state.trainingStep = 2;
+        renderTraining();
+        throw error;
+    }
 }
 
 function _latestTrainingTrackerLine(status) {
