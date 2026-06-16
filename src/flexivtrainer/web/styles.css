@@ -1886,6 +1886,14 @@ button:active {
     margin-top: 0.7rem;
 }
 
+/* Step 1 of both flows (Load Episodes / Load Training Dataset) must look
+   identical: drop the list's top margin so the box gets the same grid-gap
+   spacing above and below, evenly distributed. */
+#processing-content #load-episode-list,
+#training-content #merged-dataset-entry {
+    margin-top: 0;
+}
+
 #processing-content {
     display: grid;
     gap: 0.95rem;

@@ -3000,7 +3000,7 @@ function renderProcessing() {
         `;
         const list = byId("load-episode-list");
         if (!state.episodes.length) {
-            list.innerHTML = `<div class="episode-empty-state"><span>No episode datasets selected yet.</span></div>`;
+            list.innerHTML = `<div class="episode-empty-state"><span>No episodes selected.</span></div>`;
         } else {
             state.episodes.forEach((episode, index) => {
                 const row = document.createElement("div");
@@ -3195,16 +3195,16 @@ function renderTraining() {
         container.innerHTML = `
             <div class="panel-header panel-header--training-step">
                 <div>
-                    <h2 class="training-step-title">Select Training Dataset</h2>
+                    <h2 class="training-step-title">Load Training Dataset</h2>
                 </div>
             </div>
             <div class="merged-dataset-entry" id="merged-dataset-entry">
                 ${state.mergedDatasetPath
                 ? `<div class="episode-entry-row"><div class="episode-entry-card"><strong class="episode-entry-card__index">1</strong><span class="episode-entry-card__divider" aria-hidden="true"></span><span class="episode-entry-card__name">${escapeHtml(state.mergedDatasetPath.split("/").pop())}</span></div><button class="round-icon-button round-icon-button--remove" id="training-remove-dataset" type="button" aria-label="Remove dataset" title="Remove dataset"><span aria-hidden="true">&minus;</span></button></div>`
-                : `<div class="episode-empty-state"><span>No training dataset selected yet.</span></div>`
+                : `<div class="episode-empty-state"><span>No training dataset selected.</span></div>`
             }
             </div>
-            <div id="merged-dataset-preview-block"></div>
+            <div id="merged-dataset-preview-block" class="${state.mergedDatasetPreview ? "" : "hidden"}"></div>
             <div class="control-bar control-bar--episode-step">
                 <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets">
                     <span aria-hidden="true">+</span>
