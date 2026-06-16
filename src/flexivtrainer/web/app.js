@@ -54,7 +54,6 @@ const state = {
     mergedDatasetSelectedEpisode: null,
     mergedDatasetEpisodes: [],
     mergedDatasetScopeCache: {},
-    outputDir: "",
     selectedPolicy: "diffusion",
     pathBrowser: {
         mode: "generic",
@@ -3243,6 +3242,9 @@ function renderTraining() {
         // Empty: prompt to browse for a dataset. Loaded: preview it exactly like
         // the merged-dataset step in Data Processing — an episode list on the
         // left ("Whole Dataset" + each episode), the selected scope on the right.
+        // Loaded: the control bar lives inside the main column so "Previous
+        // Step"/"Next" align with the scope (like Data Processing step 3).
+        // "Previous Step" drops the dataset and returns to selection.
         const bodyHtml = loaded
             ? `
             <div class="training-layout">
@@ -3253,17 +3255,17 @@ function renderTraining() {
                 <div class="training-main">
                     <div class="panel-header"><div><h2>${escapeHtml(tTitle)}</h2></div></div>
                     <div id="merged-dataset-preview-block"></div>
+                    <div class="control-bar">
+                        <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
+                        <button id="training-next-step" type="button">Next</button>
+                    </div>
                 </div>
             </div>`
             : `<div class="merged-dataset-entry" id="merged-dataset-entry"><div class="episode-empty-state"><span>No training dataset selected.</span></div></div>`;
 
-        // Loaded: "Previous Step" drops the dataset and returns to selection.
-        // Empty: the "+" opens the dataset browser.
+        // Empty: the "+" opens the dataset browser; no scope layout yet.
         const controlHtml = loaded
-            ? `<div class="control-bar">
-                    <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
-                    <button id="training-next-step" type="button">Next</button>
-                </div>`
+            ? ""
             : `<div class="control-bar control-bar--episode-step">
                     <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
                     <button id="training-next-step" type="button" disabled>Next</button>
@@ -3310,14 +3312,22 @@ function renderTraining() {
     if (state.trainingStep === 2) {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
         const policiesReady = !!state.trainingPolicies;
+        // The output directory is derived (not user-chosen): a per-run folder
+        // under the configured training root, named by dataset + policy. Shown
+        // read-only so the user knows where results will be written.
+        const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
+        const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
+        const outputDir = trainingRoot && datasetName
+            ? `${trainingRoot}/${datasetName}-${state.selectedPolicy}`
+            : trainingRoot;
         container.innerHTML = `
             <div class="panel-header"><div><h2>Choose Training Policy</h2></div></div>
             <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
                 <div class="policy-grid" id="policy-grid"></div>
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
             </div>
-            <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${state.outputDir || "No directory selected"}</strong></div><button class="secondary-button" id="training-pick-output" type="button">Choose Directory</button></div>
-            <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${state.outputDir && policiesReady ? "" : "disabled"}>Start Training</button></div>
+            <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
+            <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Start Training</button></div>
         `;
         const grid = byId("policy-grid");
         Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
@@ -3331,7 +3341,6 @@ function renderTraining() {
             };
             grid.appendChild(card);
         });
-        byId("training-pick-output").onclick = () => openOutputBrowser();
         byId("policy-prev").onclick = () => {
             state.trainingStep = 1;
             renderTraining();
@@ -3342,7 +3351,7 @@ function renderTraining() {
                 renderTraining();
                 state.trainingStatus = await api("/training/start", {
                     method: "POST",
-                    body: JSON.stringify({ dataset_path: state.mergedDatasetPath, output_dir: state.outputDir, policy_type: state.selectedPolicy }),
+                    body: JSON.stringify({ dataset_path: state.mergedDatasetPath, output_dir: outputDir, policy_type: state.selectedPolicy }),
                 });
                 renderTraining();
                 window.clearInterval(state.intervals.training);
@@ -3691,20 +3700,6 @@ function openMergedDatasetBrowser() {
                 state.mergedDatasetSeries = null;
                 showToast(error.message, true);
             }
-            renderTraining();
-        },
-    }).catch((error) => showToast(error.message, true));
-}
-
-function openOutputBrowser() {
-    openBrowser({
-        title: "Select Training Output Directory",
-        startPath: state.summary.storage.training,
-        directoriesOnly: true,
-        multiSelect: false,
-        onConfirm: (paths) => {
-            state.outputDir = paths[0] || state.outputDir;
-            closeBrowser();
             renderTraining();
         },
     }).catch((error) => showToast(error.message, true));
