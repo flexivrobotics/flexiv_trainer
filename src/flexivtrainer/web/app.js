@@ -3117,6 +3117,8 @@ function renderProcessing() {
                 <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add episode dataset" title="Add episode dataset">
                     <span aria-hidden="true">+</span>
                 </button>
+            </div>
+            <div class="control-bar control-bar--floating-step-nav">
                 <button id="training-next-step" type="button" ${state.episodes.length ? "" : "disabled"}>Next</button>
             </div>
         `;
@@ -3171,7 +3173,7 @@ function renderProcessing() {
                 </aside>
                 <div class="training-main">
                     <div id="episode-preview-block"></div>
-                    <div class="control-bar">
+                    <div class="control-bar control-bar--floating-step-nav">
                         <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
                         <button id="training-merge" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Merge Selected Episodes</button>
                     </div>
@@ -3270,7 +3272,7 @@ function renderProcessing() {
                 <div class="training-main">
                     <div class="panel-header"><div><h2>${escapeHtml(title)}</h2></div></div>
                     <div id="merged-preview-block"></div>
-                    <div class="control-bar"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button></div>
+                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button></div>
                 </div>
             </div>
         `;
@@ -3317,7 +3319,7 @@ function renderTraining() {
                 <div class="training-main">
                     <div class="panel-header"><div><h2>${escapeHtml(tTitle)}</h2></div></div>
                     <div id="merged-dataset-preview-block"></div>
-                    <div class="control-bar">
+                    <div class="control-bar control-bar--floating-step-nav">
                         <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
                         <button id="training-next-step" type="button">Next</button>
                     </div>
@@ -3330,6 +3332,8 @@ function renderTraining() {
             ? ""
             : `<div class="control-bar control-bar--episode-step">
                     <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
+                </div>
+                <div class="control-bar control-bar--floating-step-nav">
                     <button id="training-next-step" type="button" disabled>Next</button>
                 </div>`;
 
@@ -3382,7 +3386,7 @@ function renderTraining() {
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
             </div>
             <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
-            <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
+            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
         `;
         const grid = byId("policy-grid");
         Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
@@ -3451,7 +3455,7 @@ function renderTraining() {
             <div class="training-main">
                 <div class="progress-bar progress-bar--thick ${isFailed ? "progress-bar--error" : ""}"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
                 <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
-                <div class="control-bar"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
+                <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
             </div>
         </div>
     `;
@@ -3567,6 +3571,17 @@ function _restoreTrainingLogView(container) {
         logPane.scrollLeft = Math.max(0, view.scrollLeft || 0);
         updateScrollState();
     });
+}
+
+function resetTrainingRunViewState() {
+    window.clearInterval(state.intervals.training);
+    state.trainingStatus = null;
+    state.trainingOutputStamp = "";
+    state.trainingLogView = {
+        stickToBottom: true,
+        distanceFromBottom: 0,
+        scrollLeft: 0,
+    };
 }
 
 function getTrainingOutputDir() {
@@ -3893,6 +3908,7 @@ function syncBrowserDialogChrome() {
     if (eyebrow) {
         eyebrow.textContent = state.pathBrowser.eyebrow || "";
         eyebrow.classList.toggle("hidden", !!state.pathBrowser.hideEyebrow || !state.pathBrowser.eyebrow);
+        resetTrainingRunViewState();
     }
     if (closeButton) {
         closeButton.classList.toggle("hidden", !!state.pathBrowser.hideClose);
@@ -4087,6 +4103,9 @@ function openMergedDatasetBrowser() {
         onConfirm: async (paths) => {
             const path = paths[0];
             if (!path) return;
+            if (path !== state.mergedDatasetPath) {
+                resetTrainingRunViewState();
+            }
             state.mergedDatasetPath = path;
             state.mergedDatasetPreview = null;
             state.mergedDatasetSeries = null;

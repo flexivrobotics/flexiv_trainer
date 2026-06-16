@@ -138,6 +138,13 @@ button:disabled {
     backdrop-filter: blur(18px);
 }
 
+.app-nav__brand-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.7rem;
+    min-width: 0;
+}
+
 .app-nav nav {
     display: flex;
     align-items: center;
@@ -451,6 +458,26 @@ button:disabled {
     justify-content: space-between;
     align-items: center;
     gap: 0.8rem;
+}
+
+.control-bar--floating-step-nav {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 24;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-end;
+    padding: 0.72rem;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background: rgba(255, 252, 246, 0.94);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(18px);
+}
+
+.control-bar--floating-step-nav button {
+    box-shadow: none;
 }
 
 .teleop-layout {
@@ -2300,24 +2327,22 @@ button:active {
 
 .notification-center {
     position: fixed;
-    right: 1rem;
+    left: 1rem;
     bottom: 1rem;
     z-index: 30;
     display: grid;
-    justify-items: end;
+    justify-items: start;
     gap: 0.8rem;
 }
 
 .version-badge {
-    position: fixed;
-    left: 1rem;
-    bottom: 1rem;
-    z-index: 29;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 0.34rem 0.62rem;
-    border-radius: 999px;
+    min-width: 2.15rem;
+    min-height: 2.15rem;
+    padding: 0.28rem 0.46rem;
+    border-radius: 0.5rem;
     border: 1px solid rgba(72, 103, 125, 0.18);
     background: rgba(255, 252, 246, 0.84);
     color: var(--muted);
@@ -2373,6 +2398,7 @@ button:active {
     background: rgba(255, 252, 246, 0.98);
     box-shadow: var(--shadow);
     padding: 0.95rem;
+    transform-origin: left bottom;
 }
 
 .notification-panel__header h3 {

@@ -27,7 +27,10 @@ limitations under the License.
 <body>
     <div class="app-shell">
         <header class="app-nav">
-            <button class="brand" data-nav="home" type="button">Flexiv Trainer</button>
+            <div class="app-nav__brand-group">
+                <button class="brand" data-nav="home" type="button">Flexiv Trainer</button>
+                <div class="version-badge" id="version-badge" aria-hidden="true">v__FLEXIV_TRAINER_VERSION__</div>
+            </div>
             <nav>
                 <button class="nav-link" data-nav="teleoperation" type="button">Data Collection</button>
                 <span class="nav-divider" aria-hidden="true">|</span>
@@ -296,7 +299,14 @@ limitations under the License.
                     <code id="browser-path">/</code>
                 </div>
                 <div class="dialog-toolbar__actions">
-                    <button class="secondary-button toggle-all-button hidden" id="browser-select-all" type="button" title="Select all" aria-label="Select all"><svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"></rect><path d="M8 12.3 10.8 15 16 8.8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path></svg></button>
+                    <button class="secondary-button toggle-all-button hidden" id="browser-select-all" type="button"
+                        title="Select all" aria-label="Select all"><svg class="icon-check" viewBox="0 0 24 24"
+                            aria-hidden="true">
+                            <rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor"
+                                stroke-width="1.8"></rect>
+                            <path d="M8 12.3 10.8 15 16 8.8" fill="none" stroke="currentColor" stroke-linecap="round"
+                                stroke-linejoin="round" stroke-width="1.8"></path>
+                        </svg></button>
                     <button class="secondary-button" id="browser-up" type="button">Up</button>
                 </div>
             </div>
@@ -318,7 +328,8 @@ limitations under the License.
             </div>
             <div class="merge-progress-block merge-progress-block--modal">
                 <div class="merge-progress-item">
-                    <div class="progress-bar progress-bar--thick"><span style="width: 0%"></span><span class="progress-bar__text">0/0</span></div>
+                    <div class="progress-bar progress-bar--thick"><span style="width: 0%"></span><span
+                            class="progress-bar__text">0/0</span></div>
                 </div>
             </div>
         </div>
@@ -344,8 +355,6 @@ limitations under the License.
             <div class="notification-list" id="notification-list"></div>
         </section>
     </div>
-
-    <div class="version-badge" id="version-badge" aria-hidden="true">v__FLEXIV_TRAINER_VERSION__</div>
 
     <script type="module" src="/static/app.js?v=20260615-5"></script>
 </body>
