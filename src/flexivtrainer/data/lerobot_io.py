@@ -283,21 +283,36 @@ class EpisodeManifest:
         if not dataset_root.exists():
             raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")
 
-        manifest_path = dataset_root / "episode.json"
-        if not manifest_path.exists():
-            manifest_path = dataset_root / "combined.json"
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"No episode manifest found under: {dataset_root}")
+        # Both single recordings and merged datasets are standard LeRobot v3.0
+        # datasets, described entirely by their meta/info.json (+ tasks.parquet).
+        # The repo id is local/<dir-name>, which is what the recorder/merge write.
+        info_path = dataset_root / "meta" / "info.json"
+        if not info_path.exists():
+            raise FileNotFoundError(f"No dataset metadata found under: {dataset_root}")
 
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        repo_id = str(payload.get("repo_id") or f"local/{dataset_root.name}")
-        task = str(
-            payload.get("task")
-            or payload.get("sample_task")
-            or "Dual-arm Flexiv teleoperation demonstration"
-        )
-
-        fps_raw = payload.get("fps")
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        repo_id = f"local/{dataset_root.name}"
+        fps_raw = info.get("fps")
         fps = int(fps_raw) if isinstance(fps_raw, (int, float)) else None
+        task = cls._first_task(dataset_root)
 
         return cls(root=dataset_root, repo_id=repo_id, task=task, fps=fps)
+
+    @staticmethod
+    def _first_task(dataset_root: Path) -> str:
+        """Best-effort read of the first task name from meta/tasks.parquet."""
+        default = "Dual-arm Flexiv teleoperation demonstration"
+        tasks_path = dataset_root / "meta" / "tasks.parquet"
+        if not tasks_path.exists():
+            return default
+        try:
+            import pandas as pd
+
+            tasks = pd.read_parquet(tasks_path)
+            if tasks.index.name == "task" and len(tasks.index):
+                return str(tasks.index[0])
+            if "task" in tasks.columns and len(tasks):
+                return str(tasks["task"].iloc[0])
+        except Exception:
+            return default
+        return default

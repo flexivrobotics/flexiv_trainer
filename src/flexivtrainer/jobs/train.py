@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
@@ -222,14 +221,8 @@ class TrainingService:
         return " ".join(parts)
 
     def _resolve_dataset(self, dataset_root: Path) -> tuple[str, Path]:
-        combined_manifest = dataset_root / "combined.json"
-        episode_manifest = dataset_root / "episode.json"
-        manifest_path = (
-            combined_manifest if combined_manifest.exists() else episode_manifest
-        )
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            return manifest["repo_id"], dataset_root
+        # Recordings and merged datasets are standard LeRobot datasets whose
+        # repo id is local/<name> (what the recorder/merge write).
         return f"local/{dataset_root.name}", dataset_root
 
     def start(

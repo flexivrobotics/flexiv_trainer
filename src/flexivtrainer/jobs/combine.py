@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -67,26 +66,13 @@ def combine_episode_datasets(
     if on_progress:
         on_progress(total - 1, total, 1, 1)
 
-    # Use LeRobot's optimized merge (file-level copy of parquet + videos)
+    # Use LeRobot's optimized merge (file-level copy of parquet + videos).
+    # This produces a fully standard LeRobot v3.0 dataset; the merged dataset is
+    # identified and loaded via its standard meta/info.json (no extra manifest).
     merge_datasets(
         datasets=datasets,
         output_repo_id=f"local/{output_name}",
         output_dir=target_root,
-    )
-
-    # Write our own metadata file
-    first_dataset = datasets[0]
-    (target_root / "combined.json").write_text(
-        json.dumps(
-            {
-                "repo_id": f"local/{output_name}",
-                "root": str(target_root),
-                "episodes": [str(root) for root in episode_roots],
-                "fps": first_dataset.fps,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
     )
 
     return {

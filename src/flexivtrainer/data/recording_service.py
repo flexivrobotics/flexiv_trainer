@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import re
 import shutil
 import sys
@@ -206,8 +205,6 @@ class RecordingService:
             episode_name = self._episode_name
             staging_path = self._staging_path
             dataset = self._dataset
-            task = self._task
-            fps = self._fps
             frames_captured = self._frames_captured
             self._save_in_progress = True
             self._save_progress = 0
@@ -230,16 +227,9 @@ class RecordingService:
                     self._error = f"Failed to finalize dataset: {exc}"
                 raise RuntimeError(self._error) from exc
 
-            manifest = {
-                "repo_id": f"local/{episode_name}",
-                "task": task,
-                "fps": fps,
-                "frames": frames_captured,
-            }
-            (staging_path / "episode.json").write_text(
-                json.dumps(manifest, indent=2), encoding="utf-8"
-            )
-
+            # The episode is a complete, standard LeRobot v3.0 dataset on its
+            # own (meta/info.json, meta/tasks.parquet, data/, videos/). It is
+            # identified and loaded via that standard metadata; no extra manifest.
             episodes_root = self._settings.storage.episodes_root
             episodes_root.mkdir(parents=True, exist_ok=True)
             target_path = episodes_root / episode_name

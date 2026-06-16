@@ -453,9 +453,9 @@ class RuntimeManager:
                 "is_dir": child.is_dir(),
             }
             if annotate_episode_dirs and child.is_dir():
-                item["is_valid_episode"] = (child / "episode.json").exists() or (
-                    child / "combined.json"
-                ).exists()
+                # Recordings and merged datasets are both standard LeRobot
+                # datasets, identified by their meta/info.json.
+                item["is_valid_episode"] = (child / "meta" / "info.json").exists()
             items.append(item)
         return {
             "path": str(target),
@@ -466,8 +466,7 @@ class RuntimeManager:
     def list_episode_datasets(self) -> list[dict[str, Any]]:
         episodes = []
         for root in sorted(self.settings.storage.episodes_root.iterdir()):
-            manifest = root / "episode.json"
-            if manifest.exists():
+            if (root / "meta" / "info.json").exists():
                 episodes.append(
                     {
                         "name": root.name,
@@ -508,14 +507,9 @@ class RuntimeManager:
             raise ValueError(
                 f"Access denied: path must be within storage root ({storage_root})"
             )
-        manifest_path = dataset_path / "episode.json"
-        if not manifest_path.exists():
-            manifest_path = dataset_path / "combined.json"
-
+        # Recordings and merged datasets carry no extra manifest; their repo id
+        # is local/<name>, exactly what the recorder/merge write into the dataset.
         repo_id = f"local/{dataset_path.name}"
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            repo_id = manifest.get("repo_id", repo_id)
         return dataset_path, repo_id
 
     def _load_dataset(self, dataset_path: Path) -> Any:
