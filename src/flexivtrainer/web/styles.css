@@ -991,6 +991,19 @@ button:disabled {
     margin-bottom: 0.15rem;
 }
 
+.recording-option-group-title {
+    font-size: 0.74rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--muted);
+    margin: 0.35rem 0 0.05rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.recording-option-group-title:first-of-type {
+    margin-top: 0;
+}
+
 .recording-option {
     display: grid;
     grid-template-columns: auto 1fr;

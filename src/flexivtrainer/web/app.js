@@ -55,6 +55,7 @@ const state = {
     mergedDatasetEpisodes: [],
     mergedDatasetScopeCache: {},
     selectedPolicy: "diffusion",
+    trainingOutputStamp: "",
     pathBrowser: {
         mode: "generic",
         title: "",
@@ -132,8 +133,10 @@ const TELEMETRY_HISTORY_LIMIT = 90;
 const TELEOP_POLL_INTERVAL_MS = 100;
 // Arms in capture order (index 0 = left follower, 1 = right follower) and the
 // per-metric vectors each arm exposes. The checklist offers one toggle per
-// (side, metric); selected metrics are concatenated into that arm's grouped
-// state/action feature in the dataset.
+// (side, metric); selected metrics from every arm are concatenated into the
+// single `observation.state` / `action` feature. Each row's label is the
+// feature name-prefix it contributes (e.g. `left_arm.tcp_pose`), so the list
+// matches the per-axis names in those features (`left_arm.tcp_pose.x`, ...).
 const RECORDING_ARM_SIDES = [
     { side: "left_arm", index: 0 },
     { side: "right_arm", index: 1 },
@@ -150,7 +153,8 @@ function buildArmMetricRecordingOptions() {
         for (const { metric, stateField } of RECORDING_METRICS) {
             options.push({
                 id: `observation.state.${side}.${metric}`,
-                label: `observation.state.${side}.${metric}`,
+                label: `${side}.${metric}`,
+                group: "observation.state",
                 bucket: "observation",
                 payload: "states",
                 side: index,
@@ -162,7 +166,8 @@ function buildArmMetricRecordingOptions() {
         for (const { metric, actionField } of RECORDING_METRICS) {
             options.push({
                 id: `action.${side}.${metric}`,
-                label: `action.${side}.${metric}`,
+                label: `${side}.${metric}`,
+                group: "action",
                 bucket: "action",
                 payload: "actions",
                 side: index,
@@ -174,9 +179,9 @@ function buildArmMetricRecordingOptions() {
 }
 
 const RECORDING_ENTRY_OPTIONS = [
-    { id: "observation.images.ego", label: "observation.images.ego", bucket: "image", sourceField: "ego" },
-    { id: "observation.images.left_wrist", label: "observation.images.left_wrist", bucket: "image", sourceField: "left_wrist" },
-    { id: "observation.images.right_wrist", label: "observation.images.right_wrist", bucket: "image", sourceField: "right_wrist" },
+    { id: "observation.images.ego", label: "observation.images.ego", group: "Images", bucket: "image", sourceField: "ego" },
+    { id: "observation.images.left_wrist", label: "observation.images.left_wrist", group: "Images", bucket: "image", sourceField: "left_wrist" },
+    { id: "observation.images.right_wrist", label: "observation.images.right_wrist", group: "Images", bucket: "image", sourceField: "right_wrist" },
     ...buildArmMetricRecordingOptions(),
 ];
 const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
@@ -1086,6 +1091,14 @@ function _stopDatasetPlayback(playingKey) {
 
 function byId(id) {
     return document.getElementById(id);
+}
+
+// Human-readable local timestamp suffix (YYYYMMDD_HHMMSS), matching how
+// recorded episode directories are named.
+function _timestampSuffix() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 function escapeHtml(text) {
@@ -2281,7 +2294,17 @@ function renderRecordingOptions(recording = {}) {
     };
     container.appendChild(selectAllButton);
 
+    let currentGroup = null;
     RECORDING_ENTRY_OPTIONS.forEach((option) => {
+        // Section header whenever the feature group changes, so the list reads
+        // as Images / observation.state / action.
+        if (option.group && option.group !== currentGroup) {
+            currentGroup = option.group;
+            const heading = document.createElement("div");
+            heading.className = "recording-option-group-title";
+            heading.textContent = option.group;
+            container.appendChild(heading);
+        }
         const checked = selected.has(option.id);
         const label = document.createElement("label");
         label.className = `recording-option ${locked ? "recording-option--disabled" : ""}`;
@@ -3179,7 +3202,7 @@ function renderProcessing() {
             try {
                 await api("/datasets/merge", {
                     method: "POST",
-                    body: JSON.stringify({ episode_paths: state.selectedEpisodes, output_name: `merged-${Date.now()}` }),
+                    body: JSON.stringify({ episode_paths: state.selectedEpisodes, output_name: `merged_${_timestampSuffix()}` }),
                 });
                 await _pollMergeProgress();
             } catch (error) {
@@ -3313,12 +3336,14 @@ function renderTraining() {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
         const policiesReady = !!state.trainingPolicies;
         // The output directory is derived (not user-chosen): a per-run folder
-        // under the configured training root, named by dataset + policy. Shown
-        // read-only so the user knows where results will be written.
+        // under the configured training root, named by dataset + policy + a run
+        // stamp. The stamp keeps each run unique (lerobot refuses to overwrite an
+        // existing output dir); it is generated once per visit and reset on Start.
         const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
         const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
+        if (!state.trainingOutputStamp) state.trainingOutputStamp = _timestampSuffix();
         const outputDir = trainingRoot && datasetName
-            ? `${trainingRoot}/${datasetName}-${state.selectedPolicy}`
+            ? `${trainingRoot}/${datasetName}-${state.selectedPolicy}_${state.trainingOutputStamp}`
             : trainingRoot;
         container.innerHTML = `
             <div class="panel-header"><div><h2>Choose Training Policy</h2></div></div>
@@ -3346,6 +3371,9 @@ function renderTraining() {
             renderTraining();
         };
         byId("policy-start").onclick = async () => {
+            // Consume the current run stamp so the next visit/run gets a fresh,
+            // non-colliding output directory. (outputDir was already built above.)
+            state.trainingOutputStamp = "";
             try {
                 state.trainingStep = 3;
                 renderTraining();

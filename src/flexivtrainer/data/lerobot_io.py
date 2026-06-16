@@ -190,42 +190,56 @@ def _collect_arm_group(
     return values, names
 
 
-def _iter_arm_groups(
+def _iter_combined_features(
     robot_snapshot: dict[str, Any], enabled_entries: set[str]
 ):
-    """Yield (feature_key, values, axis_names) for each arm's grouped vectors.
+    """Yield (feature_key, values, axis_names) for the combined state and action.
 
-    Robots are grouped per arm by side (left_arm/right_arm) rather than by
-    serial number, so no hardware identifiers leak into the dataset. Each arm's
-    state/action feature holds only the metrics whose entry keys are enabled.
+    Every arm's enabled metrics are concatenated, in capture order (left then
+    right), into a single ``observation.state`` vector and a single ``action``
+    vector — the layout stock LeRobot policies require (they look up the
+    features named exactly ``observation.state`` and ``action``). Axis names are
+    prefixed with the arm side (e.g. ``left_arm.tcp_pose.x``) so the two arms
+    stay distinguishable within the flat vector, and so state and action line up
+    arm-for-arm.
     """
     robots = robot_snapshot.get("robots") if isinstance(robot_snapshot, dict) else None
     if not isinstance(robots, dict):
         return
+
+    state_values: list[float] = []
+    state_names: list[str] = []
+    action_values: list[float] = []
+    action_names: list[str] = []
     for index, payload in enumerate(robots.values()):
         if not isinstance(payload, dict):
             continue
         side = arm_side_label(index)
-        state_values, state_names = _collect_arm_group(
+        arm_state_values, arm_state_names = _collect_arm_group(
             payload.get("states"), side, "state", enabled_entries
         )
-        if state_values:
-            yield f"observation.state.{side}", state_values, state_names
-        action_values, action_names = _collect_arm_group(
+        state_values.extend(arm_state_values)
+        state_names.extend(f"{side}.{name}" for name in arm_state_names)
+        arm_action_values, arm_action_names = _collect_arm_group(
             payload.get("actions"), side, "action", enabled_entries
         )
-        if action_values:
-            yield f"action.{side}", action_values, action_names
+        action_values.extend(arm_action_values)
+        action_names.extend(f"{side}.{name}" for name in arm_action_names)
+
+    if state_values:
+        yield "observation.state", state_values, state_names
+    if action_values:
+        yield "action", action_values, action_names
 
 
 def extract_recording_frame_values(
     robot_snapshot: dict[str, Any], entries: list[str] | None = None
 ) -> dict[str, list[float]]:
-    """Per-frame grouped vectors keyed by arm feature (state and action)."""
+    """Per-frame vectors keyed by feature (``observation.state`` and ``action``)."""
     resolved_entries = set(resolve_recording_entries(entries))
     return {
         key: values
-        for key, values, _ in _iter_arm_groups(robot_snapshot, resolved_entries)
+        for key, values, _ in _iter_combined_features(robot_snapshot, resolved_entries)
     }
 
 
@@ -251,21 +265,25 @@ def build_features_from_sample(
         features[f"observation.images.{camera_name}"] = {
             "dtype": "video",
             "shape": [height, width, channels],
+            # LeRobot requires `names` on visual features; it reads ft["names"]
+            # unconditionally when building policy features (and uses the last
+            # axis to detect (h, w, c) layout). Order must match `shape` above.
+            "names": ["height", "width", "channels"],
         }
 
-    # Each arm's state/action is one grouped vector feature (e.g.
-    # observation.state.left_arm with shape (19,)), with per-axis `names`. The
-    # shape is a tuple so it matches the numpy value's `.shape` in LeRobot's
-    # add_frame validator (a list shape never compares equal to a tuple).
+    # Both arms fold into a single observation.state and action vector feature,
+    # each with per-axis `names` (e.g. left_arm.tcp_pose.x). The shape is a tuple
+    # so it matches the numpy value's `.shape` in LeRobot's add_frame validator
+    # (a list shape never compares equal to a tuple).
     state_keys: list[str] = []
     action_keys: list[str] = []
-    for key, values, axis_names in _iter_arm_groups(robot_snapshot, resolved_entries):
+    for key, values, axis_names in _iter_combined_features(robot_snapshot, resolved_entries):
         features[key] = {
             "dtype": "float32",
             "shape": (len(values),),
             "names": axis_names,
         }
-        (action_keys if key.startswith("action.") else state_keys).append(key)
+        (action_keys if key.startswith("action") else state_keys).append(key)
 
     return features, state_keys, action_keys
 

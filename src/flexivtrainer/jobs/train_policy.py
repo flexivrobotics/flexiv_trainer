@@ -237,7 +237,9 @@ class TrainingService:
                 raise RuntimeError("A training job is already running")
 
             repo_id, resolved_root = self._resolve_dataset(dataset_root)
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # lerobot-train creates output_dir itself and refuses to run if it
+            # already exists (resume is False), so only ensure the parent here.
+            output_dir.parent.mkdir(parents=True, exist_ok=True)
             section(
                 "Training Session",
                 f"policy={policy_type} dataset={resolved_root.name} output={output_dir.name}",
@@ -264,6 +266,10 @@ class TrainingService:
                     str(resolved_root),
                     "--policy.type",
                     policy_type,
+                    # Local trainer: never push checkpoints to the HF Hub.
+                    # Without this, lerobot requires a policy.repo_id and aborts.
+                    "--policy.push_to_hub",
+                    "false",
                     "--output_dir",
                     str(output_dir),
                     "--job_name",

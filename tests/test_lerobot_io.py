@@ -75,7 +75,7 @@ def test_arm_side_label_uses_left_right_then_generic() -> None:
     assert arm_side_label(2) == "arm_3"
 
 
-def test_extract_recording_frame_values_groups_selected_metrics_per_arm() -> None:
+def test_extract_recording_frame_values_groups_selected_metrics() -> None:
     values = extract_recording_frame_values(
         make_snapshot(),
         [
@@ -86,18 +86,19 @@ def test_extract_recording_frame_values_groups_selected_metrics_per_arm() -> Non
         ],
     )
 
-    # No serial leaks into the keys; the selected metrics are concatenated into
-    # the arm's grouped vector (pose 7 + twist 6 + wrench 6 = 19 for state).
-    assert set(values) == {"observation.state.left_arm", "action.left_arm"}
-    assert values["observation.state.left_arm"] == list(range(0, 7)) + list(
+    # Every arm's selected metrics are concatenated into a single
+    # observation.state / action vector (the layout stock LeRobot policies
+    # require). Here one arm: pose 7 + twist 6 + wrench 6 = 19 for state.
+    assert set(values) == {"observation.state", "action"}
+    assert values["observation.state"] == list(range(0, 7)) + list(
         range(10, 16)
     ) + list(range(20, 26))
     # Only the wrench action metric was selected.
-    assert values["action.left_arm"] == list(range(50, 56))
+    assert values["action"] == list(range(50, 56))
 
 
 def test_extract_recording_frame_values_drops_unselected_metrics() -> None:
-    # Pose + wrench but NOT twist: the grouped vector omits the twist block.
+    # Pose + wrench but NOT twist: the combined vector omits the twist block.
     values = extract_recording_frame_values(
         make_snapshot(),
         [
@@ -106,13 +107,11 @@ def test_extract_recording_frame_values_drops_unselected_metrics() -> None:
         ],
     )
 
-    assert set(values) == {"observation.state.left_arm"}
-    assert values["observation.state.left_arm"] == list(range(0, 7)) + list(
-        range(20, 26)
-    )
+    assert set(values) == {"observation.state"}
+    assert values["observation.state"] == list(range(0, 7)) + list(range(20, 26))
 
 
-def test_extract_recording_frame_values_maps_two_arms_to_left_right() -> None:
+def test_extract_recording_frame_values_concatenates_both_arms() -> None:
     values = extract_recording_frame_values(
         make_dual_snapshot(),
         [
@@ -121,12 +120,17 @@ def test_extract_recording_frame_values_maps_two_arms_to_left_right() -> None:
         ],
     )
 
-    assert set(values) == {
-        "observation.state.left_arm",
-        "observation.state.right_arm",
-    }
-    assert values["observation.state.left_arm"] == [0, 1, 2, 3, 4, 5, 6]
-    assert values["observation.state.right_arm"] == [100, 101, 102, 103, 104, 105, 106]
+    # Both arms fold into one observation.state vector, left then right.
+    assert set(values) == {"observation.state"}
+    assert values["observation.state"] == [0, 1, 2, 3, 4, 5, 6] + [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+    ]
 
 
 def test_resolve_recording_image_names_filters_selected_cameras() -> None:
@@ -152,7 +156,7 @@ def test_extract_recording_images_filters_to_requested_entries() -> None:
     assert sorted(images) == ["ego", "right_wrist"]
 
 
-def test_build_features_from_sample_groups_arms_with_named_axes() -> None:
+def test_build_features_from_sample_combines_arms_with_named_axes() -> None:
     features, state_keys, action_keys = build_features_from_sample(
         make_snapshot(),
         make_images(),
@@ -167,34 +171,43 @@ def test_build_features_from_sample_groups_arms_with_named_axes() -> None:
 
     assert "observation.images.ego" in features
     assert "observation.images.left_wrist" not in features
+    # Visual features must carry axis names; LeRobot reads ft["names"]
+    # unconditionally when building policy features.
+    assert features["observation.images.ego"]["names"] == [
+        "height",
+        "width",
+        "channels",
+    ]
 
-    assert state_keys == ["observation.state.left_arm"]
-    assert action_keys == ["action.left_arm"]
+    # Single combined feature each, named exactly as stock policies expect.
+    assert state_keys == ["observation.state"]
+    assert action_keys == ["action"]
 
-    # All three state metrics selected -> one 19-dim vector (7 + 6 + 6).
-    state_feature = features["observation.state.left_arm"]
+    # All three state metrics selected -> one 19-dim vector (7 + 6 + 6), with
+    # axis names prefixed by the arm side.
+    state_feature = features["observation.state"]
     assert state_feature["dtype"] == "float32"
     assert state_feature["shape"] == (19,)
     assert state_feature["names"][:7] == [
-        "tcp_pose.x",
-        "tcp_pose.y",
-        "tcp_pose.z",
-        "tcp_pose.q_w",
-        "tcp_pose.q_x",
-        "tcp_pose.q_y",
-        "tcp_pose.q_z",
+        "left_arm.tcp_pose.x",
+        "left_arm.tcp_pose.y",
+        "left_arm.tcp_pose.z",
+        "left_arm.tcp_pose.q_w",
+        "left_arm.tcp_pose.q_x",
+        "left_arm.tcp_pose.q_y",
+        "left_arm.tcp_pose.q_z",
     ]
-    assert state_feature["names"][7] == "tcp_twist.vx"
-    assert state_feature["names"][-1] == "tcp_wrench.mz"
+    assert state_feature["names"][7] == "left_arm.tcp_twist.vx"
+    assert state_feature["names"][-1] == "left_arm.tcp_wrench.mz"
 
     # Only the wrench action metric selected -> a 6-dim action vector.
-    action_feature = features["action.left_arm"]
+    action_feature = features["action"]
     assert action_feature["shape"] == (6,)
     assert action_feature["names"] == [
-        "tcp_wrench.fx",
-        "tcp_wrench.fy",
-        "tcp_wrench.fz",
-        "tcp_wrench.mx",
-        "tcp_wrench.my",
-        "tcp_wrench.mz",
+        "left_arm.tcp_wrench.fx",
+        "left_arm.tcp_wrench.fy",
+        "left_arm.tcp_wrench.fz",
+        "left_arm.tcp_wrench.mx",
+        "left_arm.tcp_wrench.my",
+        "left_arm.tcp_wrench.mz",
     ]

@@ -551,10 +551,10 @@ class RuntimeManager:
     def _numeric_channels(self, dataset: Any) -> list[tuple[str, str, int]]:
         """Plottable scalar channels as (series_key, feature_key, element_index).
 
-        Grouped vector features (e.g. ``observation.state.left_arm`` with
-        per-axis ``names``) are expanded into one channel per element, keyed
-        ``"<feature_key>.<name>"``. Legacy per-scalar features pass through
-        unchanged so older datasets still plot.
+        Grouped vector features (e.g. ``observation.state`` with per-axis
+        ``names`` like ``left_arm.tcp_pose.x``) are expanded into one channel
+        per element, keyed ``"<feature_key>.<name>"``. Legacy per-scalar
+        features pass through unchanged so older datasets still plot.
         """
         channels: list[tuple[str, str, int]] = []
         for key, feature in dataset.features.items():
