@@ -2219,6 +2219,8 @@ button:active {
     align-items: baseline;
     gap: 0.5rem;
     white-space: nowrap;
+    width: max-content;
+    min-width: 100%;
 }
 
 .terminal-log__stamp {
@@ -2239,6 +2241,26 @@ button:active {
     flex: 0 0 auto;
 }
 
+.terminal-log__level--info {
+    background: #0cb4d8;
+    color: #072531;
+}
+
+.terminal-log__level--warn {
+    background: #f0c247;
+    color: #3e2b00;
+}
+
+.terminal-log__level--error {
+    background: #d84b4b;
+    color: #fff4f4;
+}
+
+.terminal-log__level--ok {
+    background: #68c47f;
+    color: #0f2d17;
+}
+
 .terminal-log__source {
     color: #d7e4ed;
     font-weight: 700;
@@ -2247,9 +2269,9 @@ button:active {
 
 .terminal-log__message {
     color: #e6eef5;
-    flex: 1 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    flex: 0 0 auto;
+    overflow: visible;
+    text-overflow: clip;
 }
 
 .terminal-log__detail {

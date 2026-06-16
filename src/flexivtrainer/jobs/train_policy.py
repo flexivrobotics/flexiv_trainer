@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -79,6 +80,34 @@ EFFECTIVE_BATCH_SIZE_PATTERN = re.compile(
 )
 CHECKPOINT_STEP_PATTERN = re.compile(r"Checkpoint policy after step (?P<step>\d+)")
 EVAL_STEP_PATTERN = re.compile(r"Eval policy at step (?P<step>\d+)")
+UI_LOG_PREFIX = "@@TRAIN_LOG@@"
+
+
+def _stream_level(text: str) -> str:
+    lowered = text.lower()
+    if any(
+        token in lowered
+        for token in ("traceback", "exception", " fatal", "failed", "error")
+    ):
+        return "ERROR"
+    if any(token in lowered for token in ("warning", "warn", "deprecated")):
+        return "WARN"
+    return "INFO"
+
+
+def _encode_ui_log(
+    level: str,
+    source: str,
+    message: str,
+    detail: str | None = None,
+) -> str:
+    payload = {
+        "level": level,
+        "source": source,
+        "message": message,
+        "detail": detail or "",
+    }
+    return f"{UI_LOG_PREFIX}{json.dumps(payload, separators=(',', ':'))}"
 
 
 def resolve_training_device(configured: str) -> str:
@@ -248,6 +277,16 @@ class TrainingService:
             job.last_event = "training_finished"
 
     @staticmethod
+    def _append_ui_log(
+        job: TrainingJob,
+        level: str,
+        source: str,
+        message: str,
+        detail: str | None = None,
+    ) -> None:
+        job.logs.append(_encode_ui_log(level, source, message, detail))
+
+    @staticmethod
     def _pulse_detail(job: TrainingJob) -> str:
         parts = [
             f"job_id={job.job_id}",
@@ -368,6 +407,13 @@ class TrainingService:
                 if not text:
                     continue
                 job.logs.append(text)
+                self._append_ui_log(
+                    job,
+                    _stream_level(text),
+                    "TRAIN",
+                    text,
+                    f"job_id={job.job_id}",
+                )
                 self._update_job_from_log(job, text)
                 stream("TRAIN", text, detail=f"job_id={job.job_id}")
             job.return_code = job.process.wait()
@@ -392,6 +438,13 @@ class TrainingService:
                     style="red",
                 )
                 error("Training process exited non-zero", job.error)
+                self._append_ui_log(
+                    job,
+                    "ERROR",
+                    "TRAIN",
+                    "Training process exited non-zero",
+                    job.error,
+                )
                 return
 
             if job.pulse is not None:
@@ -410,6 +463,13 @@ class TrainingService:
                 style="green",
             )
             ok("Training artifacts ready", f"output={job.output_dir}")
+            self._append_ui_log(
+                job,
+                "OK",
+                "TRAIN",
+                "Training artifacts ready",
+                f"output={job.output_dir}",
+            )
         except Exception as exc:  # pragma: no cover - subprocess specific
             if job.status == "stopped":
                 return
@@ -427,6 +487,13 @@ class TrainingService:
                 job.pulse = None
             section("Training Failed", f"job_id={job.job_id}", style="red")
             error("Training log collection failed", job.error)
+            self._append_ui_log(
+                job,
+                "ERROR",
+                "TRAIN",
+                "Training log collection failed",
+                job.error,
+            )
 
     def shutdown(self) -> None:
         with self._lock:
@@ -469,6 +536,13 @@ class TrainingService:
                 _set_process_tree_suspended(job.process.pid, suspend=True)
                 job.paused = True
                 info("Training job paused", f"job_id={job.job_id}")
+                self._append_ui_log(
+                    job,
+                    "OK",
+                    "TRAIN",
+                    "Training job paused",
+                    f"job_id={job.job_id}",
+                )
             return job.snapshot()
 
     def resume(self) -> dict[str, Any]:
@@ -481,6 +555,13 @@ class TrainingService:
                 _set_process_tree_suspended(job.process.pid, suspend=False)
                 job.paused = False
                 info("Training job resumed", f"job_id={job.job_id}")
+                self._append_ui_log(
+                    job,
+                    "OK",
+                    "TRAIN",
+                    "Training job resumed",
+                    f"job_id={job.job_id}",
+                )
             return job.snapshot()
 
     def stop(self) -> dict[str, Any]:
@@ -515,6 +596,20 @@ class TrainingService:
                     ),
                 )
                 job.pulse = None
+            self._append_ui_log(
+                job,
+                "WARN",
+                "TRAIN",
+                "Training job stopped",
+                "reason=user request",
+            )
+            self._append_ui_log(
+                job,
+                "OK",
+                "TRAIN",
+                "Training job stopped",
+                f"job_id={job.job_id}",
+            )
             return job.snapshot()
 
     def status(self) -> dict[str, Any]:

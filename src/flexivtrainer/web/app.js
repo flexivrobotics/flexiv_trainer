@@ -59,6 +59,7 @@ const state = {
     trainingLogView: {
         stickToBottom: true,
         distanceFromBottom: 0,
+        scrollLeft: 0,
     },
     pathBrowser: {
         mode: "generic",
@@ -3503,6 +3504,7 @@ function _captureTrainingLogView(container) {
     state.trainingLogView = {
         stickToBottom: _isScrolledToBottom(logPane),
         distanceFromBottom,
+        scrollLeft: logPane.scrollLeft,
     };
 }
 
@@ -3520,12 +3522,13 @@ function _restoreTrainingLogView(container) {
         state.trainingLogView = {
             stickToBottom: _isScrolledToBottom(logPane),
             distanceFromBottom,
+            scrollLeft: logPane.scrollLeft,
         };
     };
 
     logPane.onscroll = updateScrollState;
     requestAnimationFrame(() => {
-        const view = state.trainingLogView || { stickToBottom: true, distanceFromBottom: 0 };
+        const view = state.trainingLogView || { stickToBottom: true, distanceFromBottom: 0, scrollLeft: 0 };
         if (view.stickToBottom) {
             logPane.scrollTop = logPane.scrollHeight;
         } else {
@@ -3534,6 +3537,7 @@ function _restoreTrainingLogView(container) {
                 logPane.scrollHeight - logPane.clientHeight - view.distanceFromBottom,
             );
         }
+        logPane.scrollLeft = Math.max(0, view.scrollLeft || 0);
         updateScrollState();
     });
 }
@@ -3582,7 +3586,8 @@ async function startTrainingRun(outputDir) {
 function _latestTrainingTrackerLine(status) {
     const logs = Array.isArray(status.logs) ? status.logs : [];
     for (let i = logs.length - 1; i >= 0; i -= 1) {
-        const line = String(logs[i] || "").replace(/\u001b\[[0-9;]*m/g, "");
+        const parsed = _parseTrainingLogEntry(logs[i], status.job_id);
+        const line = String(parsed.message || "").replace(/\u001b\[[0-9;]*m/g, "");
         const parts = line.split("\r").map((part) => part.trim()).filter(Boolean);
         for (let j = parts.length - 1; j >= 0; j -= 1) {
             const part = parts[j];
@@ -3688,11 +3693,50 @@ function _terminalClock() {
     return `${hh}:${mm}:${ss}`;
 }
 
-function _terminalLogRow(source, message, detail = "") {
+function _logLevelClass(level) {
+    const normalized = String(level || "INFO").toLowerCase();
+    return `terminal-log__level terminal-log__level--${normalized}`;
+}
+
+function _inferTrainingLogLevel(message) {
+    const lowered = String(message || "").toLowerCase();
+    if (["traceback", "exception", " fatal", "failed", "error"].some((token) => lowered.includes(token))) {
+        return "ERROR";
+    }
+    if (["warning", "warn", "deprecated"].some((token) => lowered.includes(token))) {
+        return "WARN";
+    }
+    return "INFO";
+}
+
+function _parseTrainingLogEntry(rawLine, jobId = "") {
+    const line = String(rawLine || "");
+    if (line.startsWith("@@TRAIN_LOG@@")) {
+        try {
+            const entry = JSON.parse(line.slice("@@TRAIN_LOG@@".length));
+            return {
+                level: entry.level || "INFO",
+                source: entry.source || "TRAIN",
+                message: entry.message || "",
+                detail: entry.detail || "",
+            };
+        } catch (_) {
+            // Fall back to raw rendering below if a stored entry is malformed.
+        }
+    }
+    return {
+        level: _inferTrainingLogLevel(line),
+        source: "TRAIN",
+        message: line,
+        detail: jobId ? `job_id=${jobId}` : "",
+    };
+}
+
+function _terminalLogRow(level, source, message, detail = "") {
     return `
         <div class="terminal-log__row">
             <span class="terminal-log__stamp">[${_terminalClock()}]</span>
-            <span class="terminal-log__level">INFO</span>
+            <span class="${_logLevelClass(level)}">${escapeHtml(level)}</span>
             <span class="terminal-log__source">${escapeHtml(source)}</span>
             <span class="terminal-log__message">${escapeHtml(message)}</span>
             ${detail ? `<span class="terminal-log__detail">${escapeHtml(detail)}</span>` : ""}
@@ -3717,11 +3761,12 @@ function renderTrainingTerminalLogs(status) {
         if (metrics.grad_norm !== undefined) parts.push(`grdn=${Number(metrics.grad_norm).toFixed(3)}`);
         if (metrics.lr !== undefined) parts.push(`lr=${Number(metrics.lr).toExponential(2)}`);
         if (status.log_lines !== undefined) parts.push(`lines=${status.log_lines}`);
-        html += _terminalLogRow("·", "Training job running", parts.join(" "));
+        html += _terminalLogRow("INFO", "·", "Training job running", parts.join(" "));
     }
 
     for (const line of logs) {
-        html += _terminalLogRow("TRAIN", line, status.job_id ? `job_id=${status.job_id}` : "");
+        const entry = _parseTrainingLogEntry(line, status.job_id);
+        html += _terminalLogRow(entry.level, entry.source, entry.message, entry.detail);
     }
     return html;
 }
