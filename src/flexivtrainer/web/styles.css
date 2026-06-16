@@ -1867,10 +1867,11 @@ button:active {
     gap: 0.95rem;
 }
 
-/* Reserve space so the fixed floating playback bar never covers action
-   buttons — only needed on steps that actually render the playback bar. */
+/* Reserve just enough space so the fixed floating playback bar never covers
+   action buttons — the panel + page-shell padding already supply most of the
+   clearance, so only a small amount is needed here on top. */
 #training-content.has-playback-bar {
-    padding-bottom: 3.0rem;
+    padding-bottom: 1.5rem;
 }
 
 #training-content .panel-header h2,
@@ -1891,7 +1892,7 @@ button:active {
 }
 
 #processing-content.has-playback-bar {
-    padding-bottom: 3.0rem;
+    padding-bottom: 1.5rem;
 }
 
 #processing-content .episode-list {
