@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from flexivtrainer.observability import info, ok
@@ -175,4 +175,24 @@ def frame_image(
         content=data,
         media_type="image/jpeg",
         headers={"Cache-Control": "private, max-age=3600, immutable"},
+    )
+
+
+@router.get("/video")
+def video(
+    path: str,
+    key: str,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> FileResponse:
+    """Stream a camera feed's MP4 directly (FileResponse supports range/seek)."""
+    try:
+        video_path = runtime.dataset_video_path(Path(path), key)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (RuntimeError, FileNotFoundError, KeyError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        video_path,
+        media_type="video/mp4",
+        headers={"Cache-Control": "private, max-age=3600"},
     )

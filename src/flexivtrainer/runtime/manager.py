@@ -704,6 +704,32 @@ class RuntimeManager:
         img.save(buf, format="JPEG", quality=80)
         return buf.getvalue()
 
+    def dataset_video_path(
+        self,
+        dataset_path: Path,
+        camera_key: str,
+        chunk_index: int = 0,
+        file_index: int = 0,
+    ) -> Path:
+        """Resolve the MP4 file for a camera feed so it can be streamed directly.
+
+        Playing the encoded video natively in the browser is far smoother than
+        decoding individual frames server-side. For a single-file episode the
+        whole clip is one MP4 and ``time = frame_index / fps``.
+        """
+        dataset_path, _ = self._resolve_dataset_repo(dataset_path)
+        relative = (
+            f"videos/{camera_key}/"
+            f"chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+        )
+        video_path = (dataset_path / relative).resolve()
+        # Guard against a camera_key that tries to escape the dataset directory.
+        if not str(video_path).startswith(str(dataset_path)):
+            raise ValueError("Access denied: video path escapes the dataset root")
+        if not video_path.is_file():
+            raise FileNotFoundError(f"No video file for '{camera_key}': {video_path}")
+        return video_path
+
 
 @lru_cache(maxsize=1)
 def get_runtime_manager() -> RuntimeManager:

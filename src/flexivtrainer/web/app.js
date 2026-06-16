@@ -661,12 +661,13 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     const isPlaying = state[playingKey];
     const datasetPath = preview.path;
 
-    // Camera feeds
+    // Camera feeds: stream the MP4 directly so the browser decodes it natively
+    // (smooth playback) instead of fetching one re-encoded JPEG per frame.
     const feedsHtml = (preview.camera_keys || []).map((cameraKey) => `
         <div class="feed">
             <div class="feed__header"><span>${cameraKey}</span></div>
             <div class="feed__placeholder" data-render-mode="live">
-                <img class="feed__image dataset-frame-img" data-camera-key="${cameraKey}" src="/datasets/frame-image?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(cameraKey)}&index=${currentFrame}" alt="${cameraKey} frame ${currentFrame}" />
+                <video class="feed__image dataset-frame-video" data-camera-key="${cameraKey}" src="/datasets/video?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(cameraKey)}" muted playsinline preload="auto" loop></video>
             </div>
         </div>
     `).join("");
@@ -724,6 +725,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
                 _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey);
             } else {
                 _stopDatasetPlayback(playingKey);
+                container.querySelectorAll(".dataset-frame-video").forEach((video) => video.pause());
             }
             // Update button
             playBtn.innerHTML = state[playingKey] ? DATASET_PAUSE_ICON : DATASET_PLAY_ICON;
@@ -757,6 +759,8 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
         _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
     };
 
+    // Restore the playhead position on the freshly-mounted videos.
+    _seekDatasetVideos(container, preview, currentFrame);
     // Start playback if already playing
     if (isPlaying) {
         _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey);
@@ -764,8 +768,21 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
 }
 
-function _frameImageUrl(preview, cameraKey, frameIndex) {
-    return `/datasets/frame-image?path=${encodeURIComponent(preview.path)}&key=${encodeURIComponent(cameraKey)}&index=${frameIndex}`;
+function _datasetPreviewFps(preview) {
+    return preview.fps && Number.isFinite(preview.fps) && preview.fps > 0 ? preview.fps : 30;
+}
+
+// Seek every camera <video> to the given frame (time = frame / fps). Frames are
+// concatenated at constant fps, so the frame index maps linearly to video time.
+function _seekDatasetVideos(container, preview, frameIndex) {
+    const t = frameIndex / _datasetPreviewFps(preview);
+    container.querySelectorAll(".dataset-frame-video").forEach((video) => {
+        if (video.readyState >= 1) {
+            video.currentTime = t;
+        } else {
+            video.addEventListener("loadedmetadata", () => { video.currentTime = t; }, { once: true });
+        }
+    });
 }
 
 function _formatPlaybackTime(seconds) {
@@ -774,27 +791,6 @@ function _formatPlaybackTime(seconds) {
     const minutes = Math.floor(total / 60);
     const secs = total % 60;
     return `${minutes}:${String(secs).padStart(2, "0")}`;
-}
-
-// Point every camera <img> at the given frame and resolve once they have all
-// finished loading (or errored). Used for manual scrubbing; playback prefetches
-// instead (see _startDatasetPlayback).
-function _loadDatasetFrameImages(container, preview, frameIndex) {
-    const imgs = [...container.querySelectorAll(".dataset-frame-img")];
-    return Promise.all(
-        imgs.map(
-            (img) =>
-                new Promise((resolve) => {
-                    const key = img.dataset.cameraKey;
-                    img.onload = img.onerror = () => {
-                        img.onload = img.onerror = null;
-                        resolve();
-                    };
-                    img.alt = `${key} frame ${frameIndex}`;
-                    img.src = _frameImageUrl(preview, key, frameIndex);
-                })
-        )
-    );
 }
 
 function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
@@ -836,92 +832,61 @@ function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
     });
 }
 
-// Used for manual scrubbing (slider): update meta immediately and request the
-// frame images without waiting (a single jump, so no pile-up risk).
+// Used for manual scrubbing (slider): update meta and seek the videos to match.
 function _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey) {
     _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
-    _loadDatasetFrameImages(container, preview, state[frameKey]);
+    _seekDatasetVideos(container, preview, state[frameKey]);
 }
-
-// How many frames ahead of the playhead to prefetch. Decoding a frame
-// server-side (~tens of ms per camera) is far slower than the 33 ms target
-// frame budget, so a single in-flight frame caps playback at the serial decode
-// rate (~7 fps). Prefetching a window keeps several decodes running in parallel
-// (the browser caps concurrent connections, so this can't flood the server) and
-// lets display tick at the target fps, pulling each frame from cache.
-const DATASET_PREFETCH_AHEAD = 16;
 
 function _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey) {
     _stopDatasetPlayback(playingKey);
-    const fps = preview.fps || 30;
+    const fps = _datasetPreviewFps(preview);
     const numFrames = preview.num_frames || 0;
     if (numFrames <= 0) return;
-    const interval = 1000 / fps;
-    const cameraKeys = preview.camera_keys || [];
     const gen = _datasetPlaybackGen[playingKey];
     const live = () => state[playingKey] && _datasetPlaybackGen[playingKey] === gen;
 
-    // index -> Promise that resolves once that frame's images are cached.
-    const buffer = new Map();
-    const warm = (index) => {
-        if (buffer.has(index)) return buffer.get(index);
-        const ready = Promise.all(
-            cameraKeys.map(
-                (key) =>
-                    new Promise((resolve) => {
-                        const img = new Image();
-                        img.onload = img.onerror = () => resolve();
-                        img.src = _frameImageUrl(preview, key, index);
-                    })
-            )
-        );
-        buffer.set(index, ready);
-        return ready;
-    };
-    const fillWindow = (from) => {
-        const keep = new Set();
-        for (let k = -1; k < DATASET_PREFETCH_AHEAD; k++) {
-            const idx = ((from + k) % numFrames + numFrames) % numFrames;
-            keep.add(idx);
-            if (k >= 0) warm(idx);
-        }
-        // Drop frames outside the window so prefetched images can be released.
-        for (const idx of [...buffer.keys()]) {
-            if (!keep.has(idx)) buffer.delete(idx);
-        }
-    };
+    const videos = [...container.querySelectorAll(".dataset-frame-video")];
+    if (!videos.length) return;
+    const master = videos[0];
 
-    async function loop() {
-        fillWindow(state[frameKey]); // prime the buffer before the first frame
-        while (live()) {
-            const start = performance.now();
-            const frame = (state[frameKey] + 1) % numFrames;
+    // Play every feed natively; the browser handles decode/timing smoothly.
+    videos.forEach((video) => {
+        const playResult = video.play();
+        if (playResult && typeof playResult.catch === "function") {
+            playResult.catch(() => {});
+        }
+    });
+
+    // Drive the slider/plots/legend from the master video's clock once per
+    // animation frame, so the playhead tracks the natively-decoded video.
+    const tick = () => {
+        if (!live()) return;
+        const frame = Math.min(
+            numFrames - 1,
+            Math.max(0, Math.round(master.currentTime * fps))
+        );
+        if (frame !== state[frameKey]) {
             state[frameKey] = frame;
-            fillWindow(frame);
-            await warm(frame); // usually already resolved from a prior window
-            if (!live()) return;
             _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
-            container.querySelectorAll(".dataset-frame-img").forEach((img) => {
-                img.alt = `${img.dataset.cameraKey} frame ${frame}`;
-                img.src = _frameImageUrl(preview, img.dataset.cameraKey, frame);
-            });
-            const elapsed = performance.now() - start;
-            if (elapsed < interval) {
-                await new Promise((resolve) => {
-                    _datasetPlaybackTimers[playingKey] = setTimeout(resolve, interval - elapsed);
-                });
+            // Correct any drift between feeds without disrupting the master.
+            for (let i = 1; i < videos.length; i++) {
+                if (Math.abs(videos[i].currentTime - master.currentTime) > 0.15) {
+                    videos[i].currentTime = master.currentTime;
+                }
             }
         }
-    }
-    loop();
+        _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tick);
+    };
+    _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tick);
 }
 
 function _stopDatasetPlayback(playingKey) {
-    // Bump the generation so any loop currently awaiting an image load exits.
+    // Bump the generation so any in-flight tick callback bails out.
     _datasetPlaybackGen[playingKey] = (_datasetPlaybackGen[playingKey] || 0) + 1;
-    const timer = _datasetPlaybackTimers[playingKey];
-    if (timer) {
-        clearTimeout(timer);
+    const handle = _datasetPlaybackTimers[playingKey];
+    if (handle) {
+        cancelAnimationFrame(handle);
         _datasetPlaybackTimers[playingKey] = null;
     }
 }
