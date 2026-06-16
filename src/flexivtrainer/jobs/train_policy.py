@@ -81,6 +81,29 @@ CHECKPOINT_STEP_PATTERN = re.compile(r"Checkpoint policy after step (?P<step>\d+
 EVAL_STEP_PATTERN = re.compile(r"Eval policy at step (?P<step>\d+)")
 
 
+def resolve_training_device(configured: str) -> str:
+    """Concrete --policy.device value for lerobot.
+
+    ``"auto"`` (or empty) detects the best available device on this machine so
+    the trainer is portable across platforms; an explicit value is passed
+    through unchanged. Passing a concrete device also avoids lerobot's
+    "Device 'None' is not available. Switching to ..." auto-detect log line.
+    """
+    if configured and configured.lower() != "auto":
+        return configured
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return "mps"
+    except Exception:  # torch missing/unimportable -> let CPU handle it
+        pass
+    return "cpu"
+
+
 @dataclass
 class TrainingJob:
     job_id: str
@@ -266,6 +289,11 @@ class TrainingService:
                     str(resolved_root),
                     "--policy.type",
                     policy_type,
+                    # Concrete device resolved for this machine (cuda/mps/cpu),
+                    # so lerobot uses the GPU without its "Device None" auto-
+                    # detect line and stays portable across platforms.
+                    "--policy.device",
+                    resolve_training_device(self._settings.training.default_device),
                     # Local trainer: never push checkpoints to the HF Hub.
                     # Without this, lerobot requires a policy.repo_id and aborts.
                     "--policy.push_to_hub",

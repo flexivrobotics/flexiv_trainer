@@ -96,7 +96,11 @@ class StorageConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     default_policy: str = "diffusion"
-    default_device: str = "cuda"
+    # Device passed to lerobot via --policy.device. "auto" (default) resolves to
+    # the best available device on this machine (cuda > mps > cpu) at train time,
+    # so the trainer stays portable across platforms; set an explicit "cuda" /
+    # "mps" / "cpu" to force one.
+    default_device: str = "auto"
     save_frequency: int = 5_000
 
 
