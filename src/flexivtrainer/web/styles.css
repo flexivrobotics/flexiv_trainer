@@ -1835,6 +1835,9 @@ button:active {
 #training-content {
     display: grid;
     gap: 0.95rem;
+    /* Reserve space so the fixed floating playback bar never covers the last
+       content (e.g. action buttons) when scrolled to the bottom. */
+    padding-bottom: 5.5rem;
 }
 
 #training-content .panel-header h2,
@@ -1852,6 +1855,8 @@ button:active {
 #processing-content {
     display: grid;
     gap: 0.95rem;
+    /* Clearance for the fixed floating playback bar (see #training-content). */
+    padding-bottom: 5.5rem;
 }
 
 #processing-content .episode-list {
@@ -1943,15 +1948,25 @@ button:active {
     border-radius: 8px;
 }
 
+/* Floating playback bar: pinned to the bottom of the viewport and centered, so
+   it stays reachable while scrolling through the camera feeds and plots. */
 .dataset-playback {
+    position: fixed;
+    left: 50%;
+    bottom: 1.1rem;
+    transform: translateX(-50%);
+    z-index: 60;
+    width: min(900px, calc(100vw - 3rem));
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    margin: 0.75rem 0;
-    padding: 0.6rem 1rem;
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.5);
+    margin: 0;
+    padding: 0.55rem 1rem;
+    border-radius: 18px;
+    background: var(--panel);
     border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(14px);
 }
 
 .dataset-playback__btn {
