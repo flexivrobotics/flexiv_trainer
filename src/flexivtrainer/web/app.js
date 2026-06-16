@@ -299,6 +299,14 @@ const TRAINING_RESTART_MARKUP = `
         <span>Restart</span>
     </span>
 `;
+const TRAINING_START_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+        </svg>
+        <span>Start</span>
+    </span>
+`;
 const TELEOP_STARTING_MARKUP = `
     <span class="button-content">
         <span class="button-spinner" aria-hidden="true"></span>
@@ -3374,7 +3382,7 @@ function renderTraining() {
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
             </div>
             <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
-            <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Start Training</button></div>
+            <div class="control-bar"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
         `;
         const grid = byId("policy-grid");
         Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
@@ -3392,13 +3400,14 @@ function renderTraining() {
             state.trainingStep = 1;
             renderTraining();
         };
-        byId("policy-start").onclick = async () => {
-            await startTrainingRun(outputDir);
+        byId("policy-start").onclick = () => {
+            state.trainingStep = 3;
+            renderTraining();
         };
         return;
     }
 
-    const status = state.trainingStatus || { status: "waiting", progress: 0, logs: [] };
+    const status = state.trainingStatus || { status: "ready", progress: 0, logs: [] };
     const progressDisplay = getTrainingProgressDisplay(status);
     const progress = progressDisplay.percent;
     const progressLabel = progressDisplay.label;
@@ -3408,6 +3417,16 @@ function renderTraining() {
     const isPaused = !!status.paused;
     const isStopped = status.status === "stopped";
     const isFailed = status.status === "failed";
+    const isCompleted = status.status === "completed";
+    const outputDir = getTrainingOutputDir();
+    const canStart = !!outputDir;
+    const showsRestart = isStopped || isFailed || isCompleted;
+    const primaryMarkup = isRunning
+        ? TELEOP_STOP_MARKUP
+        : showsRestart
+            ? TRAINING_RESTART_MARKUP
+            : TRAINING_START_MARKUP;
+    const primaryClass = isRunning ? "stop-button" : "start-button";
     const stateLabel = isPaused
         ? "Paused"
         : isRunning
@@ -3420,11 +3439,11 @@ function renderTraining() {
             <aside class="panel panel--soft control-panel training-controls">
                 <div class="panel-header"><h2>Training Control</h2></div>
                 <div class="control-stack">
+                    <button id="training-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
+                        ${primaryMarkup}
+                    </button>
                     <button id="training-pause-resume" class="button-with-icon" type="button" ${isRunning ? "" : "disabled"}>
                         ${isPaused ? TRAINING_RESUME_MARKUP : TRAINING_PAUSE_MARKUP}
-                    </button>
-                    <button id="training-stop" class="button-with-icon ${isStopped ? "start-button" : "stop-button"}" type="button" ${isRunning || isStopped ? "" : "disabled"}>
-                        ${isStopped ? TRAINING_RESTART_MARKUP : TELEOP_STOP_MARKUP}
                     </button>
                 </div>
                 <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
@@ -3452,19 +3471,21 @@ function renderTraining() {
             renderTraining();
         };
     }
-    const stopBtn = byId("training-stop");
-    if (stopBtn) {
-        stopBtn.onclick = async () => {
-            stopBtn.disabled = true;
+    const primaryActionBtn = byId("training-primary-action");
+    if (primaryActionBtn) {
+        primaryActionBtn.onclick = async () => {
+            primaryActionBtn.disabled = true;
             if (pauseResumeBtn) {
                 pauseResumeBtn.disabled = true;
             }
             try {
-                if (isStopped) {
-                    await startTrainingRun(getTrainingOutputDir());
+                if (isRunning) {
+                    state.trainingStatus = await api("/training/stop", { method: "POST" });
+                    renderTraining();
                     return;
                 }
-                state.trainingStatus = await api("/training/stop", { method: "POST" });
+                await startTrainingRun(outputDir);
+                return;
             } catch (error) {
                 showToast(error.message, true);
             }
@@ -3484,6 +3505,12 @@ function _formatTrainingStatusLabel(status) {
     const text = String(status).trim();
     if (!text) {
         return "—";
+    }
+    if (text.toLowerCase() === "waiting") {
+        return "Ready";
+    }
+    if (text.toLowerCase() === "ready") {
+        return "Ready";
     }
     return text.charAt(0).toUpperCase() + text.slice(1);
 }
@@ -3675,6 +3702,11 @@ function getTrainingProgressDisplay(status) {
     const speedText = speed != null && Number.isFinite(speed)
         ? `${speed.toFixed(2)} steps/s`
         : "-- steps/s";
+    const normalizedStatus = String(status.status || "").trim().toLowerCase();
+
+    if (normalizedStatus === "waiting" || normalizedStatus === "ready") {
+        return { percent, label: "Ready" };
+    }
 
     if (status.status === "running") {
         return { percent, label: escapeHtml(`${percent}% · ${stepText} · ${speedText}`) };
