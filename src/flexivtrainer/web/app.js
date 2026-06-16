@@ -3272,7 +3272,7 @@ function renderProcessing() {
                 <div class="training-main">
                     <div class="panel-header"><div><h2>${escapeHtml(title)}</h2></div></div>
                     <div id="merged-preview-block"></div>
-                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button></div>
+                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button><button id="merge-next" type="button">Next</button></div>
                 </div>
             </div>
         `;
@@ -3284,6 +3284,13 @@ function renderProcessing() {
             state.processingStep = 2;
             renderProcessing();
         };
+        byId("merge-next").onclick = () => {
+            applyMergedDatasetToTraining();
+            setActiveView("training");
+            bootstrapTraining()
+                .then(() => renderTraining())
+                .catch((error) => showToast(error.message, true));
+        };
         return;
     }
 }
@@ -3292,25 +3299,80 @@ function renderTraining() {
     const container = byId("training-content");
     _captureTrainingLogView(container);
     // The playback bar (and its bottom-padding reservation) only appears on
-    // step 1 once a dataset is loaded and previewed.
+    // the dataset-preview step once a dataset is loaded and previewed.
     container.classList.toggle(
         "has-playback-bar",
-        state.trainingStep === 1 && !!state.mergedDatasetPreview
+        state.trainingStep === 2 && !!state.mergedDatasetPreview
     );
 
     if (state.trainingStep === 1) {
         const loaded = !!state.mergedDatasetPath;
+        const datasetName = loaded ? state.mergedDatasetPath.split("/").pop() : "";
+        const preview = state.mergedDatasetPreview;
+        const meta = preview
+            ? `${(preview.num_episodes || 0).toLocaleString()} episodes · ${(preview.num_frames || 0).toLocaleString()} frames`
+            : "Loading dataset metadata…";
+
+        const bodyHtml = loaded
+            ? `
+            <div class="merged-dataset-entry" id="merged-dataset-entry">
+                <div class="episode-entry-row">
+                    <div class="episode-entry-card">
+                        <strong class="episode-entry-card__index">1</strong>
+                        <span class="episode-entry-card__divider" aria-hidden="true"></span>
+                        <div>
+                            <span class="episode-entry-card__name">${escapeHtml(datasetName || "Selected dataset")}</span>
+                            <div class="episode-row__meta">${escapeHtml(meta)}</div>
+                        </div>
+                    </div>
+                    <button class="round-icon-button round-icon-button--remove" id="training-remove-merged" type="button" aria-label="Remove ${escapeHtml(datasetName || "dataset")}" title="Remove ${escapeHtml(datasetName || "dataset")}">
+                        <span aria-hidden="true">&minus;</span>
+                    </button>
+                </div>
+            </div>`
+            : `<div class="merged-dataset-entry" id="merged-dataset-entry"><div class="episode-empty-state"><span>No training dataset selected.</span></div></div>`;
+
+        const controlHtml = `
+            <div class="control-bar control-bar--episode-step">
+                <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
+            </div>
+            <div class="control-bar control-bar--floating-step-nav">
+                <button id="training-next-step" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
+            </div>`;
+
+        const headerHtml = `<div class="panel-header panel-header--training-step"><div><h2 class="training-step-title">Load Training Dataset</h2></div></div>`;
+
+        container.innerHTML = `
+            ${headerHtml}
+            ${bodyHtml}
+            ${controlHtml}
+        `;
+
+        byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
+        if (loaded) {
+            byId("training-remove-merged").onclick = () => {
+                state.mergedDatasetPath = "";
+                state.mergedDatasetPreview = null;
+                state.mergedDatasetSeries = null;
+                state.mergedDatasetSelectedEpisode = null;
+                state.mergedDatasetEpisodes = [];
+                state.mergedDatasetScopeCache = {};
+                _stopDatasetPlayback("mergedDatasetPlaying");
+                renderTraining();
+            };
+        }
+        byId("training-next-step").onclick = () => {
+            state.trainingStep = 2;
+            renderTraining();
+        };
+        return;
+    }
+
+    if (state.trainingStep === 2) {
         const tSel = state.mergedDatasetSelectedEpisode;
         const tTitle = tSel == null ? "Whole Dataset" : `Episode ${tSel}`;
 
-        // Empty: prompt to browse for a dataset. Loaded: preview it exactly like
-        // the merged-dataset step in Data Processing — an episode list on the
-        // left ("Whole Dataset" + each episode), the selected scope on the right.
-        // Loaded: the control bar lives inside the main column so "Previous
-        // Step"/"Next" align with the scope (like Data Processing step 3).
-        // "Previous Step" drops the dataset and returns to selection.
-        const bodyHtml = loaded
-            ? `
+        container.innerHTML = `
             <div class="training-layout">
                 <aside class="panel">
                     <div class="panel-header"><h2>Episodes</h2></div>
@@ -3324,58 +3386,26 @@ function renderTraining() {
                         <button id="training-next-step" type="button">Next</button>
                     </div>
                 </div>
-            </div>`
-            : `<div class="merged-dataset-entry" id="merged-dataset-entry"><div class="episode-empty-state"><span>No training dataset selected.</span></div></div>`;
+            </div>`;
 
-        // Empty: the "+" opens the dataset browser; no scope layout yet.
-        const controlHtml = loaded
-            ? ""
-            : `<div class="control-bar control-bar--episode-step">
-                    <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
-                </div>
-                <div class="control-bar control-bar--floating-step-nav">
-                    <button id="training-next-step" type="button" disabled>Next</button>
-                </div>`;
-
-        // Empty state keeps the step title (like "Load Episodes" in Data
-        // Processing); the loaded preview drops it to match that page's merged
-        // preview step, which goes straight to the Episodes sidebar.
-        const headerHtml = loaded
-            ? ""
-            : `<div class="panel-header panel-header--training-step"><div><h2 class="training-step-title">Load Training Dataset</h2></div></div>`;
-
-        container.innerHTML = `
-            ${headerHtml}
-            ${bodyHtml}
-            ${controlHtml}
-        `;
-
-        if (loaded) {
-            _renderDatasetEpisodePicker(byId("training-dataset-episode-picker"), "training");
-            if (state.mergedDatasetPreview) {
-                renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
-            }
-            byId("training-prev-dataset").onclick = () => {
-                state.mergedDatasetPath = "";
-                state.mergedDatasetPreview = null;
-                state.mergedDatasetSeries = null;
-                state.mergedDatasetSelectedEpisode = null;
-                state.mergedDatasetEpisodes = [];
-                state.mergedDatasetScopeCache = {};
-                _stopDatasetPlayback("mergedDatasetPlaying");
-                renderTraining();
-            };
+        _renderDatasetEpisodePicker(byId("training-dataset-episode-picker"), "training");
+        if (state.mergedDatasetPreview) {
+            renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
         } else {
-            byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
+            byId("merged-dataset-preview-block").innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Loading dataset preview…</div></div>`;
         }
+        byId("training-prev-dataset").onclick = () => {
+            state.trainingStep = 1;
+            renderTraining();
+        };
         byId("training-next-step").onclick = () => {
-            state.trainingStep = 2;
+            state.trainingStep = 3;
             renderTraining();
         };
         return;
     }
 
-    if (state.trainingStep === 2) {
+    if (state.trainingStep === 3) {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
         const policiesReady = !!state.trainingPolicies;
         const outputDir = getTrainingOutputDir();
@@ -3401,11 +3431,11 @@ function renderTraining() {
             grid.appendChild(card);
         });
         byId("policy-prev").onclick = () => {
-            state.trainingStep = 1;
+            state.trainingStep = 2;
             renderTraining();
         };
         byId("policy-start").onclick = () => {
-            state.trainingStep = 3;
+            state.trainingStep = 4;
             renderTraining();
         };
         return;
@@ -3497,7 +3527,7 @@ function renderTraining() {
         };
     }
     byId("training-run-prev").onclick = () => {
-        state.trainingStep = 2;
+        state.trainingStep = 3;
         renderTraining();
     };
 }
@@ -3584,6 +3614,20 @@ function resetTrainingRunViewState() {
     };
 }
 
+function applyMergedDatasetToTraining() {
+    resetTrainingRunViewState();
+    state.mergedDatasetPath = state.mergedPath;
+    state.mergedDatasetPreview = state.mergedPreview;
+    state.mergedDatasetSeries = state.mergedSeries;
+    state.mergedDatasetSelectedEpisode = state.mergedSelectedEpisode;
+    state.mergedDatasetEpisodes = [...(state.mergedEpisodes || [])];
+    state.mergedDatasetScopeCache = { ...(state.mergedScopeCache || {}) };
+    state.mergedDatasetFrame = state.mergedFrame || 0;
+    state.mergedDatasetPlaying = false;
+    _stopDatasetPlayback("mergedDatasetPlaying");
+    state.trainingStep = 1;
+}
+
 function getTrainingOutputDir() {
     const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
     const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
@@ -3598,7 +3642,7 @@ function getTrainingOutputDir() {
 async function startTrainingRun(outputDir) {
     state.trainingOutputStamp = "";
     try {
-        state.trainingStep = 3;
+        state.trainingStep = 4;
         renderTraining();
         state.trainingStatus = await api("/training/start", {
             method: "POST",
@@ -3611,7 +3655,7 @@ async function startTrainingRun(outputDir) {
         renderTraining();
         window.clearInterval(state.intervals.training);
         state.intervals.training = window.setInterval(async () => {
-            if (state.activeView !== "training" || state.trainingStep !== 3) {
+            if (state.activeView !== "training" || state.trainingStep !== 4) {
                 return;
             }
             state.trainingStatus = await api("/training/status");
@@ -3619,7 +3663,7 @@ async function startTrainingRun(outputDir) {
         }, 2000);
     } catch (error) {
         showToast(error.message, true);
-        state.trainingStep = 2;
+        state.trainingStep = 3;
         renderTraining();
         throw error;
     }
