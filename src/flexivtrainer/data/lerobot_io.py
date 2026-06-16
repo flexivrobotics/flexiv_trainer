@@ -16,10 +16,71 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# Camera MP4s are previewed in the browser across Ubuntu/macOS/Windows on
+# x64/arm64/aarch64, so the codec must be H.264 — the one format every browser
+# decodes natively (AV1 and HEVC are not universally supported, and AV1 has no
+# hardware decode on many ARM boards). Hardware H.264 encoders in cross-platform
+# preference order; software libx264 ("h264") is the universal fallback and is
+# present in every PyAV wheel.
+_H264_HW_ENCODERS: tuple[str, ...] = (
+    "h264_videotoolbox",  # macOS
+    "h264_nvenc",  # NVIDIA (Linux/Windows, incl. Jetson)
+    "h264_vaapi",  # Linux Intel/AMD
+    "h264_qsv",  # Intel Quick Sync
+)
+_SOFTWARE_H264 = "h264"  # libx264
+
+
+def _encoder_available(name: str) -> bool:
+    """True if FFmpeg (via PyAV) exposes ``name`` as a video encoder.
+
+    Note: presence in the build does not guarantee a working device at runtime
+    (e.g. ``h264_nvenc`` exists but no NVIDIA GPU is installed), which is why
+    hardware encoders are opt-in rather than the default.
+    """
+    try:
+        import av
+
+        av.codec.Codec(name, "w")
+        return True
+    except Exception:
+        return False
+
+
+def resolve_recording_vcodec(preference: str) -> str:
+    """Resolve a configured codec to a concrete, browser-playable H.264 encoder.
+
+    - ``"auto"`` -> the first available hardware H.264 encoder for this platform,
+      else software ``"h264"``. Never resolves to AV1/HEVC.
+    - an explicit codec -> used as-is if available in this FFmpeg build; otherwise
+      a warning is logged and it falls back to software ``"h264"`` so a config
+      shared across machines never hard-fails recording when an encoder is
+      missing.
+    """
+    if preference == "auto":
+        for name in _H264_HW_ENCODERS:
+            if _encoder_available(name):
+                logger.info("Auto-selected hardware video codec: %s", name)
+                return name
+        return _SOFTWARE_H264
+    if _encoder_available(preference):
+        return preference
+    logger.warning(
+        "Configured video codec %r is not available in this FFmpeg build; "
+        "falling back to software %r.",
+        preference,
+        _SOFTWARE_H264,
+    )
+    return _SOFTWARE_H264
+
 
 _IMAGE_ENTRY_TO_CAMERA = {
     "observation.images.ego": "ego",

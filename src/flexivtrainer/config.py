@@ -156,6 +156,15 @@ class AppSettings(BaseSettings):
     public_base_url: str | None = None
     robot_type: str = "flexiv_rizon_dual"
     default_task: str = "Dual-arm Flexiv teleoperation demonstration"
+    # Codec for the recorded camera MP4s. Default is software H.264 (libx264):
+    # it is browser-decodable everywhere and encodes identically on Ubuntu/macOS/
+    # Windows across x64/arm64/aarch64, so dataset previews play on every platform
+    # (LeRobot's default 'libsvtav1'/AV1 has no hardware decode on many ARM boards
+    # and won't play in the embedded webview). Set 'auto' to prefer a platform
+    # hardware H.264 encoder (videotoolbox/nvenc/vaapi/qsv) with software fallback,
+    # or name an explicit encoder. Resolved by resolve_recording_vcodec(); an
+    # unavailable codec falls back to software 'h264' rather than failing.
+    video_codec: str = "h264"
     network_interface_whitelist: list[str] = Field(default_factory=list)
     teleop_robot_pairs: list[TeleopRobotPair] = Field(default_factory=list)
     cameras: list[CameraConfig] = Field(

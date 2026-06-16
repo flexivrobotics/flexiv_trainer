@@ -35,6 +35,7 @@ from flexivtrainer.data.lerobot_io import (
     extract_recording_images,
     resolve_recording_entries,
     resolve_recording_image_names,
+    resolve_recording_vcodec,
 )
 
 
@@ -144,6 +145,9 @@ class RecordingService:
                 robot_type=self._settings.robot_type,
                 use_videos=True,
                 streaming_encoding=True,
+                # Resolve to a concrete, browser-playable H.264 encoder for this
+                # platform (see AppSettings.video_codec / resolve_recording_vcodec).
+                vcodec=resolve_recording_vcodec(self._settings.video_codec),
             )
         except Exception as exc:
             shutil.rmtree(staging_path, ignore_errors=True)

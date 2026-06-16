@@ -14,6 +14,7 @@
 
 import numpy as np
 
+from flexivtrainer.data import lerobot_io
 from flexivtrainer.data.lerobot_io import (
     DEFAULT_RECORDING_ENTRY_KEYS,
     arm_side_label,
@@ -22,6 +23,7 @@ from flexivtrainer.data.lerobot_io import (
     extract_recording_images,
     resolve_recording_image_names,
     resolve_recording_entries,
+    resolve_recording_vcodec,
 )
 
 
@@ -58,6 +60,33 @@ def make_images() -> dict[str, np.ndarray]:
 
 def test_resolve_recording_entries_defaults_to_all_options() -> None:
     assert resolve_recording_entries() == list(DEFAULT_RECORDING_ENTRY_KEYS)
+
+
+def test_resolve_vcodec_auto_prefers_hardware_h264(monkeypatch) -> None:
+    # Only NVENC "available" -> auto picks it over software h264.
+    monkeypatch.setattr(
+        lerobot_io, "_encoder_available", lambda name: name == "h264_nvenc"
+    )
+    assert resolve_recording_vcodec("auto") == "h264_nvenc"
+
+
+def test_resolve_vcodec_auto_falls_back_to_software_h264(monkeypatch) -> None:
+    # No hardware encoder available -> software h264, never AV1/HEVC.
+    monkeypatch.setattr(lerobot_io, "_encoder_available", lambda name: name == "h264")
+    assert resolve_recording_vcodec("auto") == "h264"
+
+
+def test_resolve_vcodec_explicit_passthrough_when_available(monkeypatch) -> None:
+    monkeypatch.setattr(lerobot_io, "_encoder_available", lambda name: True)
+    assert resolve_recording_vcodec("h264_videotoolbox") == "h264_videotoolbox"
+    # An explicitly chosen AV1 is honoured (the operator opted in).
+    assert resolve_recording_vcodec("libsvtav1") == "libsvtav1"
+
+
+def test_resolve_vcodec_unavailable_explicit_falls_back_to_software(monkeypatch) -> None:
+    # A config shared across machines names an encoder this build lacks.
+    monkeypatch.setattr(lerobot_io, "_encoder_available", lambda name: False)
+    assert resolve_recording_vcodec("h264_nvenc") == "h264"
 
 
 def test_resolve_recording_entries_rejects_unknown_values() -> None:
