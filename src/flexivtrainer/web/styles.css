@@ -2172,6 +2172,56 @@ button:active {
     padding: 1rem;
     background: rgba(29, 44, 54, 0.98);
     color: #f9f5ee;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.95rem;
+    line-height: 1.35;
+}
+
+.terminal-log__row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    white-space: nowrap;
+}
+
+.terminal-log__stamp {
+    color: rgba(200, 214, 226, 0.85);
+    flex: 0 0 auto;
+}
+
+.terminal-log__level {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.6rem;
+    padding: 0.05rem 0.35rem;
+    border-radius: 4px;
+    background: #0cb4d8;
+    color: #072531;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.terminal-log__source {
+    color: #d7e4ed;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.terminal-log__message {
+    color: #e6eef5;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.terminal-log__detail {
+    color: rgba(198, 210, 222, 0.9);
+    flex: 0 0 auto;
+}
+
+.terminal-log__empty {
+    color: rgba(214, 224, 234, 0.9);
 }
 
 .result-pill {

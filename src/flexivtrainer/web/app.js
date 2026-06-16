@@ -3400,19 +3400,166 @@ function renderTraining() {
     }
 
     const status = state.trainingStatus || { status: "waiting", progress: 0, logs: [] };
-    const done = status.status === "completed";
-    const failed = status.status === "failed";
+    const progressDisplay = getTrainingProgressDisplay(status);
+    const progress = progressDisplay.percent;
+    const progressLabel = progressDisplay.label;
     container.innerHTML = `
         <div class="panel-header"><div><h2>Training Run</h2></div></div>
-        <div class="progress-bar"><span style="width: ${status.progress || 0}%"></span></div>
-        <div class="result-pill ${done ? "result-pill--success" : failed ? "result-pill--error" : ""}">${done ? "Training completed" : failed ? formatValue(status.error || "Training failed") : formatValue(status.status)}</div>
-        <pre class="log-pane">${(status.logs || []).join("\n") || "Training logs will appear here."}</pre>
+        <div class="progress-bar progress-bar--thick"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
+        <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
         <div class="control-bar"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
     `;
     byId("training-run-prev").onclick = () => {
         state.trainingStep = 2;
         renderTraining();
     };
+}
+
+function _latestTrainingTrackerLine(status) {
+    const logs = Array.isArray(status.logs) ? status.logs : [];
+    for (let i = logs.length - 1; i >= 0; i -= 1) {
+        const line = String(logs[i] || "").replace(/\u001b\[[0-9;]*m/g, "");
+        const parts = line.split("\r").map((part) => part.trim()).filter(Boolean);
+        for (let j = parts.length - 1; j >= 0; j -= 1) {
+            const part = parts[j];
+            const idx = part.indexOf("Training:");
+            if (idx !== -1) {
+                return part.slice(idx);
+            }
+        }
+    }
+    return "";
+}
+
+function _parseTrainingTrackerLine(line) {
+    if (!line) {
+        return { step: null, total: null, percent: null, speed: null };
+    }
+
+    const percentMatch = line.match(/Training:\s*([0-9]+(?:\.[0-9]+)?)%/i);
+    const stepTotalMatch = line.match(/(?:\||\s)(\d+)\s*\/\s*(\d+)(?:\s|\[|$)/);
+    const speedMatch = line.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:it|step)\/s/i);
+
+    const percent = percentMatch ? Number(percentMatch[1]) : null;
+    const step = stepTotalMatch ? Number(stepTotalMatch[1]) : null;
+    const total = stepTotalMatch ? Number(stepTotalMatch[2]) : null;
+    const speed = speedMatch ? Number(speedMatch[1]) : null;
+
+    return {
+        percent: Number.isFinite(percent) ? percent : null,
+        step: Number.isFinite(step) ? step : null,
+        total: Number.isFinite(total) ? total : null,
+        speed: Number.isFinite(speed) ? speed : null,
+    };
+}
+
+function getTrainingProgressDisplay(status) {
+    if (status.status === "completed") {
+        return { percent: 100, label: "100% · completed" };
+    }
+    if (status.status === "failed") {
+        return {
+            percent: Number.isFinite(status.progress) ? Math.max(0, Math.min(100, Math.round(status.progress))) : 0,
+            label: escapeHtml(formatValue(status.error || "Training failed")),
+        };
+    }
+
+    const latestTrackerLine = _latestTrainingTrackerLine(status);
+    const tracker = _parseTrainingTrackerLine(latestTrackerLine);
+
+    const step = Number(status.metrics?.step);
+    const total = Number(status.total_steps);
+    const safeStep = Number.isFinite(step) ? Math.max(0, Math.trunc(step)) : null;
+    const safeTotal = Number.isFinite(total) && total > 0 ? Math.trunc(total) : null;
+
+    const resolvedStep = safeStep != null ? safeStep : (tracker.step != null ? Math.max(0, Math.trunc(tracker.step)) : null);
+    const resolvedTotal = safeTotal != null ? safeTotal : (tracker.total != null && tracker.total > 0 ? Math.trunc(tracker.total) : null);
+
+    let percent = resolvedStep != null && resolvedTotal != null
+        ? Math.max(0, Math.min(100, Math.round((resolvedStep / resolvedTotal) * 100)))
+        : null;
+    if (percent == null && tracker.percent != null) {
+        percent = Math.max(0, Math.min(100, Math.round(tracker.percent)));
+    }
+    if (percent == null) {
+        percent = Number.isFinite(status.progress) ? Math.max(0, Math.min(100, Math.round(status.progress))) : 0;
+    }
+
+    let speed = tracker.speed;
+    if (speed == null) {
+        const elapsed = String(status.elapsed || "");
+        const m = elapsed.match(/(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/);
+        if (m && resolvedStep != null) {
+            const hours = Number(m[1] || 0);
+            const minutes = Number(m[2] || 0);
+            const seconds = Number(m[3] || 0);
+            const totalSeconds = (hours * 3600) + (minutes * 60) + seconds;
+            if (totalSeconds > 0) {
+                speed = resolvedStep / totalSeconds;
+            }
+        }
+    }
+
+    const stepText = resolvedStep != null
+        ? `${resolvedStep}/${resolvedTotal != null ? resolvedTotal : "?"}`
+        : "0/?";
+    const speedText = speed != null && Number.isFinite(speed)
+        ? `${speed.toFixed(2)} steps/s`
+        : "-- steps/s";
+
+    if (status.status === "running") {
+        return { percent, label: escapeHtml(`${percent}% · ${stepText} · ${speedText}`) };
+    }
+    return {
+        percent,
+        label: escapeHtml(`${formatValue(status.status)} · ${stepText} · ${speedText}`),
+    };
+}
+
+function _terminalClock() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+}
+
+function _terminalLogRow(source, message, detail = "") {
+    return `
+        <div class="terminal-log__row">
+            <span class="terminal-log__stamp">[${_terminalClock()}]</span>
+            <span class="terminal-log__level">INFO</span>
+            <span class="terminal-log__source">${escapeHtml(source)}</span>
+            <span class="terminal-log__message">${escapeHtml(message)}</span>
+            ${detail ? `<span class="terminal-log__detail">${escapeHtml(detail)}</span>` : ""}
+        </div>
+    `;
+}
+
+function renderTrainingTerminalLogs(status) {
+    const logs = status.logs || [];
+    if (!logs.length) {
+        return `<div class="terminal-log__empty">Training logs will appear here.</div>`;
+    }
+
+    let html = "";
+    if (status.status === "running") {
+        const metrics = status.metrics || {};
+        const parts = [];
+        if (status.job_id) parts.push(`job_id=${status.job_id}`);
+        if (status.elapsed) parts.push(`elapsed=${status.elapsed}`);
+        if (metrics.step !== undefined) parts.push(`step=${metrics.step}/${status.total_steps ?? "?"}`);
+        if (metrics.loss !== undefined) parts.push(`loss=${Number(metrics.loss).toFixed(3)}`);
+        if (metrics.grad_norm !== undefined) parts.push(`grdn=${Number(metrics.grad_norm).toFixed(3)}`);
+        if (metrics.lr !== undefined) parts.push(`lr=${Number(metrics.lr).toExponential(2)}`);
+        if (status.log_lines !== undefined) parts.push(`lines=${status.log_lines}`);
+        html += _terminalLogRow("·", "Training job running", parts.join(" "));
+    }
+
+    for (const line of logs) {
+        html += _terminalLogRow("TRAIN", line, status.job_id ? `job_id=${status.job_id}` : "");
+    }
+    return html;
 }
 
 function isEpisodeBrowserMode() {
