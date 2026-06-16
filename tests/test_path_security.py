@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for path traversal protection in browse_path, preview_dataset, combine_episodes."""
+"""Tests for path traversal protection in browse_path, preview_dataset, merge_episodes."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,16 +92,16 @@ class TestPreviewDatasetSecurity:
             manager.preview_dataset(tmp_path / ".." / ".." / "etc" / "passwd")
 
 
-class TestCombineEpisodesSecurity:
-    def test_combine_with_path_outside_storage_raises(self, tmp_path: Path) -> None:
+class TestMergeEpisodesSecurity:
+    def test_merge_with_path_outside_storage_raises(self, tmp_path: Path) -> None:
         manager = make_manager_with_storage(tmp_path)
 
         with pytest.raises(ValueError, match="Access denied"):
-            manager.combine_episodes(["/etc/malicious"], "output")
+            manager.merge_episodes(["/etc/malicious"], "output")
 
-    def test_combine_with_traversal_path_raises(self, tmp_path: Path) -> None:
+    def test_merge_with_traversal_path_raises(self, tmp_path: Path) -> None:
         manager = make_manager_with_storage(tmp_path)
         evil_path = str(tmp_path / ".." / ".." / "etc")
 
         with pytest.raises(ValueError, match="Access denied"):
-            manager.combine_episodes([evil_path], "output")
+            manager.merge_episodes([evil_path], "output")

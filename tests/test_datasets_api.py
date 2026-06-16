@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the datasets API routes (browse, preview, combine) including security."""
+"""Tests for the datasets API routes (browse, preview, merge) including security."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,9 +94,10 @@ def test_list_episodes_returns_episodes(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     app.dependency_overrides[get_runtime_manager] = lambda: manager
     client = TestClient(app)
+    # An episode is recognized as a standard LeRobot dataset via meta/info.json.
     ep_dir = tmp_path / "episodes" / "ep_001"
-    ep_dir.mkdir(parents=True, exist_ok=True)
-    (ep_dir / "episode.json").write_text("{}")
+    (ep_dir / "meta").mkdir(parents=True, exist_ok=True)
+    (ep_dir / "meta" / "info.json").write_text("{}")
 
     response = client.get("/datasets/episodes")
 

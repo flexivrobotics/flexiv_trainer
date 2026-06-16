@@ -27,7 +27,7 @@ from flexivtrainer.config import (
     TeleopRobotPair,
     get_settings,
 )
-from flexivtrainer.jobs.train import TrainingService
+from flexivtrainer.jobs.train_policy import TrainingService
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.teleop.service import TeleopService
 
@@ -333,7 +333,7 @@ class RuntimeManager:
             "storage": {
                 "root": str(self.settings.storage.root),
                 "episodes": str(self.settings.storage.episodes_root),
-                "combined": str(self.settings.storage.combined_root),
+                "merged": str(self.settings.storage.merged_root),
                 "training": str(self.settings.storage.training_root),
             },
             "robot_config": self.robot_config_snapshot(),
@@ -410,7 +410,7 @@ class RuntimeManager:
                     "progress": 50,
                     "detail": {
                         "episodes_root": str(self.settings.storage.episodes_root),
-                        "combined_root": str(self.settings.storage.combined_root),
+                        "merged_root": str(self.settings.storage.merged_root),
                     },
                 },
                 {
@@ -475,17 +475,17 @@ class RuntimeManager:
                 )
         return episodes
 
-    def combine_episodes(
+    def merge_episodes(
         self,
         episode_paths: list[str],
         output_name: str,
         on_progress: Any | None = None,
     ) -> dict[str, Any]:
         try:
-            from flexivtrainer.jobs.combine import combine_episode_datasets
+            from flexivtrainer.jobs.merge_episodes import merge_episode_datasets
         except ImportError as exc:
             raise RuntimeError(
-                _optional_dependency_error("Dataset combination", exc)
+                _optional_dependency_error("Dataset merge", exc)
             ) from exc
 
         storage_root = self.settings.storage.root.expanduser().resolve()
@@ -495,8 +495,8 @@ class RuntimeManager:
                 raise ValueError(
                     f"Access denied: path must be within storage root ({storage_root})"
                 )
-        return combine_episode_datasets(
-            roots, self.settings.storage.combined_root, output_name, on_progress
+        return merge_episode_datasets(
+            roots, self.settings.storage.merged_root, output_name, on_progress
         )
 
     def _resolve_dataset_repo(self, dataset_path: Path) -> tuple[Path, str]:
@@ -516,7 +516,7 @@ class RuntimeManager:
         """Return a cached LeRobotDataset for the given path.
 
         The cache is invalidated when the dataset directory's mtime changes, so
-        a regenerated combined dataset under the same name is picked up.
+        a regenerated merged dataset under the same name is picked up.
         """
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset

@@ -15,7 +15,7 @@
 from pathlib import Path
 
 from flexivtrainer.config import AppSettings, StorageConfig
-from flexivtrainer.jobs.train import TrainingJob, TrainingService
+from flexivtrainer.jobs.train_policy import TrainingJob, TrainingService
 
 
 def make_service(tmp_path: Path) -> TrainingService:

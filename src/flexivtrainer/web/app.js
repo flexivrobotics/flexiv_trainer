@@ -27,15 +27,15 @@ const state = {
     episodes: [],
     selectedEpisodes: [],
     preview: null,
-    combinedPreview: null,
-    combinedPath: "",
-    combineProgress: null,
+    mergedPreview: null,
+    mergedPath: "",
+    mergeProgress: null,
     previewSeries: null,
-    combinedSeries: null,
+    mergedSeries: null,
     previewFrame: 0,
-    combinedFrame: 0,
+    mergedFrame: 0,
     previewPlaying: false,
-    combinedPlaying: false,
+    mergedPlaying: false,
     // Training page state
     mergedDatasetPath: "",
     mergedDatasetPreview: null,
@@ -385,7 +385,7 @@ function buildDatasetPlotGroups(numericKeys) {
 }
 
 // Pending pacing-timer handle per playback context (keyed by its playingKey:
-// "previewPlaying", "combinedPlaying", "mergedDatasetPlaying").
+// "previewPlaying", "mergedPlaying", "mergedDatasetPlaying").
 const _datasetPlaybackTimers = {};
 // Monotonic generation per playback context. Bumped whenever playback is
 // (re)started or stopped, so a loop awaiting an image load can detect that it
@@ -596,32 +596,32 @@ function _showPreviewLoadingOverlay(containerId) {
         </div>`;
 }
 
-async function _pollCombineProgress() {
+async function _pollMergeProgress() {
     while (true) {
         await new Promise((r) => setTimeout(r, 400));
         if (state.processingStep !== 3) return;
         try {
-            const prog = await api("/datasets/combine-progress");
-            state.combineProgress = prog;
+            const prog = await api("/datasets/merge-progress");
+            state.mergeProgress = prog;
             if (prog.status === "done") {
                 const result = prog.result;
-                state.combinedPath = result.root;
+                state.mergedPath = result.root;
                 // Hide progress block and show loading overlay
                 const progressBlock = document.querySelector(".merge-progress-block");
                 if (progressBlock) progressBlock.classList.add("hidden");
-                const previewBlock = byId("combined-preview-block");
+                const previewBlock = byId("merged-preview-block");
                 if (previewBlock) {
                     previewBlock.classList.remove("hidden");
-                    _showPreviewLoadingOverlay("combined-preview-block");
+                    _showPreviewLoadingOverlay("merged-preview-block");
                 }
-                state.combinedPreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
-                state.combinedFrame = 0;
-                state.combinedPlaying = false;
-                _stopDatasetPlayback("combinedPlaying");
+                state.mergedPreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
+                state.mergedFrame = 0;
+                state.mergedPlaying = false;
+                _stopDatasetPlayback("mergedPlaying");
                 try {
-                    state.combinedSeries = await api(`/datasets/series?path=${encodeURIComponent(result.root)}`);
+                    state.mergedSeries = await api(`/datasets/series?path=${encodeURIComponent(result.root)}`);
                 } catch (_) {
-                    state.combinedSeries = null;
+                    state.mergedSeries = null;
                 }
                 renderProcessing();
                 return;
@@ -1475,7 +1475,7 @@ function renderHomeStorage() {
     [
         ["UI URL", state.summary.backend.ui_url],
         ["Episodes", state.summary.storage.episodes],
-        ["Merged datasets", state.summary.storage.combined],
+        ["Merged datasets", state.summary.storage.merged],
         ["Training outputs", state.summary.storage.training],
     ].forEach(([label, value]) => {
         const item = document.createElement("div");
@@ -2919,7 +2919,7 @@ function renderProcessing() {
                     <div id="episode-preview-block"></div>
                     <div class="control-bar">
                         <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
-                        <button id="training-combine" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Merge Selected Episodes</button>
+                        <button id="training-merge" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Merge Selected Episodes</button>
                     </div>
                 </div>
             </div>
@@ -2974,19 +2974,19 @@ function renderProcessing() {
             state.processingStep = 1;
             renderProcessing();
         };
-        byId("training-combine").onclick = async () => {
+        byId("training-merge").onclick = async () => {
             try {
                 state.processingStep = 3;
-                state.combineProgress = null;
-                state.combinedPreview = null;
-                state.combinedSeries = null;
+                state.mergeProgress = null;
+                state.mergedPreview = null;
+                state.mergedSeries = null;
                 renderProcessing();
-                await api("/datasets/combine", {
+                await api("/datasets/merge", {
                     method: "POST",
                     body: JSON.stringify({ episode_paths: state.selectedEpisodes, output_name: `merged-${Date.now()}` }),
                 });
                 // Poll for progress
-                await _pollCombineProgress();
+                await _pollMergeProgress();
             } catch (error) {
                 showToast(error.message, true);
                 state.processingStep = 2;
@@ -2997,8 +2997,8 @@ function renderProcessing() {
     }
 
     if (state.processingStep === 3) {
-        const prog = state.combineProgress;
-        const merging = !state.combinedPreview;
+        const prog = state.mergeProgress;
+        const merging = !state.mergedPreview;
         const overallPercent = prog && prog.total_episodes ? Math.round((prog.episode_index / prog.total_episodes) * 100) : 0;
         const overallLabel = prog ? `${prog.episode_index}/${prog.total_episodes}` : "";
         container.innerHTML = `
@@ -3009,13 +3009,13 @@ function renderProcessing() {
                     <div class="progress-bar progress-bar--thick"><span style="width: ${overallPercent}%"></span><span class="progress-bar__text">${overallLabel}</span></div>
                 </div>
             </div>
-            <div class="${state.combinedPreview ? "" : "hidden"}" id="combined-preview-block"></div>
-            <div class="control-bar"><button class="secondary-button" id="combine-prev" type="button">Previous Step</button></div>
+            <div class="${state.mergedPreview ? "" : "hidden"}" id="merged-preview-block"></div>
+            <div class="control-bar"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button></div>
         `;
-        if (state.combinedPreview) {
-            renderDatasetPreviewBlock("combined-preview-block", state.combinedPreview, state.combinedSeries?.series || null, "combinedFrame", "combinedPlaying");
+        if (state.mergedPreview) {
+            renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
         }
-        byId("combine-prev").onclick = () => {
+        byId("merge-prev").onclick = () => {
             state.processingStep = 2;
             renderProcessing();
         };
@@ -3404,8 +3404,8 @@ function openMergedDatasetBrowser() {
     openBrowser({
         mode: "episodes",
         title: "",
-        startPath: state.summary.storage.combined,
-        rootPath: state.summary.storage.combined,
+        startPath: state.summary.storage.merged,
+        rootPath: state.summary.storage.merged,
         directoriesOnly: true,
         multiSelect: false,
         allowNavigation: false,

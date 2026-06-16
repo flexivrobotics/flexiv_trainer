@@ -53,7 +53,7 @@ class StorageConfig(BaseModel):
     root: Path = Path(".local")
     episodes_dirname: str = "episodes"
     staging_dirname: str = "staging"
-    combined_dirname: str = "datasets"
+    merged_dirname: str = "datasets"
     training_dirname: str = "training"
     cache_dirname: str = "cache"
 
@@ -66,8 +66,8 @@ class StorageConfig(BaseModel):
         return self.root / self.staging_dirname
 
     @property
-    def combined_root(self) -> Path:
-        return self.root / self.combined_dirname
+    def merged_root(self) -> Path:
+        return self.root / self.merged_dirname
 
     @property
     def training_root(self) -> Path:
@@ -89,7 +89,7 @@ class StorageConfig(BaseModel):
         self.root.mkdir(parents=True, exist_ok=True)
         self.episodes_root.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
-        self.combined_root.mkdir(parents=True, exist_ok=True)
+        self.merged_root.mkdir(parents=True, exist_ok=True)
         self.training_root.mkdir(parents=True, exist_ok=True)
         self.cache_root.mkdir(parents=True, exist_ok=True)
 

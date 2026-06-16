@@ -24,13 +24,13 @@ def _load_manifest(root: Path) -> Any:
     return EpisodeManifest.from_path(root)
 
 
-def combine_episode_datasets(
+def merge_episode_datasets(
     episode_roots: list[Path],
     output_root: Path,
     output_name: str,
     on_progress: Any | None = None,
 ) -> dict[str, Any]:
-    """Combine episode datasets using LeRobot's built-in merge_datasets.
+    """Merge episode datasets using LeRobot's built-in merge_datasets.
 
     This uses file-level copy (parquet + video) rather than frame-by-frame
     decode/encode, making it significantly faster.
