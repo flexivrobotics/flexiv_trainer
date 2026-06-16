@@ -49,6 +49,11 @@ const state = {
     mergedDatasetSeries: null,
     mergedDatasetFrame: 0,
     mergedDatasetPlaying: false,
+    // Training-dataset preview scope (mirrors the merged-preview state above):
+    // null = whole dataset, else an episode index; plus the episode list/cache.
+    mergedDatasetSelectedEpisode: null,
+    mergedDatasetEpisodes: [],
+    mergedDatasetScopeCache: {},
     outputDir: "",
     selectedPolicy: "diffusion",
     pathBrowser: {
@@ -691,26 +696,55 @@ async function _pollMergeProgress() {
     }
 }
 
-// Switch the merged-dataset preview to a scope: null = whole dataset, or an
-// episode index. Results are cached per scope so toggling back is instant.
-async function _selectMergedScope(episodeIndex) {
-    const cacheKey = episodeIndex == null ? "all" : String(episodeIndex);
-    state.mergedSelectedEpisode = episodeIndex;
-    state.mergedFrame = 0;
-    state.mergedPlaying = false;
-    _stopDatasetPlayback("mergedPlaying");
+// Per-scope merged-dataset preview controller, shared by the Data Processing
+// (step 3) and Policy Training (step 1) pages. Each context names the state
+// keys it reads/writes, the preview block element, and how to re-render.
+const MERGED_PREVIEW_CTX = {
+    processing: {
+        path: () => state.mergedPath,
+        previewBlockId: "merged-preview-block",
+        rerender: () => renderProcessing(),
+        keys: {
+            selected: "mergedSelectedEpisode", episodes: "mergedEpisodes",
+            cache: "mergedScopeCache", preview: "mergedPreview",
+            series: "mergedSeries", frame: "mergedFrame", playing: "mergedPlaying",
+        },
+    },
+    training: {
+        path: () => state.mergedDatasetPath,
+        previewBlockId: "merged-dataset-preview-block",
+        rerender: () => renderTraining(),
+        keys: {
+            selected: "mergedDatasetSelectedEpisode", episodes: "mergedDatasetEpisodes",
+            cache: "mergedDatasetScopeCache", preview: "mergedDatasetPreview",
+            series: "mergedDatasetSeries", frame: "mergedDatasetFrame",
+            playing: "mergedDatasetPlaying",
+        },
+    },
+};
 
-    const cached = state.mergedScopeCache[cacheKey];
-    if (cached) {
-        state.mergedPreview = cached.preview;
-        state.mergedSeries = cached.series;
-        renderProcessing();
+// Switch a merged-dataset preview to a scope: null = whole dataset, or an
+// episode index. Results are cached per scope so toggling back is instant.
+async function _selectDatasetScope(ctxName, episodeIndex) {
+    const ctx = MERGED_PREVIEW_CTX[ctxName];
+    const k = ctx.keys;
+    const cacheKey = episodeIndex == null ? "all" : String(episodeIndex);
+    state[k.selected] = episodeIndex;
+    state[k.frame] = 0;
+    state[k.playing] = false;
+    _stopDatasetPlayback(k.playing);
+
+    const cache = state[k.cache] || (state[k.cache] = {});
+    if (cache[cacheKey]) {
+        state[k.preview] = cache[cacheKey].preview;
+        state[k.series] = cache[cacheKey].series;
+        ctx.rerender();
         return;
     }
 
-    renderProcessing();
-    _showPreviewLoadingOverlay("merged-preview-block");
-    const path = state.mergedPath;
+    ctx.rerender();
+    _showPreviewLoadingOverlay(ctx.previewBlockId);
+    const path = ctx.path();
     const epQuery = episodeIndex == null ? "" : `&episode_index=${episodeIndex}`;
     try {
         const preview = await api(`/datasets/preview?path=${encodeURIComponent(path)}${epQuery}`);
@@ -720,15 +754,42 @@ async function _selectMergedScope(episodeIndex) {
         } catch (_) {
             series = null;
         }
-        state.mergedScopeCache[cacheKey] = { preview, series };
+        cache[cacheKey] = { preview, series };
         // Ignore a stale response if the user switched scope while loading.
-        if (state.mergedSelectedEpisode !== episodeIndex) return;
-        state.mergedPreview = preview;
-        state.mergedSeries = series;
-        renderProcessing();
+        if (state[k.selected] !== episodeIndex) return;
+        state[k.preview] = preview;
+        state[k.series] = series;
+        ctx.rerender();
     } catch (error) {
         showToast(error.message, true);
     }
+}
+
+// Populate an episode picker ("Whole Dataset" + each episode) for a context.
+function _renderDatasetEpisodePicker(pickerEl, ctxName) {
+    if (!pickerEl) return;
+    const k = MERGED_PREVIEW_CTX[ctxName].keys;
+    const sel = state[k.selected];
+    const current = state[k.preview];
+    const episodeList =
+        (current && current.episodes && current.episodes.length
+            ? current.episodes
+            : state[k.episodes]) || [];
+    const totalFrames =
+        episodeList.reduce((sum, ep) => sum + (ep.num_frames || 0), 0)
+        || (current && current.num_frames) || 0;
+    const entries = [{ label: "Whole Dataset", index: null, num_frames: totalFrames }].concat(
+        episodeList.map((ep) => ({ label: `Episode ${ep.index}`, index: ep.index, num_frames: ep.num_frames }))
+    );
+    entries.forEach((entry) => {
+        const isSelected = entry.index === sel || (entry.index == null && sel == null);
+        const row = document.createElement("div");
+        row.className = `episode-row episode-row--selectable dataset-scope-row ${isSelected ? "episode-row--selected" : ""}`.trim();
+        const meta = `<span class="episode-row__meta">${(entry.num_frames || 0).toLocaleString()} frames</span>`;
+        row.innerHTML = `<div class="episode-row__main"><span>${escapeHtml(entry.label)}</span></div>${meta}`;
+        row.onclick = () => _selectDatasetScope(ctxName, entry.index);
+        pickerEl.appendChild(row);
+    });
 }
 
 function _updateMergeProgressBars(prog) {
@@ -816,6 +877,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     }).join("");
 
     container.innerHTML = `
+        <span class="eyebrow dataset-feed-title">Videos</span>
         <div class="feed-row dataset-feed-row">${feedsHtml}</div>
         ${playbackHtml}
         <div class="dataset-plots-grid">${plotsHtml}</div>
@@ -3135,10 +3197,10 @@ function renderProcessing() {
         // loaded (merge progress is shown in an overlay on the previous step).
         if (!state.mergedPreview) return;
 
-        // List "Merged Dataset" + each episode on the left; the main panel
+        // List "Whole Dataset" + each episode on the left; the main panel
         // previews the selected scope (whole dataset or one episode).
         const sel = state.mergedSelectedEpisode;
-        const title = sel == null ? "Merged Dataset" : `Episode ${sel}`;
+        const title = sel == null ? "Whole Dataset" : `Episode ${sel}`;
         container.innerHTML = `
             <div class="training-layout">
                 <aside class="panel">
@@ -3153,30 +3215,7 @@ function renderProcessing() {
             </div>
         `;
 
-        const picker = byId("merged-episode-picker");
-        // The backend includes the full episode list in every preview response
-        // (whole-dataset or episode-scoped), so derive it from the current
-        // preview and fall back to the list captured when the merge finished.
-        const episodeList =
-            (state.mergedPreview && state.mergedPreview.episodes && state.mergedPreview.episodes.length
-                ? state.mergedPreview.episodes
-                : state.mergedEpisodes) || [];
-        const entries = [{ label: "Merged Dataset", index: null }].concat(
-            episodeList.map((ep) => ({
-                label: `Episode ${ep.index}`,
-                index: ep.index,
-                num_frames: ep.num_frames,
-            }))
-        );
-        entries.forEach((entry) => {
-            const isSelected = entry.index === sel || (entry.index == null && sel == null);
-            const row = document.createElement("div");
-            row.className = `episode-row episode-row--selectable ${isSelected ? "episode-row--selected" : ""}`.trim();
-            const meta = entry.index == null ? "" : `<span class="episode-row__meta">${entry.num_frames} frames</span>`;
-            row.innerHTML = `<div class="episode-row__main"><span>${escapeHtml(entry.label)}</span></div>${meta}`;
-            row.onclick = () => _selectMergedScope(entry.index);
-            picker.appendChild(row);
-        });
+        _renderDatasetEpisodePicker(byId("merged-episode-picker"), "processing");
 
         renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
         byId("merge-prev").onclick = () => {
@@ -3189,41 +3228,77 @@ function renderProcessing() {
 
 function renderTraining() {
     const container = byId("training-content");
-    container.classList.toggle("has-playback-bar", state.trainingStep > 1);
+    // The playback bar (and its bottom-padding reservation) only appears on
+    // step 1 once a dataset is loaded and previewed.
+    container.classList.toggle(
+        "has-playback-bar",
+        state.trainingStep === 1 && !!state.mergedDatasetPreview
+    );
 
     if (state.trainingStep === 1) {
-        container.innerHTML = `
-            <div class="panel-header panel-header--training-step">
-                <div>
-                    <h2 class="training-step-title">Load Training Dataset</h2>
+        const loaded = !!state.mergedDatasetPath;
+        const tSel = state.mergedDatasetSelectedEpisode;
+        const tTitle = tSel == null ? "Whole Dataset" : `Episode ${tSel}`;
+
+        // Empty: prompt to browse for a dataset. Loaded: preview it exactly like
+        // the merged-dataset step in Data Processing — an episode list on the
+        // left ("Whole Dataset" + each episode), the selected scope on the right.
+        const bodyHtml = loaded
+            ? `
+            <div class="training-layout">
+                <aside class="panel">
+                    <div class="panel-header"><h2>Episodes</h2></div>
+                    <div class="episode-list" id="training-dataset-episode-picker"></div>
+                </aside>
+                <div class="training-main">
+                    <div class="panel-header"><div><h2>${escapeHtml(tTitle)}</h2></div></div>
+                    <div id="merged-dataset-preview-block"></div>
                 </div>
-            </div>
-            <div class="merged-dataset-entry" id="merged-dataset-entry">
-                ${state.mergedDatasetPath
-                ? `<div class="episode-entry-row"><div class="episode-entry-card"><strong class="episode-entry-card__index">1</strong><span class="episode-entry-card__divider" aria-hidden="true"></span><span class="episode-entry-card__name">${escapeHtml(state.mergedDatasetPath.split("/").pop())}</span></div><button class="round-icon-button round-icon-button--remove" id="training-remove-dataset" type="button" aria-label="Remove dataset" title="Remove dataset"><span aria-hidden="true">&minus;</span></button></div>`
-                : `<div class="episode-empty-state"><span>No training dataset selected.</span></div>`
-            }
-            </div>
-            <div id="merged-dataset-preview-block" class="${state.mergedDatasetPreview ? "" : "hidden"}"></div>
-            <div class="control-bar control-bar--episode-step">
-                <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets">
-                    <span aria-hidden="true">+</span>
-                </button>
-                <button id="training-next-step" type="button" ${state.mergedDatasetPath ? "" : "disabled"}>Next</button>
-            </div>
+            </div>`
+            : `<div class="merged-dataset-entry" id="merged-dataset-entry"><div class="episode-empty-state"><span>No training dataset selected.</span></div></div>`;
+
+        // Loaded: "Previous Step" drops the dataset and returns to selection.
+        // Empty: the "+" opens the dataset browser.
+        const controlHtml = loaded
+            ? `<div class="control-bar">
+                    <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
+                    <button id="training-next-step" type="button">Next</button>
+                </div>`
+            : `<div class="control-bar control-bar--episode-step">
+                    <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
+                    <button id="training-next-step" type="button" disabled>Next</button>
+                </div>`;
+
+        // Empty state keeps the step title (like "Load Episodes" in Data
+        // Processing); the loaded preview drops it to match that page's merged
+        // preview step, which goes straight to the Episodes sidebar.
+        const headerHtml = loaded
+            ? ""
+            : `<div class="panel-header panel-header--training-step"><div><h2 class="training-step-title">Load Training Dataset</h2></div></div>`;
+
+        container.innerHTML = `
+            ${headerHtml}
+            ${bodyHtml}
+            ${controlHtml}
         `;
-        if (state.mergedDatasetPreview) {
-            renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
-        }
-        byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
-        const removeBtn = byId("training-remove-dataset");
-        if (removeBtn) {
-            removeBtn.onclick = () => {
+
+        if (loaded) {
+            _renderDatasetEpisodePicker(byId("training-dataset-episode-picker"), "training");
+            if (state.mergedDatasetPreview) {
+                renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
+            }
+            byId("training-prev-dataset").onclick = () => {
                 state.mergedDatasetPath = "";
                 state.mergedDatasetPreview = null;
                 state.mergedDatasetSeries = null;
+                state.mergedDatasetSelectedEpisode = null;
+                state.mergedDatasetEpisodes = [];
+                state.mergedDatasetScopeCache = {};
+                _stopDatasetPlayback("mergedDatasetPlaying");
                 renderTraining();
             };
+        } else {
+            byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
         }
         byId("training-next-step").onclick = () => {
             state.trainingStep = 2;
@@ -3588,18 +3663,29 @@ function openMergedDatasetBrowser() {
             const path = paths[0];
             if (!path) return;
             state.mergedDatasetPath = path;
+            state.mergedDatasetPreview = null;
+            state.mergedDatasetSeries = null;
+            state.mergedDatasetSelectedEpisode = null;
+            state.mergedDatasetEpisodes = [];
+            state.mergedDatasetScopeCache = {};
+            state.mergedDatasetFrame = 0;
+            state.mergedDatasetPlaying = false;
+            _stopDatasetPlayback("mergedDatasetPlaying");
             closeBrowser();
+            renderTraining();
             _showPreviewLoadingOverlay("merged-dataset-preview-block");
             try {
-                state.mergedDatasetPreview = await api(`/datasets/preview?path=${encodeURIComponent(path)}`);
-                state.mergedDatasetFrame = 0;
-                state.mergedDatasetPlaying = false;
-                _stopDatasetPlayback("mergedDatasetPlaying");
+                const preview = await api(`/datasets/preview?path=${encodeURIComponent(path)}`);
+                let series = null;
                 try {
-                    state.mergedDatasetSeries = await api(`/datasets/series?path=${encodeURIComponent(path)}`);
+                    series = await api(`/datasets/series?path=${encodeURIComponent(path)}`);
                 } catch (_) {
-                    state.mergedDatasetSeries = null;
+                    series = null;
                 }
+                state.mergedDatasetEpisodes = preview.episodes || [];
+                state.mergedDatasetScopeCache = { all: { preview, series } };
+                state.mergedDatasetPreview = preview;
+                state.mergedDatasetSeries = series;
             } catch (error) {
                 state.mergedDatasetPreview = null;
                 state.mergedDatasetSeries = null;

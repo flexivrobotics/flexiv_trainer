@@ -315,6 +315,16 @@ button:disabled {
     text-transform: uppercase;
 }
 
+/* "Videos" heading above the camera feeds in a dataset preview. Matches the
+   plot-card eyebrow (.dataset-plot-card .eyebrow) so both blue titles look the
+   same — same size and weight. */
+.dataset-feed-title {
+    display: block;
+    margin: 0 0 0.5rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
 .number-list,
 .plain-list {
     margin: 0;
@@ -1674,6 +1684,23 @@ button:active {
     flex: 0 0 auto;
     font-size: 0.78rem;
     color: var(--muted, #6b7c89);
+}
+
+/* Scope picker rows (Whole Dataset + each episode): smaller, uniform text so
+   the frame count fits beside the label in the narrow sidebar, and every entry
+   reads at the same size. */
+.dataset-scope-row .episode-row__main,
+.dataset-scope-row .episode-row__meta {
+    font-size: 0.8rem;
+}
+
+/* Let the label wrap to a second line rather than truncate with an ellipsis
+   (overrides the nowrap/ellipsis used for episode names elsewhere). */
+#processing-content .dataset-scope-row .episode-row__main span,
+#training-content .dataset-scope-row .episode-row__main span {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
 }
 
 .panel-header--training-step {
