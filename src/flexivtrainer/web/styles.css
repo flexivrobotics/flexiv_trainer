@@ -822,6 +822,76 @@ button:disabled {
     stroke-linejoin: round;
 }
 
+/* Episode-preview plots: thin trend lines and black, non-bold legends (the
+   chips sit on the light page background) with the current-frame value shown. */
+.dataset-plot-card .trend-chart__line {
+    stroke-width: 1.5;
+}
+
+.dataset-plot-card .trend-chart__legend-item {
+    color: #1a1a1a;
+}
+
+.dataset-plot-card .trend-chart__legend-item strong {
+    color: #1a1a1a;
+    font-weight: 400;
+}
+
+.dataset-plot-card .trend-chart__legend-value {
+    color: #1a1a1a;
+    font-variant-numeric: tabular-nums;
+    margin-left: 0.1rem;
+}
+
+.dataset-plot-card .trend-chart__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+}
+
+.dataset-scope-chip {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    border: 1px solid rgba(31, 56, 74, 0.18);
+    border-radius: 14px;
+    padding: 0.42rem 0.58rem;
+    background: rgba(255, 255, 255, 0.68);
+    min-width: 10.8rem;
+}
+
+.dataset-scope-chip--off {
+    opacity: 0.64;
+}
+
+.dataset-scope-chip__axis,
+.dataset-scope-chip__sub {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
+    color: #1a1a1a;
+    font-size: 0.79rem;
+}
+
+.dataset-scope-chip__axis {
+    font-weight: 600;
+}
+
+.dataset-scope-chip__subrows {
+    display: grid;
+    gap: 0.2rem;
+    padding-left: 1.25rem;
+}
+
+.dataset-scope-chip__sub .trend-chart__legend-value {
+    margin-left: 0.25rem;
+}
+
+.dataset-scope-chip input[type="checkbox"] {
+    margin: 0;
+    accent-color: var(--accent-strong);
+}
+
 .trend-chart__swatch {
     width: 0.7rem;
     height: 0.7rem;
@@ -1753,7 +1823,7 @@ button:active {
 /* Keep the Episodes sidebar sized to its own content. Without this the grid
    stretches it to match the (much taller) preview column, leaving a large
    empty panel below the episode list. */
-.training-layout > aside {
+.training-layout>aside {
     align-self: start;
 }
 
@@ -1914,11 +1984,25 @@ button:active {
     cursor: pointer;
 }
 
+.dataset-playback__meta {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.08rem;
+    min-width: 5.8rem;
+}
+
+.dataset-playback__timer {
+    font-size: 0.74rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
 .dataset-playback__counter {
     font-size: 0.82rem;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-    min-width: 5.5rem;
     text-align: right;
 }
 

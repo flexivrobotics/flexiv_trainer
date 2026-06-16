@@ -232,7 +232,9 @@ class RuntimeManager:
         elif teleop_pair_count == 0:
             robot_data_state = "Not configured"
             robot_data_tone = "error"
-            robot_data_detail = "Enter two leader and two follower robot serial numbers."
+            robot_data_detail = (
+                "Enter two leader and two follower robot serial numbers."
+            )
         elif teleop_snapshot.initialized:
             robot_data_state = "Connected"
             robot_data_tone = "ok"
@@ -587,7 +589,9 @@ class RuntimeManager:
             for key, feature in dataset.features.items()
             if feature["dtype"] in {"image", "video"}
         ]
-        numeric_keys = [series_key for series_key, _, _ in self._numeric_channels(dataset)]
+        numeric_keys = [
+            series_key for series_key, _, _ in self._numeric_channels(dataset)
+        ]
         first_item = dataset.get_raw_item(0) if dataset.num_frames else {}
         return {
             "name": dataset_path.name,
@@ -621,13 +625,17 @@ class RuntimeManager:
                 return None
             if isinstance(val, torch.Tensor):
                 flat = val.reshape(-1)
-                return flat[element_index].item() if element_index < flat.numel() else None
+                return (
+                    flat[element_index].item() if element_index < flat.numel() else None
+                )
             if isinstance(val, np.ndarray):
                 flat = val.reshape(-1)
                 return float(flat[element_index]) if element_index < flat.size else None
             if isinstance(val, (list, tuple)):
                 return float(val[element_index]) if element_index < len(val) else None
-            if element_index == 0 and isinstance(val, (int, float, np.integer, np.floating)):
+            if element_index == 0 and isinstance(
+                val, (int, float, np.integer, np.floating)
+            ):
                 return float(val)
             return None
 
@@ -638,7 +646,9 @@ class RuntimeManager:
                 ts = ts.item()
             timestamps.append(float(ts) if ts is not None else idx / dataset.fps)
             for series_key, feature_key, element_index in channels:
-                series[series_key].append(_element(item.get(feature_key), element_index))
+                series[series_key].append(
+                    _element(item.get(feature_key), element_index)
+                )
 
         return {
             "path": str(dataset_path),

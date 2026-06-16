@@ -104,6 +104,7 @@ const state = {
     },
     cameraFeeds: {},
     recordingEntries: [],
+    datasetPlotScope: {},
     notifications: {
         items: [],
         unreadCount: 0,
@@ -391,13 +392,15 @@ const _datasetPlaybackTimers = {};
 // has been superseded (e.g. by a re-render) and exit instead of racing.
 const _datasetPlaybackGen = {};
 
-function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
-    const width = 960;
-    const height = 540;
-    const left = 44;
-    const right = 18;
+function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame, scope, fps) {
+    // Keep SVG aspect ratio aligned with .trend-chart (3:1) so the plot uses
+    // the full canvas width without horizontal letterboxing.
+    const width = 1200;
+    const height = 400;
+    const left = 58;
+    const right = 12;
     const top = 18;
-    const bottom = 24;
+    const bottom = 48;
     const innerWidth = width - left - right;
     const innerHeight = height - top - bottom;
 
@@ -442,6 +445,24 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
         lines.push(`<line class="trend-chart__zero" x1="${left}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}"></line>`);
     }
 
+    // Axis ticks/labels
+    const labels = [];
+    const xTicks = 6;
+    const yTicks = 5;
+    const safeFps = fps && Number.isFinite(fps) && fps > 0 ? fps : 30;
+    const totalSeconds = numFrames > 1 ? (numFrames - 1) / safeFps : 0;
+    for (let i = 0; i <= xTicks; i++) {
+        const ratio = i / xTicks;
+        const x = left + ratio * innerWidth;
+        const seconds = (ratio * totalSeconds).toFixed(1);
+        labels.push(`<text class="trend-chart__axis" x="${x}" y="${height - 14}" text-anchor="middle">${seconds}s</text>`);
+    }
+    for (let i = 0; i <= yTicks; i++) {
+        const ratio = i / yTicks;
+        const y = top + ratio * innerHeight;
+        const value = (max - ratio * (max - min)).toFixed(1);
+        labels.push(`<text class="trend-chart__axis" x="${left - 8}" y="${y + 5}" text-anchor="end">${value}</text>`);
+    }
     // Playhead
     if (numFrames > 1 && currentFrame >= 0) {
         const px = left + (currentFrame / (numFrames - 1)) * innerWidth;
@@ -450,8 +471,12 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
 
     // Paths
     const paths = [];
-    const drawSeries = (keys, colors, dash) => {
+    const drawSeries = (keys, colors, dash, role) => {
         for (let ci = 0; ci < keys.length; ci++) {
+            const enabled = role === "state"
+                ? !!scope?.stateEnabled?.[ci]
+                : !!scope?.actionEnabled?.[ci];
+            if (!enabled) continue;
             const key = keys[ci];
             const arr = key && seriesData[key];
             if (!arr) continue;
@@ -471,28 +496,91 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) {
             }
         }
     };
-    drawSeries(group.stateKeys, group.stateColors, false);
-    drawSeries(group.actionKeys, group.actionColors, true);
+    drawSeries(group.stateKeys, group.stateColors, false, "state");
+    drawSeries(group.actionKeys, group.actionColors, true, "action");
 
-    return `<svg class="trend-chart__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true"><g>${lines.join("")}</g>${paths.join("")}</svg>`;
+    return `<svg class="trend-chart__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true"><g>${lines.join("")}</g>${paths.join("")}${labels.join("")}</svg>`;
 }
 
-function _buildDatasetPlotLegend(seriesData, group) {
-    const items = [];
-    const pushItems = (keys, colors, prefix, dashed) => {
-        for (let i = 0; i < group.labels.length; i++) {
-            const key = keys[i];
-            const hasData = !!(key && seriesData[key] && seriesData[key].some((v) => v !== null));
-            items.push(`
-                <span class="trend-chart__legend-item${hasData ? "" : " trend-chart__legend-item--dim"}">
-                    <span class="trend-chart__swatch${dashed ? " trend-chart__swatch--dashed" : ""}" style="--swatch:${colors[i]}"></span>
-                    <strong>${prefix}.${group.labels[i]}</strong>
-                </span>
-            `);
-        }
+function _formatLegendValue(value) {
+    return value !== null && value !== undefined && Number.isFinite(value)
+        ? value.toFixed(2)
+        : "—";
+}
+
+function _datasetPlotScopeKey(containerId, groupId) {
+    return `${containerId}:${groupId}`;
+}
+
+function _ensureDatasetPlotScope(containerId, group) {
+    const key = _datasetPlotScopeKey(containerId, group.id);
+    const size = group.labels.length;
+    const existing = state.datasetPlotScope[key];
+    const scope = existing || {
+        axisEnabled: Array(size).fill(true),
+        stateEnabled: Array(size).fill(true),
+        actionEnabled: Array(size).fill(true),
     };
-    pushItems(group.stateKeys, group.stateColors, "state", false);
-    pushItems(group.actionKeys, group.actionColors, "command", true);
+    for (const field of ["axisEnabled", "stateEnabled", "actionEnabled"]) {
+        const source = Array.isArray(scope[field]) ? scope[field] : [];
+        scope[field] = Array.from({ length: size }, (_, i) => !!source[i]);
+    }
+    for (let i = 0; i < size; i++) {
+        scope.axisEnabled[i] = !!(scope.stateEnabled[i] || scope.actionEnabled[i]);
+    }
+    state.datasetPlotScope[key] = scope;
+    return scope;
+}
+
+function _groupHasVisibleData(seriesData, group, scope) {
+    for (let i = 0; i < group.labels.length; i++) {
+        if (scope.stateEnabled[i]) {
+            const arr = group.stateKeys[i] ? seriesData[group.stateKeys[i]] : null;
+            if (arr && arr.some((v) => v !== null && Number.isFinite(v))) return true;
+        }
+        if (scope.actionEnabled[i]) {
+            const arr = group.actionKeys[i] ? seriesData[group.actionKeys[i]] : null;
+            if (arr && arr.some((v) => v !== null && Number.isFinite(v))) return true;
+        }
+    }
+    return false;
+}
+
+function _buildDatasetPlotLegend(seriesData, group, currentFrame, scope, groupIndex) {
+    const items = [];
+    for (let i = 0; i < group.labels.length; i++) {
+        const stateKey = group.stateKeys[i];
+        const actionKey = group.actionKeys[i];
+        const stateArr = stateKey ? seriesData[stateKey] : null;
+        const actionArr = actionKey ? seriesData[actionKey] : null;
+        const hasStateData = !!(stateArr && stateArr.some((v) => v !== null && Number.isFinite(v)));
+        const hasActionData = !!(actionArr && actionArr.some((v) => v !== null && Number.isFinite(v)));
+        const axisEnabled = !!scope.axisEnabled[i];
+        const stateEnabled = !!scope.stateEnabled[i];
+        const actionEnabled = !!scope.actionEnabled[i];
+        items.push(`
+            <div class="dataset-scope-chip${axisEnabled ? "" : " dataset-scope-chip--off"}">
+                <label class="dataset-scope-chip__axis">
+                    <input class="dataset-plot-scope-toggle" data-group-index="${groupIndex}" data-axis-index="${i}" data-scope-role="axis" type="checkbox" ${axisEnabled ? "checked" : ""} />
+                    <strong>${group.labels[i]}</strong>
+                </label>
+                <div class="dataset-scope-chip__subrows">
+                    <label class="dataset-scope-chip__sub${hasStateData ? "" : " trend-chart__legend-item--dim"}">
+                        <input class="dataset-plot-scope-toggle" data-group-index="${groupIndex}" data-axis-index="${i}" data-scope-role="state" type="checkbox" ${stateEnabled ? "checked" : ""} ${stateKey ? "" : "disabled"} />
+                        <span class="trend-chart__swatch" style="--swatch:${group.stateColors[i]}"></span>
+                        <span>state</span>
+                        <span class="trend-chart__legend-value">${_formatLegendValue(stateArr ? stateArr[currentFrame] : null)}</span>
+                    </label>
+                    <label class="dataset-scope-chip__sub${hasActionData ? "" : " trend-chart__legend-item--dim"}">
+                        <input class="dataset-plot-scope-toggle" data-group-index="${groupIndex}" data-axis-index="${i}" data-scope-role="action" type="checkbox" ${actionEnabled ? "checked" : ""} ${actionKey ? "" : "disabled"} />
+                        <span class="trend-chart__swatch trend-chart__swatch--dashed" style="--swatch:${group.actionColors[i]}"></span>
+                        <span>action</span>
+                        <span class="trend-chart__legend-value">${_formatLegendValue(actionArr ? actionArr[currentFrame] : null)}</span>
+                    </label>
+                </div>
+            </div>
+        `);
+    }
     return items.join("");
 }
 
@@ -588,28 +676,26 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
         <div class="dataset-playback">
             <button class="dataset-playback__btn" data-action="${isPlaying ? "pause" : "play"}" type="button" aria-label="${isPlaying ? "Pause" : "Play"}" style="display:inline-flex;align-items:center;justify-content:center">${isPlaying ? DATASET_PAUSE_ICON : DATASET_PLAY_ICON}</button>
             <input type="range" class="dataset-playback__slider" min="0" max="${Math.max(numFrames - 1, 0)}" value="${currentFrame}" />
-            <span class="dataset-playback__counter">${currentFrame + 1} / ${numFrames}</span>
+            <div class="dataset-playback__meta">
+                <span class="dataset-playback__timer">0:00 / 0:00</span>
+                <span class="dataset-playback__counter">${currentFrame + 1} / ${numFrames}</span>
+            </div>
         </div>
     `;
 
     // Plots
     const plotGroups = buildDatasetPlotGroups(preview.numeric_keys);
-    const plotsHtml = plotGroups.map((group) => {
-        // Check if any data exists for this group
-        let hasAnyData = false;
-        if (seriesData) {
-            for (const keys of [group.stateKeys, group.actionKeys]) {
-                if (keys.some((key) => key && seriesData[key])) { hasAnyData = true; break; }
-            }
-        }
-        const svg = seriesData ? _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame) : "";
-        const legend = seriesData ? _buildDatasetPlotLegend(seriesData, group) : "";
+    const plotsHtml = plotGroups.map((group, groupIndex) => {
+        const scope = _ensureDatasetPlotScope(containerId, group);
+        const hasAnyData = seriesData ? _groupHasVisibleData(seriesData, group, scope) : false;
+        const svg = seriesData ? _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame, scope, preview.fps || 30) : "";
+        const legend = seriesData ? _buildDatasetPlotLegend(seriesData, group, currentFrame, scope, groupIndex) : "";
         return `
-            <div class="dataset-plot-card">
+            <div class="dataset-plot-card" data-plot-group-index="${groupIndex}">
                 <span class="eyebrow">${group.title}</span>
                 <div class="trend-chart">
                     ${svg}
-                    ${!hasAnyData ? `<div class="trend-chart__empty">No data available</div>` : ""}
+                    ${!hasAnyData ? `<div class="trend-chart__empty">No visible data</div>` : ""}
                 </div>
                 <div class="trend-chart__legend">${legend}</div>
             </div>
@@ -646,14 +732,48 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
         };
     }
 
+    container.onchange = (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        if (!target.classList.contains("dataset-plot-scope-toggle")) return;
+        const groupIndex = Number(target.dataset.groupIndex);
+        const axisIndex = Number(target.dataset.axisIndex);
+        const role = target.dataset.scopeRole;
+        if (!Number.isInteger(groupIndex) || !Number.isInteger(axisIndex)) return;
+        const group = plotGroups[groupIndex];
+        if (!group) return;
+        const scope = _ensureDatasetPlotScope(containerId, group);
+        if (role === "axis") {
+            scope.axisEnabled[axisIndex] = target.checked;
+            scope.stateEnabled[axisIndex] = target.checked;
+            scope.actionEnabled[axisIndex] = target.checked;
+        } else if (role === "state") {
+            scope.stateEnabled[axisIndex] = target.checked;
+            scope.axisEnabled[axisIndex] = !!(scope.stateEnabled[axisIndex] || scope.actionEnabled[axisIndex]);
+        } else if (role === "action") {
+            scope.actionEnabled[axisIndex] = target.checked;
+            scope.axisEnabled[axisIndex] = !!(scope.stateEnabled[axisIndex] || scope.actionEnabled[axisIndex]);
+        }
+        _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+    };
+
     // Start playback if already playing
     if (isPlaying) {
         _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey);
     }
+    _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
 }
 
 function _frameImageUrl(preview, cameraKey, frameIndex) {
     return `/datasets/frame-image?path=${encodeURIComponent(preview.path)}&key=${encodeURIComponent(cameraKey)}&index=${frameIndex}`;
+}
+
+function _formatPlaybackTime(seconds) {
+    const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+    const total = Math.floor(safe);
+    const minutes = Math.floor(total / 60);
+    const secs = total % 60;
+    return `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
 // Point every camera <img> at the given frame and resolve once they have all
@@ -680,10 +800,17 @@ function _loadDatasetFrameImages(container, preview, frameIndex) {
 function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
     const currentFrame = state[frameKey];
     const numFrames = preview.num_frames || 0;
+    const fps = preview.fps && Number.isFinite(preview.fps) && preview.fps > 0 ? preview.fps : 30;
 
     // Update slider and counter
     const slider = container.querySelector(".dataset-playback__slider");
     if (slider) slider.value = currentFrame;
+    const timer = container.querySelector(".dataset-playback__timer");
+    if (timer) {
+        const currentSeconds = currentFrame / fps;
+        const totalSeconds = Math.max(0, (Math.max(numFrames - 1, 0)) / fps);
+        timer.textContent = `${_formatPlaybackTime(currentSeconds)} / ${_formatPlaybackTime(totalSeconds)}`;
+    }
     const counter = container.querySelector(".dataset-playback__counter");
     if (counter) counter.textContent = `${currentFrame + 1} / ${numFrames}`;
 
@@ -694,14 +821,17 @@ function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
         if (!group || !seriesData) return;
         const chartDiv = card.querySelector(".trend-chart");
         if (!chartDiv) return;
-        chartDiv.innerHTML = _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame);
+        const scope = _ensureDatasetPlotScope(container.id, group);
+        chartDiv.innerHTML = _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame, scope, preview.fps || 30);
         // Re-add "no data" overlay if needed
-        let hasAnyData = false;
-        for (const keys of [group.stateKeys, group.actionKeys]) {
-            if (keys.some((key) => key && seriesData[key])) { hasAnyData = true; break; }
-        }
+        const hasAnyData = _groupHasVisibleData(seriesData, group, scope);
         if (!hasAnyData) {
-            chartDiv.innerHTML += `<div class="trend-chart__empty">No data available</div>`;
+            chartDiv.innerHTML += `<div class="trend-chart__empty">No visible data</div>`;
+        }
+        // Refresh the per-legend current-frame values so they track the playhead.
+        const legendDiv = card.querySelector(".trend-chart__legend");
+        if (legendDiv) {
+            legendDiv.innerHTML = _buildDatasetPlotLegend(seriesData, group, currentFrame, scope, gi);
         }
     });
 }
