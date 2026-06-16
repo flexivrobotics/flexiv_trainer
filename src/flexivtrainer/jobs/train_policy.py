@@ -104,6 +104,26 @@ def resolve_training_device(configured: str) -> str:
     return "cpu"
 
 
+def _set_process_tree_suspended(pid: int, suspend: bool) -> None:
+    """Suspend (SIGSTOP) or resume (SIGCONT) a process and all its children.
+
+    Uses psutil so it works on Linux/macOS/Windows. The whole tree is covered so
+    lerobot's dataloader worker processes are frozen too, not just the trainer's
+    main process. Missing/exited processes are skipped.
+    """
+    import psutil
+
+    try:
+        root = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    for proc in [root, *root.children(recursive=True)]:
+        try:
+            proc.suspend() if suspend else proc.resume()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
 @dataclass
 class TrainingJob:
     job_id: str
@@ -125,6 +145,7 @@ class TrainingJob:
     last_checkpoint_step: int | None = None
     last_eval_step: int | None = None
     last_event: str | None = None
+    paused: bool = False
     pulse: Pulse | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> dict[str, Any]:
@@ -156,6 +177,7 @@ class TrainingJob:
             "last_checkpoint_step": self.last_checkpoint_step,
             "last_eval_step": self.last_eval_step,
             "last_event": self.last_event,
+            "paused": self.paused,
         }
 
 
@@ -413,6 +435,10 @@ class TrainingService:
             info("Stopping training process", f"job_id={job.job_id}")
             job.status = "stopped"
             job.error = "Server shutdown"
+            # Resume first if paused — a SIGSTOP'd process won't act on SIGTERM.
+            if job.paused:
+                _set_process_tree_suspended(job.process.pid, suspend=False)
+                job.paused = False
             job.process.terminate()
             try:
                 job.process.wait(timeout=1.5)
@@ -428,6 +454,30 @@ class TrainingService:
                 detail=f"job_id={job.job_id} reason=server shutdown",
             )
             job.pulse = None
+
+    def pause(self) -> dict[str, Any]:
+        """Suspend the running training process (and its children)."""
+        with self._lock:
+            job = self._job
+            if job is None or job.status != "running" or job.process is None:
+                raise RuntimeError("No running training job to pause")
+            if not job.paused:
+                _set_process_tree_suspended(job.process.pid, suspend=True)
+                job.paused = True
+                info("Training job paused", f"job_id={job.job_id}")
+            return job.snapshot()
+
+    def resume(self) -> dict[str, Any]:
+        """Resume a previously paused training process."""
+        with self._lock:
+            job = self._job
+            if job is None or job.status != "running" or job.process is None:
+                raise RuntimeError("No training job to resume")
+            if job.paused:
+                _set_process_tree_suspended(job.process.pid, suspend=False)
+                job.paused = False
+                info("Training job resumed", f"job_id={job.job_id}")
+            return job.snapshot()
 
     def status(self) -> dict[str, Any]:
         if self._job is None:

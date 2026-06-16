@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from flexivtrainer.observability import info, ok, warn
@@ -66,6 +66,26 @@ def start_training(
             "Training job returned unexpected initial state",
             str(result.get("status", "unknown")),
         )
+    return result
+
+
+@router.post("/pause")
+def pause_training(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    try:
+        result = runtime.training.pause()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Training job paused")
+    return result
+
+
+@router.post("/resume")
+def resume_training(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    try:
+        result = runtime.training.resume()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Training job resumed")
     return result
 
 

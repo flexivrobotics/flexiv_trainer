@@ -12,7 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
+import sys
+import time
 from pathlib import Path
+
+import psutil
+import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig
 from flexivtrainer.jobs.train_policy import TrainingJob, TrainingService
@@ -80,3 +86,37 @@ def test_update_job_from_log_parses_common_lerobot_lines(tmp_path: Path) -> None
         "data_seconds": 0.03,
     }
     assert snapshot["progress"] == 50
+
+
+def test_pause_resume_without_running_job_raises(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    with pytest.raises(RuntimeError):
+        service.pause()
+    with pytest.raises(RuntimeError):
+        service.resume()
+
+
+def test_pause_resume_suspends_and_continues_process(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        job = make_job(tmp_path)
+        job.process = proc
+        job.status = "running"
+        service._job = job
+
+        snap = service.pause()
+        assert snap["paused"] is True
+        time.sleep(0.3)
+        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+
+        # Pausing again is idempotent.
+        assert service.pause()["paused"] is True
+
+        snap = service.resume()
+        assert snap["paused"] is False
+        time.sleep(0.3)
+        assert psutil.Process(proc.pid).status() != psutil.STATUS_STOPPED
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)

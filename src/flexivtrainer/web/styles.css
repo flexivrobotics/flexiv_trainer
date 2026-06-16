@@ -1903,6 +1903,25 @@ button:active {
     gap: 1rem;
 }
 
+/* Left-side control panel on the Training Run step. */
+.training-controls {
+    display: grid;
+    gap: 0.8rem;
+    align-content: start;
+}
+
+.training-controls__toggle {
+    width: 100%;
+    padding: 0.8rem 1rem;
+    font-size: 0.95rem;
+}
+
+.training-controls__state {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
 #training-content {
     display: grid;
     gap: 0.95rem;

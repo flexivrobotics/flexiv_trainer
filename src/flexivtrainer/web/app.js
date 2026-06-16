@@ -3403,12 +3403,45 @@ function renderTraining() {
     const progressDisplay = getTrainingProgressDisplay(status);
     const progress = progressDisplay.percent;
     const progressLabel = progressDisplay.label;
+    // Pause/Resume only applies while the job is live. The backend keeps
+    // status === "running" even while suspended; `paused` is a separate flag.
+    const isRunning = status.status === "running";
+    const isPaused = !!status.paused;
+    const toggleIcon = isPaused ? DATASET_PLAY_ICON : DATASET_PAUSE_ICON;
+    const toggleLabel = isPaused ? "Resume" : "Pause";
+    const stateLabel = isPaused ? "Paused" : isRunning ? "Running" : (status.status || "—");
     container.innerHTML = `
-        <div class="panel-header"><div><h2>Training Run</h2></div></div>
-        <div class="progress-bar progress-bar--thick"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
-        <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
-        <div class="control-bar"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
+        <div class="training-layout">
+            <aside class="panel training-controls">
+                <div class="panel-header"><h2>Controls</h2></div>
+                <button id="training-pause-resume" class="button-with-icon training-controls__toggle" type="button" ${isRunning ? "" : "disabled"}>
+                    <span class="button-content">${toggleIcon}<span>${toggleLabel}</span></span>
+                </button>
+                <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
+            </aside>
+            <div class="training-main">
+                <div class="panel-header"><div><h2>Training Run</h2></div></div>
+                <div class="progress-bar progress-bar--thick"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
+                <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
+                <div class="control-bar"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
+            </div>
+        </div>
     `;
+    const pauseResumeBtn = byId("training-pause-resume");
+    if (pauseResumeBtn) {
+        pauseResumeBtn.onclick = async () => {
+            pauseResumeBtn.disabled = true;
+            try {
+                state.trainingStatus = await api(
+                    isPaused ? "/training/resume" : "/training/pause",
+                    { method: "POST" }
+                );
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            renderTraining();
+        };
+    }
     byId("training-run-prev").onclick = () => {
         state.trainingStep = 2;
         renderTraining();
