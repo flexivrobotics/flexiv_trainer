@@ -32,6 +32,10 @@ class StartTrainingRequest(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
 
 
+class TrainingDeviceRequest(BaseModel):
+    device: str = "auto"
+
+
 @router.post("/bootstrap")
 def bootstrap(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     result = runtime.bootstrap_training_module()
@@ -42,6 +46,24 @@ def bootstrap(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
 @router.get("/policies")
 def policies(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return runtime.training.list_policies()
+
+
+@router.get("/devices")
+def training_devices(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    return runtime.training.evaluate_devices()
+
+
+@router.put("/devices")
+def set_training_device(
+    request: TrainingDeviceRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    try:
+        result = runtime.training.set_default_device(request.device)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    ok("Training device updated", f"device={result.get('configured', 'auto')}")
+    return result
 
 
 @router.post("/start")

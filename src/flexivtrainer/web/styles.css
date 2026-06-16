@@ -1933,10 +1933,17 @@ button:active {
     align-items: start;
 }
 
+.training-sidebar {
+    display: grid;
+    gap: 1rem;
+    align-content: start;
+}
+
 /* Keep the Episodes sidebar sized to its own content. Without this the grid
    stretches it to match the (much taller) preview column, leaving a large
    empty panel below the episode list. */
-.training-layout>aside {
+.training-layout>aside,
+.training-layout>.training-sidebar {
     align-self: start;
 }
 
@@ -1951,6 +1958,56 @@ button:active {
     display: grid;
     gap: 0.8rem;
     align-content: start;
+}
+
+.training-device-panel {
+    display: grid;
+    gap: 0.8rem;
+    align-content: start;
+}
+
+.training-device-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.6rem;
+    align-items: end;
+}
+
+.training-device-field {
+    display: grid;
+    gap: 0.28rem;
+    min-width: 0;
+}
+
+.training-device-field select {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.7rem 0.85rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.9rem;
+}
+
+.training-device-field select:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
+}
+
+.training-device-reload {
+    width: 2.7rem;
+    min-width: 2.7rem;
+    height: 2.7rem;
+    padding: 0;
+}
+
+.training-device-detail {
+    margin: -0.1rem 0 0;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.3;
 }
 
 .training-controls__toggle {

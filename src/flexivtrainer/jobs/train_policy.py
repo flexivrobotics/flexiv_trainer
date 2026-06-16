@@ -57,6 +57,8 @@ POLICY_CATALOG = {
     },
 }
 
+TRAINING_DEVICE_ORDER = ("auto", "cuda", "mps", "cpu")
+
 TRACKER_KEY_MAP = {
     "step": "step",
     "smpl": "samples",
@@ -220,7 +222,82 @@ class TrainingService:
         return {
             "default": self._settings.training.default_policy,
             "policies": POLICY_CATALOG,
+            "device": self._settings.training.default_device,
         }
+
+    def evaluate_devices(self) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        resolved_auto = resolve_training_device(self._settings.training.default_device)
+
+        try:
+            import torch
+        except Exception as exc:
+            torch = None
+            import_error = str(exc).strip() or type(exc).__name__
+        else:
+            import_error = ""
+
+        for device in TRAINING_DEVICE_ORDER:
+            if device == "auto":
+                results.append(
+                    {
+                        "name": "auto",
+                        "available": True,
+                        "resolved": resolved_auto,
+                        "detail": f"Resolves to {resolved_auto}",
+                    }
+                )
+                continue
+
+            available = False
+            detail = ""
+            try:
+                if torch is None:
+                    raise RuntimeError(import_error or "PyTorch is unavailable")
+
+                if device == "cuda":
+                    available = bool(torch.cuda.is_available())
+                    if available:
+                        tensor = torch.zeros(1, device="cuda")
+                        detail = torch.cuda.get_device_name(tensor.device)
+                    else:
+                        detail = "CUDA is not available"
+                elif device == "mps":
+                    backend = getattr(torch.backends, "mps", None)
+                    available = bool(backend and backend.is_available())
+                    if available:
+                        torch.zeros(1, device="mps")
+                        detail = "Apple Metal backend is available"
+                    else:
+                        detail = "MPS is not available"
+                elif device == "cpu":
+                    torch.zeros(1, device="cpu")
+                    available = True
+                    detail = "CPU is available"
+            except Exception as exc:
+                available = False
+                detail = str(exc).strip() or type(exc).__name__
+
+            results.append(
+                {
+                    "name": device,
+                    "available": available,
+                    "detail": detail,
+                }
+            )
+
+        return {
+            "configured": self._settings.training.default_device,
+            "resolved": resolve_training_device(self._settings.training.default_device),
+            "devices": results,
+        }
+
+    def set_default_device(self, device: str) -> dict[str, Any]:
+        normalized = (device or "auto").strip().lower()
+        if normalized not in TRAINING_DEVICE_ORDER:
+            raise RuntimeError(f"Unsupported training device: {device}")
+        self._settings.training.default_device = normalized
+        return self.evaluate_devices()
 
     @staticmethod
     def _parse_compact_number(raw: str) -> int | float:

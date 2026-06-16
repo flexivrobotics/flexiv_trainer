@@ -19,6 +19,7 @@ const state = {
     cameraConfig: null,
     trainingPolicies: null,
     trainingStatus: null,
+    trainingDevices: null,
     teleopBootstrapped: false,
     trainingBootstrapped: false,
     processingBootstrapped: false,
@@ -102,6 +103,8 @@ const state = {
         recordingStartBusy: false,
         recordingSaveBusy: false,
         recordingSaveProgress: 0,
+        trainingDeviceEvalBusy: false,
+        trainingDeviceAutoTriggeredStep: null,
         // Smoothed realtime recording FPS, derived from the change in captured
         // frames between status polls. Reset whenever a recording (re)starts.
         recordingFps: 0,
@@ -1609,6 +1612,17 @@ function setTeleopRefreshBusy(busy) {
     if (!button) {
         return;
     }
+    button.classList.toggle("icon-button--spinning", busy);
+    button.setAttribute("aria-busy", busy ? "true" : "false");
+}
+
+function setTrainingDeviceEvalBusy(busy) {
+    state.ui.trainingDeviceEvalBusy = busy;
+    const button = byId("training-device-reload");
+    if (!button) {
+        return;
+    }
+    button.disabled = busy;
     button.classList.toggle("icon-button--spinning", busy);
     button.setAttribute("aria-busy", busy ? "true" : "false");
 }
@@ -3441,6 +3455,11 @@ function renderTraining() {
         return;
     }
 
+    if (state.ui.trainingDeviceAutoTriggeredStep !== 4) {
+        state.ui.trainingDeviceAutoTriggeredStep = 4;
+        refreshTrainingDevices({ silent: true }).catch((error) => showToast(error.message, true));
+    }
+
     const status = state.trainingStatus || { status: "ready", progress: 0, logs: [] };
     const progressDisplay = getTrainingProgressDisplay(status);
     const progress = progressDisplay.percent;
@@ -3461,6 +3480,30 @@ function renderTraining() {
             ? TRAINING_RESTART_MARKUP
             : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
+    const isDeviceEvalBusy = !!state.ui.trainingDeviceEvalBusy;
+    const trainingDevices = state.trainingDevices || { configured: "auto", resolved: "cpu", devices: [] };
+    const configuredDevice = trainingDevices.configured || "auto";
+    const deviceOptions = isDeviceEvalBusy
+        ? `<option value="" selected></option>`
+        : (trainingDevices.devices || []).map((entry) => {
+            const label = entry.name;
+            const selected = entry.name === configuredDevice ? " selected" : "";
+            const disabled = entry.name !== "auto" && !entry.available ? " disabled" : "";
+            return `<option value="${escapeHtml(entry.name)}"${selected}${disabled}>${escapeHtml(label)}</option>`;
+        }).join("");
+    const deviceDetail = (() => {
+        if (isDeviceEvalBusy) {
+            return "Evaluating available devices...";
+        }
+        const selected = (trainingDevices.devices || []).find((entry) => entry.name === configuredDevice);
+        if (selected?.detail) {
+            return selected.detail;
+        }
+        if (configuredDevice === "auto") {
+            return `Resolves to ${trainingDevices.resolved || "cpu"}`;
+        }
+        return "Select a device for training";
+    })();
     const stateLabel = isPaused
         ? "Paused"
         : isRunning
@@ -3470,18 +3513,34 @@ function renderTraining() {
                 : _formatTrainingStatusLabel(status.status);
     container.innerHTML = `
         <div class="training-layout">
-            <aside class="panel panel--soft control-panel training-controls">
-                <div class="panel-header"><h2>Training Control</h2></div>
-                <div class="control-stack">
-                    <button id="training-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
-                        ${primaryMarkup}
-                    </button>
-                    <button id="training-pause-resume" class="button-with-icon" type="button" ${isRunning ? "" : "disabled"}>
-                        ${isPaused ? TRAINING_RESUME_MARKUP : TRAINING_PAUSE_MARKUP}
-                    </button>
-                </div>
-                <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
-            </aside>
+            <div class="training-sidebar">
+                <aside class="panel panel--soft control-panel training-device-panel">
+                    <div class="panel-header"><h2>Computation Device</h2></div>
+                    <div class="training-device-row">
+                        <label class="training-device-field" for="training-device-select">
+                            <select id="training-device-select" ${(isRunning || isDeviceEvalBusy) ? "disabled" : ""}>
+                                ${deviceOptions || `<option value="auto" selected>auto</option><option value="cpu">cpu</option>`}
+                            </select>
+                        </label>
+                        <button class="secondary-button icon-button training-device-reload" id="training-device-reload" type="button" aria-label="Evaluate training devices" title="Evaluate training devices" ${isDeviceEvalBusy ? "disabled" : ""}>
+                            ${RESET_ICON_SVG}
+                        </button>
+                    </div>
+                    <p class="training-device-detail">${escapeHtml(deviceDetail)}</p>
+                </aside>
+                <aside class="panel panel--soft control-panel training-controls">
+                    <div class="panel-header"><h2>Training Control</h2></div>
+                    <div class="control-stack">
+                        <button id="training-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
+                            ${primaryMarkup}
+                        </button>
+                        <button id="training-pause-resume" class="button-with-icon" type="button" ${isRunning ? "" : "disabled"}>
+                            ${isPaused ? TRAINING_RESUME_MARKUP : TRAINING_PAUSE_MARKUP}
+                        </button>
+                    </div>
+                    <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
+                </aside>
+            </div>
             <div class="training-main">
                 <div class="progress-bar progress-bar--thick ${isFailed ? "progress-bar--error" : ""}"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
                 <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
@@ -3503,6 +3562,31 @@ function renderTraining() {
                 showToast(error.message, true);
             }
             renderTraining();
+        };
+    }
+    const deviceSelect = byId("training-device-select");
+    if (deviceSelect) {
+        deviceSelect.onchange = async () => {
+            const nextValue = deviceSelect.value || "auto";
+            try {
+                state.trainingDevices = await api("/training/devices", {
+                    method: "PUT",
+                    body: JSON.stringify({ device: nextValue }),
+                });
+                if (state.trainingPolicies) {
+                    state.trainingPolicies.device = state.trainingDevices.configured;
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            renderTraining();
+        };
+    }
+    const deviceReloadBtn = byId("training-device-reload");
+    if (deviceReloadBtn) {
+        setTrainingDeviceEvalBusy(state.ui.trainingDeviceEvalBusy);
+        deviceReloadBtn.onclick = () => {
+            refreshTrainingDevices({ clearBeforeFetch: true, delayMs: 1000 }).catch((error) => showToast(error.message, true));
         };
     }
     const primaryActionBtn = byId("training-primary-action");
@@ -3607,11 +3691,48 @@ function resetTrainingRunViewState() {
     window.clearInterval(state.intervals.training);
     state.trainingStatus = null;
     state.trainingOutputStamp = "";
+    state.ui.trainingDeviceAutoTriggeredStep = null;
     state.trainingLogView = {
         stickToBottom: true,
         distanceFromBottom: 0,
         scrollLeft: 0,
     };
+}
+
+async function refreshTrainingDevices(options = {}) {
+    if (state.ui.trainingDeviceEvalBusy) {
+        return state.trainingDevices;
+    }
+    const previousDevices = state.trainingDevices;
+    setTrainingDeviceEvalBusy(true);
+    try {
+        if (options.clearBeforeFetch) {
+            state.trainingDevices = { configured: "", resolved: "", devices: [] };
+            if (state.activeView === "training" && state.trainingStep === 4) {
+                renderTraining();
+            }
+        }
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        if (options.delayMs) {
+            await new Promise((resolve) => window.setTimeout(resolve, options.delayMs));
+        }
+        state.trainingDevices = await api("/training/devices");
+        if (state.trainingPolicies) {
+            state.trainingPolicies.device = state.trainingDevices.configured;
+        }
+        return state.trainingDevices;
+    } catch (error) {
+        state.trainingDevices = previousDevices;
+        if (!options.silent) {
+            throw error;
+        }
+        return state.trainingDevices;
+    } finally {
+        setTrainingDeviceEvalBusy(false);
+        if (state.activeView === "training" && state.trainingStep === 4) {
+            renderTraining();
+        }
+    }
 }
 
 function applyMergedDatasetToTraining() {
@@ -4218,6 +4339,7 @@ async function bootstrapTraining() {
     }
     await api("/training/bootstrap", { method: "POST" });
     state.trainingPolicies = await api("/training/policies");
+    state.trainingDevices = await api("/training/devices");
     state.selectedPolicy = state.trainingPolicies.default;
     state.trainingBootstrapped = true;
     if (state.activeView === "training") {
