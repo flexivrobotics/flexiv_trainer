@@ -1422,10 +1422,10 @@ function allRobotSerialsConfigured() {
     const config = state.summary?.robot_config;
     if (!config) return false;
     const required = [
-        config.local_robot_serials?.[0],
-        config.local_robot_serials?.[1],
-        config.remote_robot_serials?.[0],
-        config.remote_robot_serials?.[1],
+        config.leader_robot_serials?.[0],
+        config.leader_robot_serials?.[1],
+        config.follower_robot_serials?.[0],
+        config.follower_robot_serials?.[1],
     ];
     return required.every((serial) => typeof serial === "string" && serial.trim() !== "");
 }
@@ -1436,12 +1436,12 @@ function renderHomeRobotConfigInputs() {
     }
     const sideLabels = ["LEFT", "RIGHT"];
     const robotConfig = state.summary.robot_config || {
-        local_robot_serials: ["", ""],
-        remote_robot_serials: ["", ""],
+        leader_robot_serials: ["", ""],
+        follower_robot_serials: ["", ""],
     };
     const configs = [
-        ["home-local-robots", "local_robot_serials", robotConfig.local_robot_serials || ["", ""]],
-        ["home-remote-robots", "remote_robot_serials", robotConfig.remote_robot_serials || ["", ""]],
+        ["home-leader-robots", "leader_robot_serials", robotConfig.leader_robot_serials || ["", ""]],
+        ["home-follower-robots", "follower_robot_serials", robotConfig.follower_robot_serials || ["", ""]],
     ];
     configs.forEach(([containerId, key, serials]) => {
         const container = byId(containerId);
@@ -1794,7 +1794,7 @@ function readRobotTelemetry(robot) {
 function getRobotTelemetryForSide(side, teleopStatus) {
     const robots = teleopStatus.robot_data?.robots || {};
     const sideIndex = side === "left" ? 0 : 1;
-    const preferredSerial = state.summary?.robot_config?.remote_robot_serials?.[sideIndex];
+    const preferredSerial = state.summary?.robot_config?.follower_robot_serials?.[sideIndex];
     if (preferredSerial && robots[preferredSerial]) {
         return { serial: preferredSerial, robot: robots[preferredSerial] };
     }
@@ -2124,8 +2124,8 @@ function hasRecordingPayload(value) {
     return value !== null && value !== undefined;
 }
 
-function getConfiguredRemoteSerials() {
-    return (state.summary?.robot_config?.remote_robot_serials || [])
+function getConfiguredFollowerSerials() {
+    return (state.summary?.robot_config?.follower_robot_serials || [])
         .map((serial) => String(serial || "").trim())
         .filter(Boolean);
 }
@@ -2136,7 +2136,7 @@ function areSelectedRecordingEntriesAvailable(teleopStatus) {
         return false;
     }
 
-    const configuredRemoteSerials = getConfiguredRemoteSerials();
+    const configuredFollowerSerials = getConfiguredFollowerSerials();
     return selectedOptions.every((option) => {
         if (option.bucket === "image") {
             const camera = teleopStatus?.cameras?.cameras?.[option.sourceField];
@@ -2144,7 +2144,7 @@ function areSelectedRecordingEntriesAvailable(teleopStatus) {
         }
 
         // Each arm feature maps to one follower robot (side 0 = left, 1 = right).
-        const serial = configuredRemoteSerials[option.side];
+        const serial = configuredFollowerSerials[option.side];
         if (!serial) {
             return false;
         }

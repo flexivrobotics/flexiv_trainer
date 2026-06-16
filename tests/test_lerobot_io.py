@@ -41,11 +41,11 @@ def _arm_payload(base: int) -> dict:
 
 
 def make_snapshot() -> dict:
-    return {"robots": {"REMOTE_A": _arm_payload(0)}}
+    return {"robots": {"FOLLOWER_A": _arm_payload(0)}}
 
 
 def make_dual_snapshot() -> dict:
-    return {"robots": {"REMOTE_A": _arm_payload(0), "REMOTE_B": _arm_payload(100)}}
+    return {"robots": {"FOLLOWER_A": _arm_payload(0), "FOLLOWER_B": _arm_payload(100)}}
 
 
 def make_images() -> dict[str, np.ndarray]:

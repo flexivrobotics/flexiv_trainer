@@ -24,8 +24,8 @@ def make_manager(tmp_path, started_camera_count: int) -> RuntimeManager:
     manager = RuntimeManager.__new__(RuntimeManager)
     manager.settings = AppSettings(storage=StorageConfig(root=tmp_path))
     manager._robot_config = RobotSerialConfig(
-        local_robot_serials=["LOCAL_A", "LOCAL_B"],
-        remote_robot_serials=["REMOTE_A", "REMOTE_B"],
+        leader_robot_serials=["LEADER_A", "LEADER_B"],
+        follower_robot_serials=["FOLLOWER_A", "FOLLOWER_B"],
     ).normalized()
     manager.teleop = SimpleNamespace(
         snapshot=lambda: SimpleNamespace(
@@ -74,8 +74,8 @@ def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) 
     manager = RuntimeManager.__new__(RuntimeManager)
     manager.settings = AppSettings(storage=StorageConfig(root=tmp_path))
     manager._robot_config = RobotSerialConfig(
-        local_robot_serials=["LOCAL_A", "LOCAL_B"],
-        remote_robot_serials=["REMOTE_A", "REMOTE_B"],
+        leader_robot_serials=["LEADER_A", "LEADER_B"],
+        follower_robot_serials=["FOLLOWER_A", "FOLLOWER_B"],
     ).normalized()
     manager.teleop = SimpleNamespace(
         initialize=lambda: SimpleNamespace(
@@ -89,8 +89,8 @@ def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) 
         ),
         robot_data_snapshot=lambda: {
             "robots": {
-                "REMOTE_A": {"connected": True},
-                "REMOTE_B": {"connected": True},
+                "FOLLOWER_A": {"connected": True},
+                "FOLLOWER_B": {"connected": True},
             },
             "errors": {},
         },

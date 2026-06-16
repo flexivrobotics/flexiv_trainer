@@ -24,8 +24,8 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 
 class RobotConfigRequest(BaseModel):
-    local_robot_serials: list[str] = Field(default_factory=list)
-    remote_robot_serials: list[str] = Field(default_factory=list)
+    leader_robot_serials: list[str] = Field(default_factory=list)
+    follower_robot_serials: list[str] = Field(default_factory=list)
 
 
 @router.get("/summary")

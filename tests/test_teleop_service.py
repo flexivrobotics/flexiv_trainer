@@ -182,8 +182,8 @@ def test_start_then_stop_tracks_started_flag(tmp_path) -> None:
 def _configured_service(tmp_path) -> TeleopService:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     pairs = [
-        TeleopRobotPair(leader_serial="LOCAL_A", follower_serial="REMOTE_A"),
-        TeleopRobotPair(leader_serial="LOCAL_B", follower_serial="REMOTE_B"),
+        TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A"),
+        TeleopRobotPair(leader_serial="LEADER_B", follower_serial="FOLLOWER_B"),
     ]
     service = TeleopService(settings, get_robot_pairs=lambda: pairs)
     service._controller = FakeTeleopController()
@@ -337,16 +337,16 @@ def test_reset_home_errors_when_home_all_unsupported(tmp_path) -> None:
 def test_robot_data_snapshot_uses_instance_states_and_actions(tmp_path) -> None:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     pairs = [
-        TeleopRobotPair(leader_serial="LOCAL_A", follower_serial="REMOTE_A"),
-        TeleopRobotPair(leader_serial="LOCAL_B", follower_serial="REMOTE_B"),
+        TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A"),
+        TeleopRobotPair(leader_serial="LEADER_B", follower_serial="FOLLOWER_B"),
     ]
     service = TeleopService(settings, get_robot_pairs=lambda: pairs)
     service._controller = FakeController((FakeRobot(), FakeRobot()))
 
     snapshot = service.robot_data_snapshot()
 
-    assert set(snapshot["robots"]) == {"REMOTE_A", "REMOTE_B"}
-    first = snapshot["robots"]["REMOTE_A"]
+    assert set(snapshot["robots"]) == {"FOLLOWER_A", "FOLLOWER_B"}
+    first = snapshot["robots"]["FOLLOWER_A"]
     assert first["connected"] is True
     assert first["states"]["tcp_pose"] == [0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0]
     assert first["actions"]["tcp_pose_d"] == [10.0, 11.0, 12.0, 1.0, 0.0, 0.0, 0.0]
@@ -356,12 +356,12 @@ def test_robot_data_snapshot_reads_struct_states_without_dict(tmp_path) -> None:
     # RobotStates/RobotActions from flexivrdk are pybind11 structs with no
     # __dict__; the snapshot must read their fields by attribute.
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
-    pairs = [TeleopRobotPair(leader_serial="LOCAL_A", follower_serial="REMOTE_A")]
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
     service = TeleopService(settings, get_robot_pairs=lambda: pairs)
     service._controller = FakeController((FakeStructRobot(),))
 
     snapshot = service.robot_data_snapshot()
 
-    entry = snapshot["robots"]["REMOTE_A"]
+    entry = snapshot["robots"]["FOLLOWER_A"]
     assert entry["states"]["ext_wrench_in_world"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     assert entry["actions"]["ext_wrench_d"] == [11.0, 12.0, 13.0, 14.0, 15.0, 16.0]

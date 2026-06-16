@@ -17,7 +17,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,8 +44,7 @@ class CameraSerialConfig(BaseModel):
     def normalized(self) -> CameraSerialConfig:
         return CameraSerialConfig(
             serials={
-                str(name): str(serial).strip()
-                for name, serial in self.serials.items()
+                str(name): str(serial).strip() for name, serial in self.serials.items()
             }
         )
 
@@ -102,8 +101,23 @@ class TrainingConfig(BaseModel):
 
 
 class RobotSerialConfig(BaseModel):
-    local_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
-    remote_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
+    leader_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
+    follower_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_prefixes(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        if "leader_robot_serials" not in payload and "local_robot_serials" in payload:
+            payload["leader_robot_serials"] = payload.get("local_robot_serials")
+        if (
+            "follower_robot_serials" not in payload
+            and "remote_robot_serials" in payload
+        ):
+            payload["follower_robot_serials"] = payload.get("remote_robot_serials")
+        return payload
 
     @staticmethod
     def _normalize_serials(values: list[str]) -> list[str]:
@@ -113,17 +127,17 @@ class RobotSerialConfig(BaseModel):
 
     def normalized(self) -> RobotSerialConfig:
         return RobotSerialConfig(
-            local_robot_serials=self._normalize_serials(self.local_robot_serials),
-            remote_robot_serials=self._normalize_serials(self.remote_robot_serials),
+            leader_robot_serials=self._normalize_serials(self.leader_robot_serials),
+            follower_robot_serials=self._normalize_serials(self.follower_robot_serials),
         )
 
     @classmethod
     def from_settings(cls, settings: AppSettings) -> RobotSerialConfig:
         return cls(
-            local_robot_serials=[
+            leader_robot_serials=[
                 pair.leader_serial for pair in settings.teleop_robot_pairs[:2]
             ],
-            remote_robot_serials=[
+            follower_robot_serials=[
                 pair.follower_serial for pair in settings.teleop_robot_pairs[:2]
             ],
         ).normalized()
@@ -155,7 +169,7 @@ class AppSettings(BaseSettings):
     training: TrainingConfig = Field(default_factory=TrainingConfig)
 
     @property
-    def remote_robot_serials(self) -> list[str]:
+    def follower_robot_serials(self) -> list[str]:
         return [
             pair.follower_serial
             for pair in self.teleop_robot_pairs

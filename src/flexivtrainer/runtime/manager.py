@@ -158,8 +158,8 @@ class RuntimeManager:
         pairs: list[TeleopRobotPair] = []
         for index in range(2):
             template = defaults[index] if index < len(defaults) else TeleopRobotPair()
-            leader_serial = self._robot_config.local_robot_serials[index]
-            follower_serial = self._robot_config.remote_robot_serials[index]
+            leader_serial = self._robot_config.leader_robot_serials[index]
+            follower_serial = self._robot_config.follower_robot_serials[index]
             pairs.append(
                 TeleopRobotPair(
                     leader_serial=leader_serial,
@@ -719,8 +719,7 @@ class RuntimeManager:
         """
         dataset_path, _ = self._resolve_dataset_repo(dataset_path)
         relative = (
-            f"videos/{camera_key}/"
-            f"chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+            f"videos/{camera_key}/" f"chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
         )
         video_path = (dataset_path / relative).resolve()
         # Guard against a camera_key that tries to escape the dataset directory.
