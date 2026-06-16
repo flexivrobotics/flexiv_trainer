@@ -1383,9 +1383,10 @@ button:active {
 }
 
 .dialog-path-note {
-    color: var(--muted);
-    font-size: 0.78rem;
-    letter-spacing: 0.04em;
+    color: var(--accent-strong);
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
 }
 
 .dialog-toolbar__actions {
@@ -2141,6 +2142,13 @@ button:active {
     border-radius: 20px;
     background: rgba(255, 255, 255, 0.45);
     padding: 1rem;
+}
+
+/* Show the output path like the browser's path: monospace, regular weight
+   (the element is a <strong>, which would otherwise render bold sans-serif). */
+#training-output-path {
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-weight: 400;
 }
 
 .log-pane {

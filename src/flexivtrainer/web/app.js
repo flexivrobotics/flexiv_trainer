@@ -3632,7 +3632,7 @@ function openEpisodeBrowser() {
         fallbackToCurrentPath: false,
         emptyMessage: "No episode datasets found under this directory.",
         confirmLabel: "Load",
-        pathNote: "Episodes stored under:",
+        pathNote: "Episodes directory",
         onConfirm: (paths) => {
             const orderedPaths = (state.pathBrowser.items || [])
                 .map((item) => item.path)
@@ -3667,7 +3667,7 @@ function openMergedDatasetBrowser() {
         fallbackToCurrentPath: false,
         emptyMessage: "No datasets found.",
         confirmLabel: "Load",
-        pathNote: "Datasets stored under:",
+        pathNote: "Datasets directory",
         onConfirm: async (paths) => {
             const path = paths[0];
             if (!path) return;
