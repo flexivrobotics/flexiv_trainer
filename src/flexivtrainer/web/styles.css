@@ -977,9 +977,7 @@ button:disabled {
 }
 
 .recording-select-all-button {
-    width: 100%;
-    font-size: 0.82rem;
-    padding: 0.52rem 0.8rem;
+    /* Sizing/shape comes from .toggle-all-button; just keep the spacing below. */
     margin-bottom: 0.15rem;
 }
 
@@ -1868,17 +1866,17 @@ button:active {
     margin-top: 0.7rem;
 }
 
-/* In the narrow Episodes sidebar the toggle-all button must not wrap to two
-   lines ("Select / All"), which threw off the header's vertical alignment.
-   A slightly tighter horizontal padding and small right inset bring the
-   button's right edge in line with the episode cards below it. */
-#processing-content .panel-header .secondary-button,
-#training-content .panel-header .secondary-button {
-    white-space: nowrap;
+/* Toggle-all controls (select/deselect all) are icon buttons, so their width
+   is fixed across both states and can never overflow a narrow container (the
+   old text labels used to wrap or run past the edge). */
+.toggle-all-button {
     flex: 0 0 auto;
-    padding-left: 0.85rem;
-    padding-right: 0.85rem;
-    margin-right: 0.3rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.2rem;
+    height: 2.2rem;
+    padding: 0;
 }
 
 /* Keep even padding on both sides of the episode picker rows in the narrow

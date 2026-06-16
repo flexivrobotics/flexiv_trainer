@@ -194,6 +194,30 @@ const CHECK_ICON_SVG = `
         <path d="M5 12.5 9.2 16.7 19 7.4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
     </svg>
 `;
+// Toggle-all icons for the Episodes sidebar: a checked box for "select all",
+// a dashed box for "deselect all". Keeping it an icon button means its width
+// never changes between states, so it can't overflow the narrow header.
+const SELECT_ALL_ICON_SVG = `
+    <svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+        <path d="M8 12.3 10.8 15 16 8.8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+    </svg>
+`;
+const DESELECT_ALL_ICON_SVG = `
+    <svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+        <path d="M8 12h8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+    </svg>
+`;
+
+// Set a toggle-all button to the icon + accessible label for its current state.
+// `noun` (optional) tailors the label, e.g. "episodes" -> "Select all episodes".
+function setToggleAllButton(button, allSelected, noun = "") {
+    button.innerHTML = allSelected ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG;
+    const label = `${allSelected ? "Deselect all" : "Select all"}${noun ? ` ${noun}` : ""}`;
+    button.title = label;
+    button.setAttribute("aria-label", label);
+}
 const STOP_SQUARE_ICON_SVG = `
     <span class="recording-status__stop-square" aria-hidden="true"></span>
 `;
@@ -663,7 +687,17 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
 
     // Camera feeds: stream the MP4 directly so the browser decodes it natively
     // (smooth playback) instead of fetching one re-encoded JPEG per frame.
-    const feedsHtml = (preview.camera_keys || []).map((cameraKey) => `
+    // Display the left wrist before the right wrist (swap their positions).
+    const orderedCameraKeys = [...(preview.camera_keys || [])];
+    const leftIdx = orderedCameraKeys.findIndex((k) => k.includes("left_wrist"));
+    const rightIdx = orderedCameraKeys.findIndex((k) => k.includes("right_wrist"));
+    if (leftIdx !== -1 && rightIdx !== -1) {
+        [orderedCameraKeys[leftIdx], orderedCameraKeys[rightIdx]] = [
+            orderedCameraKeys[rightIdx],
+            orderedCameraKeys[leftIdx],
+        ];
+    }
+    const feedsHtml = orderedCameraKeys.map((cameraKey) => `
         <div class="feed">
             <div class="feed__header"><span>${cameraKey}</span></div>
             <div class="feed__placeholder" data-render-mode="live">
@@ -2077,10 +2111,10 @@ function renderRecordingOptions(recording = {}) {
     container.innerHTML = "";
 
     const selectAllButton = document.createElement("button");
-    selectAllButton.className = "secondary-button recording-select-all-button";
+    selectAllButton.className = "secondary-button toggle-all-button recording-select-all-button";
     selectAllButton.type = "button";
     selectAllButton.disabled = locked;
-    selectAllButton.textContent = allSelected ? "Deselect All" : "Select All";
+    setToggleAllButton(selectAllButton, allSelected);
     selectAllButton.onclick = () => {
         state.recordingEntries = allSelected ? [] : [...DEFAULT_RECORDING_ENTRY_IDS];
         renderRecordingOptions(recording);
@@ -2911,7 +2945,7 @@ function renderProcessing() {
                 <aside class="panel">
                     <div class="panel-header">
                         <h2>Episodes</h2>
-                        <button class="secondary-button" id="training-select-all" type="button">${state.selectedEpisodes.length === state.episodes.length ? "Deselect All" : "Select All"}</button>
+                        <button class="secondary-button toggle-all-button" id="training-select-all" type="button" title="${state.selectedEpisodes.length === state.episodes.length ? "Deselect all episodes" : "Select all episodes"}" aria-label="${state.selectedEpisodes.length === state.episodes.length ? "Deselect all episodes" : "Select all episodes"}">${state.selectedEpisodes.length === state.episodes.length ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG}</button>
                     </div>
                     <div class="episode-list" id="training-episode-picker"></div>
                 </aside>
@@ -3186,7 +3220,7 @@ function updateBrowserSelectionUi() {
         selectAllButton.disabled = selectablePaths.length === 0;
         const allSelected = selectablePaths.length > 0
             && selectablePaths.every((path) => state.pathBrowser.selected.includes(path));
-        selectAllButton.textContent = allSelected ? "Deselect All" : "Select All";
+        setToggleAllButton(selectAllButton, allSelected);
     }
 
     updateBrowserConfirmState();
