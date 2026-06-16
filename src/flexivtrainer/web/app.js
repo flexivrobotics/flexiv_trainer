@@ -854,7 +854,7 @@ function _startDatasetPlayback(container, preview, seriesData, frameKey, playing
     videos.forEach((video) => {
         const playResult = video.play();
         if (playResult && typeof playResult.catch === "function") {
-            playResult.catch(() => {});
+            playResult.catch(() => { });
         }
     });
 
@@ -2849,6 +2849,7 @@ async function loadTrainingPreview(episodePath, options = {}) {
 
 function renderProcessing() {
     const container = byId("processing-content");
+    container.classList.toggle("has-playback-bar", state.processingStep > 1);
 
     if (state.processingStep === 1) {
         container.innerHTML = `
@@ -3024,6 +3025,7 @@ function renderProcessing() {
 
 function renderTraining() {
     const container = byId("training-content");
+    container.classList.toggle("has-playback-bar", state.trainingStep > 1);
 
     if (state.trainingStep === 1) {
         container.innerHTML = `
