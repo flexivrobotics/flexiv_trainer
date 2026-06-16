@@ -575,7 +575,36 @@ class RuntimeManager:
                 channels.append((f"{key}.{axis}", key, i))
         return channels
 
-    def preview_dataset(self, dataset_path: Path) -> dict[str, Any]:
+    def _episode_list(self, dataset: Any) -> list[dict[str, int]]:
+        """Per-episode summary [{index, num_frames}] for building an episode picker."""
+        episodes = getattr(dataset.meta, "episodes", None)
+        if episodes is None:
+            return []
+        try:
+            indices = episodes["episode_index"]
+            lengths = episodes["length"]
+        except Exception:
+            return []
+        return [
+            {"index": int(idx), "num_frames": int(length)}
+            for idx, length in zip(indices, lengths, strict=False)
+        ]
+
+    def _episode_record(self, dataset: Any, episode_index: int) -> dict[str, Any]:
+        """The meta/episodes row for one episode (frame range + per-camera windows)."""
+        episodes = getattr(dataset.meta, "episodes", None)
+        if episodes is None:
+            raise IndexError("Dataset has no per-episode metadata")
+        try:
+            indices = [int(i) for i in episodes["episode_index"]]
+            row_pos = indices.index(int(episode_index))
+        except (ValueError, KeyError) as exc:
+            raise IndexError(f"Episode {episode_index} not found") from exc
+        return dict(episodes[row_pos])
+
+    def preview_dataset(
+        self, dataset_path: Path, episode_index: int | None = None
+    ) -> dict[str, Any]:
         dataset = self._load_dataset(dataset_path)
         dataset_path, repo_id = self._resolve_dataset_repo(dataset_path)
         camera_keys = [
@@ -586,8 +615,7 @@ class RuntimeManager:
         numeric_keys = [
             series_key for series_key, _, _ in self._numeric_channels(dataset)
         ]
-        first_item = dataset.get_raw_item(0) if dataset.num_frames else {}
-        return {
+        result: dict[str, Any] = {
             "name": dataset_path.name,
             "path": str(dataset_path),
             "repo_id": repo_id,
@@ -596,23 +624,75 @@ class RuntimeManager:
             "num_episodes": dataset.num_episodes,
             "camera_keys": camera_keys,
             "numeric_keys": numeric_keys,
-            "sample_task": (
-                first_item.get("task") if isinstance(first_item, dict) else None
-            ),
+            "episodes": self._episode_list(dataset),
         }
 
-    def dataset_series(self, dataset_path: Path) -> dict[str, Any]:
-        """Return all numeric time-series data from a dataset for plotting."""
+        if episode_index is None:
+            first_item = dataset.get_raw_item(0) if dataset.num_frames else {}
+            result["sample_task"] = (
+                first_item.get("task") if isinstance(first_item, dict) else None
+            )
+            return result
+
+        # Scope the preview to a single episode within the dataset. The episode's
+        # frames live in a shared (concatenated) MP4 per camera, so we expose the
+        # video file + time window the browser should play instead of the whole feed.
+        record = self._episode_record(dataset, episode_index)
+        from_index = int(record["dataset_from_index"])
+        to_index = int(record["dataset_to_index"])
+        windows: dict[str, dict[str, Any]] = {}
+        for key in camera_keys:
+            chunk = record.get(f"videos/{key}/chunk_index")
+            file = record.get(f"videos/{key}/file_index")
+            if chunk is None or file is None:
+                continue
+            windows[key] = {
+                "chunk_index": int(chunk),
+                "file_index": int(file),
+                "from_timestamp": float(record.get(f"videos/{key}/from_timestamp") or 0.0),
+                "to_timestamp": float(record.get(f"videos/{key}/to_timestamp") or 0.0),
+            }
+        first_item = (
+            dataset.get_raw_item(from_index) if to_index > from_index else {}
+        )
+        result.update(
+            {
+                "episode_index": int(episode_index),
+                "num_frames": to_index - from_index,
+                "video_windows": windows,
+                "sample_task": (
+                    first_item.get("task") if isinstance(first_item, dict) else None
+                ),
+            }
+        )
+        return result
+
+    def dataset_series(
+        self, dataset_path: Path, episode_index: int | None = None
+    ) -> dict[str, Any]:
+        """Return numeric time-series data for plotting.
+
+        When ``episode_index`` is given, only that episode's frames are returned
+        and timestamps are re-based to start at 0 so the plot x-axis is local.
+        """
         dataset = self._load_dataset(dataset_path)
         dataset_path = dataset_path.resolve()
 
         import numpy as np
         import torch
 
+        if episode_index is None:
+            start, end = 0, dataset.num_frames
+        else:
+            record = self._episode_record(dataset, episode_index)
+            start = int(record["dataset_from_index"])
+            end = int(record["dataset_to_index"])
+
         channels = self._numeric_channels(dataset)
         numeric_keys = [series_key for series_key, _, _ in channels]
         series: dict[str, list[float | None]] = {key: [] for key in numeric_keys}
         timestamps: list[float] = []
+        base_ts: float | None = None
 
         def _element(val: Any, element_index: int) -> float | None:
             if val is None:
@@ -633,12 +713,15 @@ class RuntimeManager:
                 return float(val)
             return None
 
-        for idx in range(dataset.num_frames):
+        for idx in range(start, end):
             item = dataset.get_raw_item(idx)
             ts = item.get("timestamp")
             if isinstance(ts, torch.Tensor):
                 ts = ts.item()
-            timestamps.append(float(ts) if ts is not None else idx / dataset.fps)
+            ts = float(ts) if ts is not None else idx / dataset.fps
+            if base_ts is None:
+                base_ts = ts
+            timestamps.append(ts - base_ts)
             for series_key, feature_key, element_index in channels:
                 series[series_key].append(
                     _element(item.get(feature_key), element_index)
@@ -647,16 +730,24 @@ class RuntimeManager:
         return {
             "path": str(dataset_path),
             "fps": dataset.fps,
-            "num_frames": dataset.num_frames,
+            "num_frames": end - start,
             "timestamps": timestamps,
             "series": series,
             "numeric_keys": numeric_keys,
         }
 
     def dataset_frame_image(
-        self, dataset_path: Path, camera_key: str, frame_index: int
+        self,
+        dataset_path: Path,
+        camera_key: str,
+        frame_index: int,
+        episode_index: int | None = None,
     ) -> bytes:
-        """Return a single frame image as JPEG bytes."""
+        """Return a single frame image as JPEG bytes.
+
+        When ``episode_index`` is given, ``frame_index`` is episode-local and is
+        mapped to the dataset-global frame.
+        """
         import io
 
         import numpy as np
@@ -665,7 +756,16 @@ class RuntimeManager:
 
         dataset = self._load_dataset(dataset_path)
 
-        if frame_index < 0 or frame_index >= dataset.num_frames:
+        if episode_index is not None:
+            record = self._episode_record(dataset, episode_index)
+            start = int(record["dataset_from_index"])
+            end = int(record["dataset_to_index"])
+            if frame_index < 0 or frame_index >= (end - start):
+                raise IndexError(
+                    f"Frame index {frame_index} out of range [0, {end - start})"
+                )
+            frame_index = start + frame_index
+        elif frame_index < 0 or frame_index >= dataset.num_frames:
             raise IndexError(
                 f"Frame index {frame_index} out of range [0, {dataset.num_frames})"
             )

@@ -43,11 +43,17 @@ def list_episodes(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dic
 
 
 @router.get("/preview")
-def preview(path: str, runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+def preview(
+    path: str,
+    episode_index: int | None = None,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
     try:
-        return runtime.preview_dataset(Path(path))
+        return runtime.preview_dataset(Path(path), episode_index=episode_index)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except IndexError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/browse")
@@ -143,13 +149,16 @@ def merge_progress() -> dict:
 @router.get("/series")
 def series(
     path: str,
+    episode_index: int | None = None,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
-    """Return all numeric time-series data from a dataset for plotting."""
+    """Return numeric time-series data from a dataset (or one episode) for plotting."""
     try:
-        return runtime.dataset_series(Path(path))
+        return runtime.dataset_series(Path(path), episode_index=episode_index)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except IndexError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -159,11 +168,14 @@ def frame_image(
     path: str,
     key: str,
     index: int = 0,
+    episode_index: int | None = None,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> Response:
     """Return a single frame image as JPEG."""
     try:
-        data = runtime.dataset_frame_image(Path(path), key, index)
+        data = runtime.dataset_frame_image(
+            Path(path), key, index, episode_index=episode_index
+        )
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (RuntimeError, IndexError, KeyError) as exc:
@@ -182,11 +194,15 @@ def frame_image(
 def video(
     path: str,
     key: str,
+    chunk_index: int = 0,
+    file_index: int = 0,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> FileResponse:
     """Stream a camera feed's MP4 directly (FileResponse supports range/seek)."""
     try:
-        video_path = runtime.dataset_video_path(Path(path), key)
+        video_path = runtime.dataset_video_path(
+            Path(path), key, chunk_index=chunk_index, file_index=file_index
+        )
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (RuntimeError, FileNotFoundError, KeyError) as exc:

@@ -30,12 +30,19 @@ const state = {
     mergedPreview: null,
     mergedPath: "",
     mergeProgress: null,
+    // True while a merge is running and the progress overlay is shown.
+    merging: false,
     previewSeries: null,
     mergedSeries: null,
     previewFrame: 0,
     mergedFrame: 0,
     previewPlaying: false,
     mergedPlaying: false,
+    // Merged-dataset preview: which scope is shown (null = whole dataset, else
+    // an episode index), the episode list for the picker, and a per-scope cache.
+    mergedSelectedEpisode: null,
+    mergedEpisodes: [],
+    mergedScopeCache: {},
     // Training page state
     mergedDatasetPath: "",
     mergedDatasetPreview: null,
@@ -620,42 +627,63 @@ function _showPreviewLoadingOverlay(containerId) {
         </div>`;
 }
 
+// Show/hide the small merge-progress overlay (a modal over the current page).
+function _showMergeModal() {
+    const modal = byId("merge-modal");
+    if (!modal) return;
+    const bar = modal.querySelector(".progress-bar");
+    if (bar) {
+        bar.querySelector("span:first-child").style.width = "0%";
+        const txt = bar.querySelector(".progress-bar__text");
+        if (txt) txt.textContent = `0/${state.selectedEpisodes.length}`;
+    }
+    modal.classList.remove("hidden");
+}
+
+function _hideMergeModal() {
+    const modal = byId("merge-modal");
+    if (modal) modal.classList.add("hidden");
+}
+
 async function _pollMergeProgress() {
     while (true) {
         await new Promise((r) => setTimeout(r, 400));
-        if (state.processingStep !== 3) return;
+        if (!state.merging) return;
         try {
             const prog = await api("/datasets/merge-progress");
             state.mergeProgress = prog;
             if (prog.status === "done") {
                 const result = prog.result;
                 state.mergedPath = result.root;
-                // Hide progress block and show loading overlay
-                const progressBlock = document.querySelector(".merge-progress-block");
-                if (progressBlock) progressBlock.classList.add("hidden");
-                const previewBlock = byId("merged-preview-block");
-                if (previewBlock) {
-                    previewBlock.classList.remove("hidden");
-                    _showPreviewLoadingOverlay("merged-preview-block");
-                }
-                state.mergedPreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
+                const wholePreview = await api(`/datasets/preview?path=${encodeURIComponent(result.root)}`);
                 state.mergedFrame = 0;
                 state.mergedPlaying = false;
+                state.mergedSelectedEpisode = null;
+                state.mergedEpisodes = wholePreview.episodes || [];
+                state.mergedScopeCache = {};
                 _stopDatasetPlayback("mergedPlaying");
+                let wholeSeries = null;
                 try {
-                    state.mergedSeries = await api(`/datasets/series?path=${encodeURIComponent(result.root)}`);
+                    wholeSeries = await api(`/datasets/series?path=${encodeURIComponent(result.root)}`);
                 } catch (_) {
-                    state.mergedSeries = null;
+                    wholeSeries = null;
                 }
+                state.mergedScopeCache.all = { preview: wholePreview, series: wholeSeries };
+                state.mergedPreview = wholePreview;
+                state.mergedSeries = wholeSeries;
+                // Done: close the overlay and jump to the merged-dataset preview page.
+                state.merging = false;
+                _hideMergeModal();
+                state.processingStep = 3;
                 renderProcessing();
                 return;
             } else if (prog.status === "error") {
+                state.merging = false;
+                _hideMergeModal();
                 showToast(prog.error || "Merge failed", true);
-                state.processingStep = 2;
-                renderProcessing();
                 return;
             }
-            // Update progress bars in place without full re-render
+            // Update the overlay's progress bar in place without re-rendering.
             _updateMergeProgressBars(prog);
         } catch (_) {
             // endpoint not available yet, keep polling
@@ -663,16 +691,55 @@ async function _pollMergeProgress() {
     }
 }
 
+// Switch the merged-dataset preview to a scope: null = whole dataset, or an
+// episode index. Results are cached per scope so toggling back is instant.
+async function _selectMergedScope(episodeIndex) {
+    const cacheKey = episodeIndex == null ? "all" : String(episodeIndex);
+    state.mergedSelectedEpisode = episodeIndex;
+    state.mergedFrame = 0;
+    state.mergedPlaying = false;
+    _stopDatasetPlayback("mergedPlaying");
+
+    const cached = state.mergedScopeCache[cacheKey];
+    if (cached) {
+        state.mergedPreview = cached.preview;
+        state.mergedSeries = cached.series;
+        renderProcessing();
+        return;
+    }
+
+    renderProcessing();
+    _showPreviewLoadingOverlay("merged-preview-block");
+    const path = state.mergedPath;
+    const epQuery = episodeIndex == null ? "" : `&episode_index=${episodeIndex}`;
+    try {
+        const preview = await api(`/datasets/preview?path=${encodeURIComponent(path)}${epQuery}`);
+        let series = null;
+        try {
+            series = await api(`/datasets/series?path=${encodeURIComponent(path)}${epQuery}`);
+        } catch (_) {
+            series = null;
+        }
+        state.mergedScopeCache[cacheKey] = { preview, series };
+        // Ignore a stale response if the user switched scope while loading.
+        if (state.mergedSelectedEpisode !== episodeIndex) return;
+        state.mergedPreview = preview;
+        state.mergedSeries = series;
+        renderProcessing();
+    } catch (error) {
+        showToast(error.message, true);
+    }
+}
+
 function _updateMergeProgressBars(prog) {
     const overallPercent = prog.total_episodes ? Math.round((prog.episode_index / prog.total_episodes) * 100) : 0;
-    const overallLabel = `${prog.episode_index}/${prog.total_episodes}`;
     const block = document.querySelector(".merge-progress-block");
     if (!block) return;
     const bar = block.querySelector(".progress-bar");
     if (bar) {
         bar.querySelector("span:first-child").style.width = `${overallPercent}%`;
         const txt = bar.querySelector(".progress-bar__text");
-        if (txt) txt.textContent = overallLabel;
+        if (txt) txt.textContent = `${prog.episode_index}/${prog.total_episodes}`;
     }
 }
 
@@ -697,14 +764,25 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
             orderedCameraKeys[leftIdx],
         ];
     }
-    const feedsHtml = orderedCameraKeys.map((cameraKey) => `
+    // For an episode-scoped preview the camera feeds live inside a shared MP4,
+    // so target the episode's video file and play only its time window (native
+    // looping is disabled — playback wraps within the window in the tick loop).
+    const videoWindows = preview.video_windows || null;
+    const feedsHtml = orderedCameraKeys.map((cameraKey) => {
+        const win = videoWindows ? videoWindows[cameraKey] : null;
+        const chunkIndex = win ? win.chunk_index : 0;
+        const fileIndex = win ? win.file_index : 0;
+        const loopAttr = win ? "" : "loop";
+        const src = `/datasets/video?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(cameraKey)}&chunk_index=${chunkIndex}&file_index=${fileIndex}`;
+        return `
         <div class="feed">
             <div class="feed__header"><span>${cameraKey}</span></div>
             <div class="feed__placeholder" data-render-mode="live">
-                <video class="feed__image dataset-frame-video" data-camera-key="${cameraKey}" src="/datasets/video?path=${encodeURIComponent(datasetPath)}&key=${encodeURIComponent(cameraKey)}" muted playsinline preload="auto" loop></video>
+                <video class="feed__image dataset-frame-video" data-camera-key="${cameraKey}" src="${src}" muted playsinline preload="auto" ${loopAttr}></video>
             </div>
         </div>
-    `).join("");
+    `;
+    }).join("");
 
     // Playback controls
     const playbackHtml = `
@@ -806,11 +884,20 @@ function _datasetPreviewFps(preview) {
     return preview.fps && Number.isFinite(preview.fps) && preview.fps > 0 ? preview.fps : 30;
 }
 
-// Seek every camera <video> to the given frame (time = frame / fps). Frames are
-// concatenated at constant fps, so the frame index maps linearly to video time.
+// Video time offset for a camera. For an episode-scoped preview the feed sits
+// inside a shared MP4, so frame 0 maps to the episode's from_timestamp; for a
+// whole-dataset preview there is no window and the offset is 0.
+function _videoWindowOffset(preview, cameraKey) {
+    const win = preview.video_windows && preview.video_windows[cameraKey];
+    return win ? (win.from_timestamp || 0) : 0;
+}
+
+// Seek every camera <video> to the given frame (time = offset + frame / fps).
+// Frames are at constant fps, so the frame index maps linearly to video time.
 function _seekDatasetVideos(container, preview, frameIndex) {
-    const t = frameIndex / _datasetPreviewFps(preview);
+    const fps = _datasetPreviewFps(preview);
     container.querySelectorAll(".dataset-frame-video").forEach((video) => {
+        const t = _videoWindowOffset(preview, video.dataset.cameraKey) + frameIndex / fps;
         if (video.readyState >= 1) {
             video.currentTime = t;
         } else {
@@ -883,6 +970,8 @@ function _startDatasetPlayback(container, preview, seriesData, frameKey, playing
     const videos = [...container.querySelectorAll(".dataset-frame-video")];
     if (!videos.length) return;
     const master = videos[0];
+    const masterOffset = _videoWindowOffset(preview, master.dataset.cameraKey);
+    const masterWindow = preview.video_windows && preview.video_windows[master.dataset.cameraKey];
 
     // Play every feed natively; the browser handles decode/timing smoothly.
     videos.forEach((video) => {
@@ -896,17 +985,26 @@ function _startDatasetPlayback(container, preview, seriesData, frameKey, playing
     // animation frame, so the playhead tracks the natively-decoded video.
     const tick = () => {
         if (!live()) return;
+        // Episode windows share an MP4 with other episodes, so wrap back to the
+        // window start instead of letting the feed run into the next episode.
+        if (masterWindow && master.currentTime >= masterWindow.to_timestamp - 0.5 / fps) {
+            videos.forEach((video) => {
+                video.currentTime = _videoWindowOffset(preview, video.dataset.cameraKey);
+            });
+        }
         const frame = Math.min(
             numFrames - 1,
-            Math.max(0, Math.round(master.currentTime * fps))
+            Math.max(0, Math.round((master.currentTime - masterOffset) * fps))
         );
         if (frame !== state[frameKey]) {
             state[frameKey] = frame;
             _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
             // Correct any drift between feeds without disrupting the master.
             for (let i = 1; i < videos.length; i++) {
-                if (Math.abs(videos[i].currentTime - master.currentTime) > 0.15) {
-                    videos[i].currentTime = master.currentTime;
+                const offsetDelta = _videoWindowOffset(preview, videos[i].dataset.cameraKey) - masterOffset;
+                const target = master.currentTime + offsetDelta;
+                if (Math.abs(videos[i].currentTime - target) > 0.15) {
+                    videos[i].currentTime = target;
                 }
             }
         }
@@ -3009,46 +3107,78 @@ function renderProcessing() {
             renderProcessing();
         };
         byId("training-merge").onclick = async () => {
+            if (!state.selectedEpisodes.length) return;
+            // Stay on the episode-selection page and show a small progress
+            // overlay; jump to the preview page only once the merge completes.
+            state.mergeProgress = null;
+            state.mergedPreview = null;
+            state.mergedSeries = null;
+            state.merging = true;
+            _showMergeModal();
             try {
-                state.processingStep = 3;
-                state.mergeProgress = null;
-                state.mergedPreview = null;
-                state.mergedSeries = null;
-                renderProcessing();
                 await api("/datasets/merge", {
                     method: "POST",
                     body: JSON.stringify({ episode_paths: state.selectedEpisodes, output_name: `merged-${Date.now()}` }),
                 });
-                // Poll for progress
                 await _pollMergeProgress();
             } catch (error) {
+                state.merging = false;
+                _hideMergeModal();
                 showToast(error.message, true);
-                state.processingStep = 2;
-                renderProcessing();
             }
         };
         return;
     }
 
     if (state.processingStep === 3) {
-        const prog = state.mergeProgress;
-        const merging = !state.mergedPreview;
-        const overallPercent = prog && prog.total_episodes ? Math.round((prog.episode_index / prog.total_episodes) * 100) : 0;
-        const overallLabel = prog ? `${prog.episode_index}/${prog.total_episodes}` : "";
+        // Step 3 is only entered once the merge has finished and the preview is
+        // loaded (merge progress is shown in an overlay on the previous step).
+        if (!state.mergedPreview) return;
+
+        // List "Merged Dataset" + each episode on the left; the main panel
+        // previews the selected scope (whole dataset or one episode).
+        const sel = state.mergedSelectedEpisode;
+        const title = sel == null ? "Merged Dataset" : `Episode ${sel}`;
         container.innerHTML = `
-            <div class="panel-header"><div><h2>Merged Dataset</h2></div></div>
-            <div class="merge-progress-block ${merging ? "" : "hidden"}">
-                <p class="merge-progress-block__title">Merging selected episodes...</p>
-                <div class="merge-progress-item">
-                    <div class="progress-bar progress-bar--thick"><span style="width: ${overallPercent}%"></span><span class="progress-bar__text">${overallLabel}</span></div>
+            <div class="training-layout">
+                <aside class="panel">
+                    <div class="panel-header"><h2>Episodes</h2></div>
+                    <div class="episode-list" id="merged-episode-picker"></div>
+                </aside>
+                <div class="training-main">
+                    <div class="panel-header"><div><h2>${escapeHtml(title)}</h2></div></div>
+                    <div id="merged-preview-block"></div>
+                    <div class="control-bar"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button></div>
                 </div>
             </div>
-            <div class="${state.mergedPreview ? "" : "hidden"}" id="merged-preview-block"></div>
-            <div class="control-bar"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button></div>
         `;
-        if (state.mergedPreview) {
-            renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
-        }
+
+        const picker = byId("merged-episode-picker");
+        // The backend includes the full episode list in every preview response
+        // (whole-dataset or episode-scoped), so derive it from the current
+        // preview and fall back to the list captured when the merge finished.
+        const episodeList =
+            (state.mergedPreview && state.mergedPreview.episodes && state.mergedPreview.episodes.length
+                ? state.mergedPreview.episodes
+                : state.mergedEpisodes) || [];
+        const entries = [{ label: "Merged Dataset", index: null }].concat(
+            episodeList.map((ep) => ({
+                label: `Episode ${ep.index}`,
+                index: ep.index,
+                num_frames: ep.num_frames,
+            }))
+        );
+        entries.forEach((entry) => {
+            const isSelected = entry.index === sel || (entry.index == null && sel == null);
+            const row = document.createElement("div");
+            row.className = `episode-row episode-row--selectable ${isSelected ? "episode-row--selected" : ""}`.trim();
+            const meta = entry.index == null ? "" : `<span class="episode-row__meta">${entry.num_frames} frames</span>`;
+            row.innerHTML = `<div class="episode-row__main"><span>${escapeHtml(entry.label)}</span></div>${meta}`;
+            row.onclick = () => _selectMergedScope(entry.index);
+            picker.appendChild(row);
+        });
+
+        renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
         byId("merge-prev").onclick = () => {
             state.processingStep = 2;
             renderProcessing();
