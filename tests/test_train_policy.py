@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
+import pytest
 
-from flexivtrainer.jobs.train_policy import resolve_training_device
+# torch ships via the platform-specific PyTorch install, not the package's
+# declared deps, so it is absent in the deps-light CI env. Skip rather than fail
+# collection when it is unavailable.
+torch = pytest.importorskip("torch")
+
+from flexivtrainer.jobs.train_policy import resolve_training_device  # noqa: E402
 
 
 def test_resolve_device_passes_explicit_through() -> None:

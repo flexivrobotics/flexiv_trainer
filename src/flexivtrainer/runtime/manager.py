@@ -605,8 +605,11 @@ class RuntimeManager:
     def preview_dataset(
         self, dataset_path: Path, episode_index: int | None = None
     ) -> dict[str, Any]:
-        dataset = self._load_dataset(dataset_path)
+        # Validate the path is within the storage root *before* attempting any
+        # dataset load: the access-denied guard must run regardless of whether
+        # the optional dataset dependencies are importable.
         dataset_path, repo_id = self._resolve_dataset_repo(dataset_path)
+        dataset = self._load_dataset(dataset_path)
         camera_keys = [
             key
             for key, feature in dataset.features.items()

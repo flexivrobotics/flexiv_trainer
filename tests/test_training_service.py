@@ -17,11 +17,14 @@ import sys
 import time
 from pathlib import Path
 
-import psutil
 import pytest
 
-from flexivtrainer.config import AppSettings, StorageConfig
-from flexivtrainer.jobs.train_policy import TrainingJob, TrainingService
+# psutil arrives transitively via lerobot, which is not installed in the
+# deps-light CI env. Skip this module rather than fail collection when it's gone.
+psutil = pytest.importorskip("psutil")
+
+from flexivtrainer.config import AppSettings, StorageConfig  # noqa: E402
+from flexivtrainer.jobs.train_policy import TrainingJob, TrainingService  # noqa: E402
 
 
 def make_service(tmp_path: Path) -> TrainingService:
