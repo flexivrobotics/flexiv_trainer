@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flexivtrainer"
+version = "0.1.0"
+description = "All-in-one software platform for training physical AI skills on Flexiv robots."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.136,<1.0",
+  "rich>=13.9,<14.0",
+  "uvicorn>=0.48,<1.0",
+  "pydantic-settings>=2.14,<3.0",
+  "typer>=0.25,<1.0",
+  "numpy>=1.26",
+  "flexivrdk==1.9.2",
+  "flexivtdk==1.6.1",
+  "lerobot==0.5.1",
+  "pyrealsense2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9.0",
+  "ruff>=0.12,<0.13",
+]
+
+[project.scripts]
+flexiv-trainer-server = "flexivtrainer.api.app:run"
+flexivtrainer-server = "flexivtrainer.api.app:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flexivtrainer"]
+
+[tool.hatch.build]
+include = [
+  "src/flexivtrainer/web/**/*",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

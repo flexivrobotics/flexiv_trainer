@@ -1,0 +1,338 @@
+<!doctype html>
+<!--
+Copyright 2026 Flexiv Ltd. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flexiv Trainer</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260615-4" />
+</head>
+
+<body>
+    <div class="app-shell">
+        <header class="app-nav">
+            <div class="app-nav__brand-group">
+                <button class="brand" data-nav="home" type="button">Flexiv Trainer</button>
+                <div class="version-badge" id="version-badge" aria-hidden="true">v__FLEXIV_TRAINER_VERSION__</div>
+            </div>
+            <nav>
+                <button class="nav-link" data-nav="teleoperation" type="button">Data Collection</button>
+                <span class="nav-divider" aria-hidden="true">|</span>
+                <button class="nav-link" data-nav="processing" type="button">Data Processing</button>
+                <span class="nav-divider" aria-hidden="true">|</span>
+                <button class="nav-link" data-nav="training" type="button">Policy Training</button>
+            </nav>
+        </header>
+
+        <main class="page-shell">
+            <section class="view view--active" data-view="home">
+                <section class="home-config-grid">
+                    <section class="panel robot-config-panel">
+                        <div class="panel-header">
+                            <h2>Leader Robots</h2>
+                        </div>
+                        <div class="robot-input-grid" id="home-leader-robots"></div>
+                    </section>
+
+                    <section class="panel robot-config-panel">
+                        <div class="panel-header">
+                            <h2>Follower Robots</h2>
+                        </div>
+                        <div class="robot-input-grid" id="home-follower-robots"></div>
+                    </section>
+                </section>
+
+                <section class="panel">
+                    <h2>System Status</h2>
+                    <div class="status-grid" id="home-status"></div>
+                </section>
+
+                <section class="panel-grid">
+                    <section class="panel">
+                        <h2>Quick Start</h2>
+                        <ol class="number-list">
+                            <li>Confirm robots, cameras, and network are ready.</li>
+                            <li>Open Data Collection and verify module status.</li>
+                            <li>Record and save one or more episodes.</li>
+                            <li>Open Data Processing to preview and merge episodes.</li>
+                            <li>Open Policy Training to train a policy.</li>
+                        </ol>
+                    </section>
+
+                    <section class="panel">
+                        <h2>Safety &amp; Readiness Checklist</h2>
+                        <ul class="plain-list">
+                            <li>Robots powered and reachable.</li>
+                            <li>RealSense cameras connected and discoverable.</li>
+                            <li>Home postures configured before reset operations.</li>
+                        </ul>
+                    </section>
+
+                    <section class="panel">
+                        <h2>Data Storage &amp; Outputs</h2>
+                        <div class="kv-list" id="home-storage"></div>
+                    </section>
+                </section>
+
+            </section>
+
+            <section class="view" data-view="teleoperation">
+                <div class="teleop-shell panel--wide">
+                    <div class="teleop-sidebar teleop-sidebar--left">
+                        <section class="panel panel--soft control-panel teleop-status-panel">
+                            <div class="panel-header">
+                                <h2>System Status</h2>
+                            </div>
+                            <div class="status-grid" id="teleop-status-grid"></div>
+                        </section>
+
+                        <section class="panel panel--soft control-panel">
+                            <div class="panel-header">
+                                <h2>Teleoperation Control</h2>
+                            </div>
+                            <div class="control-stack">
+                                <label class="teleop-zero-toggle" for="teleop-zero-sensors">
+                                    <input type="checkbox" id="teleop-zero-sensors" checked />
+                                    <span>Zero force sensors on start</span>
+                                </label>
+                                <button class="start-button button-with-icon" id="teleop-power" type="button">
+                                    <span class="button-content">
+                                        <svg class="button-icon button-icon--play" viewBox="0 0 24 24"
+                                            aria-hidden="true">
+                                            <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+                                        </svg>
+                                        <span>Start</span>
+                                    </span>
+                                </button>
+                                <button class="button-with-icon" id="teleop-engage" type="button">
+                                    <span class="button-content">
+                                        <svg class="button-icon button-icon--bolt button-icon--bolt-engage"
+                                            viewBox="0 0 24 24" aria-hidden="true">
+                                            <path d="M7 2v11h3v9l7-12h-4l4-8z" fill="currentColor"></path>
+                                        </svg>
+                                        <span>Engage</span>
+                                    </span>
+                                </button>
+                                <button class="button-with-icon" id="teleop-home" type="button">
+                                    <span class="button-content">
+                                        <svg class="button-icon button-icon--home" viewBox="0 0 24 24"
+                                            aria-hidden="true">
+                                            <path d="M12 3 3 11h2v9h5v-6h4v6h5v-9h2L12 3z" fill="currentColor"></path>
+                                        </svg>
+                                        <span>Home All Robots</span>
+                                    </span>
+                                </button>
+                            </div>
+                            <div class="teleop-start-warning hidden" id="teleop-start-warning" role="status">
+                                Zeroing force sensors …
+                            </div>
+                        </section>
+
+                        <section class="panel panel--soft control-panel">
+                            <div class="panel-header">
+                                <h2>Camera Control</h2>
+                            </div>
+                            <div class="control-stack camera-control-stack" id="teleop-camera-config">
+                                <p class="camera-control-empty">Connect cameras to assign locations.</p>
+                            </div>
+                        </section>
+
+                    </div>
+
+                    <section class="panel teleop-main">
+                        <div class="teleop-layout">
+                            <div class="component-wrapper" id="teleop-cameras-wrap">
+                                <div class="feed feed--hero">
+                                    <div class="feed__header">
+                                        <span class="feed__title">Egocentric</span>
+                                        <strong class="feed__fps" id="ego-fps">0.0 FPS</strong>
+                                    </div>
+                                    <div class="feed__placeholder">Egocentric camera view placeholder</div>
+                                </div>
+
+                                <div class="feed-row">
+                                    <div class="wrist-column">
+                                        <div class="feed">
+                                            <div class="feed__header">
+                                                <span class="feed__title">Left Wrist</span>
+                                                <strong class="feed__fps" id="left-wrist-fps">0.0 FPS</strong>
+                                            </div>
+                                            <div class="feed__placeholder">Left robot camera placeholder</div>
+                                        </div>
+                                        <section class="telemetry-card telemetry-card--vector" id="left-force-panel">
+                                        </section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="left-force-graph-panel"></section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="left-moment-graph-panel"></section>
+                                    </div>
+                                    <div class="wrist-column">
+                                        <div class="feed">
+                                            <div class="feed__header">
+                                                <span class="feed__title">Right Wrist</span>
+                                                <strong class="feed__fps" id="right-wrist-fps">0.0 FPS</strong>
+                                            </div>
+                                            <div class="feed__placeholder">Right robot camera placeholder</div>
+                                        </div>
+                                        <section class="telemetry-card telemetry-card--vector" id="right-force-panel">
+                                        </section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="right-force-graph-panel"></section>
+                                        <section class="telemetry-card telemetry-card--chart"
+                                            id="right-moment-graph-panel"></section>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="panel panel--soft hidden" id="teleop-message"></div>
+                        </div>
+                    </section>
+
+                    <section class="panel panel--soft control-panel teleop-sidebar teleop-sidebar--right">
+                        <div class="panel-header">
+                            <h2>Episode Recording</h2>
+                        </div>
+                        <div class="recording-status" id="recording-status"></div>
+                        <div class="control-stack">
+                            <button class="start-button button-with-icon" id="record-toggle" type="button">
+                                <span class="button-content">
+                                    <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
+                                    </svg>
+                                    <span>Start</span>
+                                </span>
+                            </button>
+                            <button class="secondary-button button-with-icon hidden" id="record-save" type="button">
+                                <span class="button-content">
+                                    <svg class="button-icon button-icon--save" viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M5 12.5 9.2 16.7 19 7.4" fill="none" stroke="currentColor"
+                                            stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                                    </svg>
+                                    <span>Save Episode</span>
+                                </span>
+                            </button>
+                            <button class="secondary-button button-with-icon hidden" id="record-discard" type="button">
+                                <span class="button-content">
+                                    <svg class="button-icon button-icon--discard" viewBox="0 0 24 24"
+                                        aria-hidden="true">
+                                        <path d="M7 7 17 17" fill="none" stroke="currentColor" stroke-linecap="round"
+                                            stroke-linejoin="round" stroke-width="2"></path>
+                                        <path d="M17 7 7 17" fill="none" stroke="currentColor" stroke-linecap="round"
+                                            stroke-linejoin="round" stroke-width="2"></path>
+                                    </svg>
+                                    <span>Discard Episode</span>
+                                </span>
+                            </button>
+                        </div>
+                        <div class="recording-divider" aria-hidden="true"></div>
+                        <div class="recording-option-list" id="recording-options"></div>
+                    </section>
+                </div>
+            </section>
+
+            <section class="view" data-view="processing">
+                <section class="panel panel--wide">
+                    <div id="processing-content"></div>
+                </section>
+            </section>
+
+            <section class="view" data-view="training">
+                <section class="panel panel--wide">
+                    <div id="training-content"></div>
+                </section>
+            </section>
+        </main>
+    </div>
+
+    <div class="dialog-backdrop hidden" id="browser-modal">
+        <div class="dialog-panel">
+            <div class="dialog-header" id="browser-header">
+                <div>
+                    <p class="eyebrow" id="browser-eyebrow">Server Path Browser</p>
+                    <h3 id="browser-title">Select Path</h3>
+                </div>
+                <button class="secondary-button" id="browser-close" type="button">Close</button>
+            </div>
+            <div class="dialog-toolbar" id="browser-toolbar">
+                <div class="dialog-path-block">
+                    <span class="dialog-path-note" id="browser-path-note">Current path</span>
+                    <code id="browser-path">/</code>
+                </div>
+                <div class="dialog-toolbar__actions">
+                    <button class="secondary-button toggle-all-button hidden" id="browser-select-all" type="button"
+                        title="Select all" aria-label="Select all"><svg class="icon-check" viewBox="0 0 24 24"
+                            aria-hidden="true">
+                            <rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor"
+                                stroke-width="1.8"></rect>
+                            <path d="M8 12.3 10.8 15 16 8.8" fill="none" stroke="currentColor" stroke-linecap="round"
+                                stroke-linejoin="round" stroke-width="1.8"></path>
+                        </svg></button>
+                    <button class="secondary-button" id="browser-up" type="button">Up</button>
+                </div>
+            </div>
+            <div class="dialog-list" id="browser-list"></div>
+            <div class="dialog-footer">
+                <button class="secondary-button" id="browser-cancel" type="button">Cancel</button>
+                <button id="browser-confirm" type="button">Select</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="dialog-backdrop hidden" id="merge-modal">
+        <div class="dialog-panel dialog-panel--compact">
+            <div class="dialog-header">
+                <div>
+                    <p class="eyebrow">Merging Episodes</p>
+                    <h3>Merging selected episodes…</h3>
+                </div>
+            </div>
+            <div class="merge-progress-block merge-progress-block--modal">
+                <div class="merge-progress-item">
+                    <div class="progress-bar progress-bar--thick"><span style="width: 0%"></span><span
+                            class="progress-bar__text">0/0</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="notification-center" id="notification-center">
+        <button class="notification-toggle" id="notification-toggle" type="button" aria-label="Open notifications"
+            aria-expanded="false" title="Open notifications">
+            <svg class="notification-toggle__icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                    d="M12 4a5 5 0 0 0-5 5v2.7c0 .6-.2 1.2-.6 1.6L5 15h14l-1.4-1.7c-.4-.4-.6-1-.6-1.6V9a5 5 0 0 0-5-5Z"
+                    fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8">
+                </path>
+                <path d="M10 18a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-linecap="round"
+                    stroke-linejoin="round" stroke-width="1.8"></path>
+            </svg>
+            <span class="notification-toggle__badge hidden" id="notification-badge">0</span>
+        </button>
+        <section class="notification-panel hidden" id="notification-panel" aria-label="Notifications">
+            <div class="notification-panel__header">
+                <h3>Messages</h3>
+            </div>
+            <div class="notification-list" id="notification-list"></div>
+        </section>
+    </div>
+
+    <script type="module" src="/static/app.js?v=20260615-5"></script>
+</body>
+
+</html>

@@ -1,0 +1,257 @@
+# Flexiv Trainer
+
+Flexiv Trainer is an all-in-one, local-first software platform for training physical AI skills on Flexiv robots. It takes you through the full imitation-learning workflow — collecting teleoperation demonstrations, saving them as LeRobot episodes, merging episodes into training datasets, and launching policy training runs — from a single web UI on your own machine, with no cloud services required.
+
+The steps to set up and use this software can be summarized as:
+
+1. Install the software.
+2. Start the server.
+3. Set up robots and cameras in the UI.
+4. Teleoperate and record demonstration episodes.
+5. Review and merge episodes into one training dataset.
+6. Choose a policy and start training.
+
+## Supported Platforms
+
+| OS            | CPU             |
+| ------------- | --------------- |
+| Ubuntu 22.04+ | x86-64, aarch64 |
+
+## Software Requirements
+
+1. Python 3.12 or newer.
+2. GPU acceleration (optional but recommended).
+3. System config for realtime scheduling (see below).
+
+### Grant realtime privileges to non-root users (Linux only)
+
+This is required to run the teleoperation module:
+
+```bash
+echo "${USER}    -   rtprio    99" | sudo tee -a /etc/security/limits.conf
+echo "${USER}    -   nice     -20" | sudo tee -a /etc/security/limits.conf
+echo "${USER} soft memlock unlimited" | sudo tee -a /etc/security/limits.conf
+echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
+```
+
+> [!IMPORTANT]
+> Restart your device for the changes to take effect.
+
+## Hardware Requirements
+
+1. A dual-arm teleoperation setup eligible for high-transparency teleoperation.
+2. Supported cameras connected to your computer: 1 egocentric and 2 in-hand (left and right wrist), with the two in-hand cameras mounted on the follower robots.
+
+### Supported robots
+
+- Flexiv Rizon series
+
+### Supported cameras
+
+- RealSense cameras
+
+## Install
+
+1. Create a Python 3.12+ virtual environment:
+
+   ```bash
+   python3 -m venv .venv
+   ```
+
+2. Activate the virtual environment:
+
+   ```bash
+   source .venv/bin/activate
+   ```
+
+3. Upgrade pip and install the package:
+
+   ```bash
+   pip install --upgrade pip
+   pip install -e .
+   ```
+
+To also install development dependencies (for running tests and linting):
+
+```bash
+pip install -e ".[dev]"
+```
+
+### PyTorch on NVIDIA Jetson
+
+The standard PyPI PyTorch package for `aarch64` does not support CUDA (GPU acceleration) and will fall back to CPU-only execution. To enable GPU acceleration on NVIDIA Jetson devices, you must install the Jetson-compatible PyTorch wheels and their corresponding CUDA dependencies.
+
+For JetPack 7 / CUDA 13, you can replace the default CPU PyTorch after installation:
+
+```bash
+pip install --no-deps --force-reinstall \
+  --index-url https://pypi.jetson-ai-lab.io/sbsa/cu130 \
+  torch==2.10.0 torchvision==0.25.0
+```
+
+Refer to NVIDIA's official Jetson documentation for more details.
+
+## Start Flexiv Trainer
+
+Start the backend server from the same environment where you installed the package:
+
+```bash
+source .venv/bin/activate
+flexiv-trainer-server
+```
+
+After startup, the terminal prints the URL for the web UI. By default this is:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Open that URL in your browser to use the UI.
+
+If the port is still occupied after closing a previous server session, clear leftover processes and start again:
+
+```bash
+source .venv/bin/activate
+scripts/cleanup-server.sh
+flexiv-trainer-server
+```
+
+## First-Time Setup In The UI
+
+When the UI opens, you will start on the home page.
+
+1. Enter the serial numbers for the two leader robots.
+2. Enter the serial numbers for the two follower robots.
+3. In the System Status tile, connect:
+   - Teleop Service
+   - Robot Data Service
+   - Cameras
+4. Confirm the system shows healthy status before moving on.
+
+The home page also shows the storage locations used by the app for episodes, merged datasets, and training outputs.
+
+## Collect Demonstrations In Data Collection
+
+Open `Data Collection` from the navigation bar.
+
+On this page you can verify robot and camera health, view the camera feeds, monitor telemetry, run teleoperation, and record episodes.
+
+### Recommended workflow
+
+1. Check `System Status` and make sure teleoperation, robot data, and cameras are all connected.
+2. Confirm that the egocentric and wrist camera feeds are updating at around 30 FPS.
+3. If needed, use `Home All Robots` before starting teleoperation.
+4. In `Teleoperation Control`, click `Start` to begin teleoperation.
+5. In `Episode Recording`, choose which entries you want to record.
+   - The default selection includes all available camera observations, robot states, and robot actions.
+   - Use `Select All` or `Deselect All` if needed.
+6. Click the recording `Start` button when you are ready to capture a demonstration.
+7. Perform the task through teleoperation.
+8. Click the recording `Stop` button when one episode is complete.
+9. Click `Save Episode` to keep the recording, or `Discard Episode` to throw it away.
+
+Saved episodes are written to the episode storage directory shown on the home page. By default, episodes are stored under:
+
+```text
+.local/episodes/
+```
+
+## Load And Merge Episodes In Data Processing
+
+Open `Data Processing` from the navigation bar.
+
+### Step 1: Load episodes
+
+1. Click the add button in `Load Episodes`.
+2. In the episode browser, select one or more saved episode datasets.
+3. Use `Select All` or `Deselect All` if you want to quickly toggle the full list.
+4. Click `Load`.
+
+### Step 2: Review selected episodes
+
+1. Click an episode in the list to review it.
+2. Use the checkboxes to choose which episodes should be merged.
+3. Use `Select All` or `Deselect All` to toggle the current list.
+4. Click `Merge Selected Episodes`.
+
+### Step 3: Review the merged dataset
+
+The merging will take some time depending on the actual dataset size. When done:
+
+1. Review the merged dataset.
+2. Click `Next` if the merged dataset looks correct.
+
+Merged datasets are stored under:
+
+```text
+.local/datasets/
+```
+
+## Start Training
+
+Open `Policy Training` from the navigation bar, then work through the steps.
+
+### Step 1: Load the training dataset
+
+1. Click the add button to browse merged datasets.
+2. Select the dataset you want to train on.
+3. Click `Next`.
+
+### Step 2: Review the dataset
+
+1. Review the dataset preview (whole dataset or a single episode).
+2. Click `Next`.
+
+### Step 3: Choose a policy
+
+1. Select a training policy.
+2. The training output directory is generated automatically from the dataset name, policy, and a timestamp, and is shown under `Training Output Directory`.
+3. Click `Next`.
+
+### Step 4: Run training
+
+1. Under `Computation Device`, leave the device on `auto` or pick a specific device. Use the reload button to re-evaluate available devices.
+2. Click the start button in `Training Control`.
+3. Watch progress in the progress bar and the terminal log pane. Use `Pause`/`Resume` while a run is live.
+
+Training outputs are written to the output directory shown in Step 3. By default these live under:
+
+```text
+.local/training/
+```
+
+## Typical End-To-End Session
+
+For a normal session, the order is:
+
+1. Start `flexiv-trainer-server`.
+2. Open the web UI.
+3. Configure robot serial numbers on `Home`.
+4. Connect teleop service, robot data service, and cameras.
+5. Open `Data Collection`.
+6. Start teleoperation and record one or more demonstration episodes.
+7. Save the episodes you want to keep.
+8. Open `Data Processing`.
+9. Load and merge the saved episodes into one training dataset.
+10. Open `Policy Training`.
+11. Select the merged dataset and choose a policy.
+12. Pick a computation device and start training.
+
+## Open UI From Another Device
+
+If you want to use the UI from another device on the same LAN, set a public base URL before starting the server:
+
+```bash
+export FLEXIV_TRAINER_PUBLIC_BASE_URL=http://<backend-host-ip>:8000
+flexiv-trainer-server
+```
+
+Then open that public URL in a browser on the other device.
+
+## API Documentation
+
+The backend API doc can be accessed at:
+
+```text
+http://127.0.0.1:8000/docs
+```
