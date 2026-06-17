@@ -1,6 +1,6 @@
 # Flexiv Trainer
 
-Flexiv Trainer is a local-first application for collecting teleoperation demonstrations, saving them as LeRobot episodes, merging episodes into training datasets, and launching policy training runs.
+Flexiv Trainer is an all-in-one, local-first software platform for training physical AI skills on Flexiv robots. It takes you through the full imitation-learning workflow — collecting teleoperation demonstrations, saving them as LeRobot episodes, merging episodes into training datasets, and launching policy training runs — from a single web UI on your own machine, with no cloud services required.
 
 The steps to set up and use this software can be summarized as:
 
@@ -9,13 +9,13 @@ The steps to set up and use this software can be summarized as:
 3. Set up robots and cameras in the UI.
 4. Teleoperate and record demonstration episodes.
 5. Review and merge episodes into one training dataset.
-6. Choose policy and start training.
+6. Choose a policy and start training.
 
 ## Software Requirements
 
-1. OS: Ubuntu 22.04+ (x86-64 or NVIDIA Jetson/aarch64) for the full workflow; macOS (Apple Silicon) is supported for training and data processing (see [Install](#install))
-2. Environment: Python 3.12 or newer
-3. System config: see below
+1. OS: Ubuntu 22.04+ (x86-64 or NVIDIA Jetson/aarch64) for the full workflow; macOS (Apple Silicon) is supported for training and data processing (see [Install](#install)).
+2. Environment: Python 3.12 or newer.
+3. System config: see below.
 
 ### Grant realtime privileges to non-root users
 
@@ -31,7 +31,7 @@ echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
 ## Hardware Requirements
 
 1. A dual-arm teleoperation setup eligible for high-transparency teleoperation.
-2. Supported cameras connected to your computer: 1 egocentric and 2 in-hand, both mounted on the follower robots side.
+2. Supported cameras connected to your computer: 1 egocentric and 2 in-hand (left and right wrist), with the two in-hand cameras mounted on the follower robots.
 
 ### Supported cameras
 
@@ -200,7 +200,7 @@ On this page you can verify robot and camera health, view the camera feeds, moni
 6. Click the recording `Start` button when you are ready to capture a demonstration.
 7. Perform the task through teleoperation.
 8. Click the recording `Stop` button when one episode is complete.
-9. Click `Save Episode` to keep the recording, or `Discard Episode` to give up saving.
+9. Click `Save Episode` to keep the recording, or `Discard Episode` to throw it away.
 
 Saved episodes are written to the episode storage directory shown on the home page. By default, episodes are stored under:
 
@@ -208,9 +208,9 @@ Saved episodes are written to the episode storage directory shown on the home pa
 .local/episodes/
 ```
 
-## Load And Merge Episodes In Skill Training
+## Load And Merge Episodes In Data Processing
 
-Open `Skill Training` from the navigation bar.
+Open `Data Processing` from the navigation bar.
 
 ### Step 1: Load episodes
 
@@ -241,14 +241,32 @@ Merged datasets are stored under:
 
 ## Start Training
 
-In Policy Training, select a dataset and configure training.
+Open `Policy Training` from the navigation bar, then work through the steps.
 
-1. Choose a training policy.
-2. Click `Choose Directory` and select the training output directory.
-3. Click `Start Training`.
-4. See the training progress in the UI and terminal output.
+### Step 1: Load the training dataset
 
-Training outputs are stored in the directory you choose. The default app-managed location is:
+1. Click the add button to browse merged datasets.
+2. Select the dataset you want to train on.
+3. Click `Next`.
+
+### Step 2: Review the dataset
+
+1. Review the dataset preview (whole dataset or a single episode).
+2. Click `Next`.
+
+### Step 3: Choose a policy
+
+1. Select a training policy.
+2. The training output directory is generated automatically from the dataset name, policy, and a timestamp, and is shown under `Training Output Directory`.
+3. Click `Next`.
+
+### Step 4: Run training
+
+1. Under `Computation Device`, leave the device on `auto` or pick a specific device. Use the reload button to re-evaluate available devices.
+2. Click the start button in `Training Control`.
+3. Watch progress in the progress bar and the terminal log pane. Use `Pause`/`Resume` while a run is live.
+
+Training outputs are written to the output directory shown in Step 3. By default these live under:
 
 ```text
 .local/training/
@@ -268,8 +286,8 @@ For a normal session, the order is:
 8. Open `Data Processing`.
 9. Load and merge the saved episodes into one training dataset.
 10. Open `Policy Training`.
-11. Select the merged dataset, choose a policy and output directory.
-12. Start training.
+11. Select the merged dataset and choose a policy.
+12. Pick a computation device and start training.
 
 ## Open UI From Another Device
 

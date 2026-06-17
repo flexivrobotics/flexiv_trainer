@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "flexivtrainer"
 version = "1.0.0"
-description = "All-in-one software platform for training physical AI skills for Flexiv robots."
+description = "All-in-one software platform for training physical AI skills on Flexiv robots."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
