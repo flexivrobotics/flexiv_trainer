@@ -11,13 +11,22 @@ The steps to set up and use this software can be summarized as:
 5. Review and merge episodes into one training dataset.
 6. Choose a policy and start training.
 
+## Supported Platforms
+
+| OS            | CPU                   |
+| ------------- | --------------------- |
+| Ubuntu 22.04+ | x86-64, aarch64       |
+| macOS*        | Apple Silicon (arm64) |
+
+*Coming soon
+
 ## Software Requirements
 
-1. OS: Ubuntu 22.04+ (x86-64 or NVIDIA Jetson/aarch64) for the full workflow; macOS (Apple Silicon) is supported for training and data processing (see [Install](#install)).
-2. Environment: Python 3.12 or newer.
-3. System config: see below.
+1. Python 3.12 or newer.
+2. GPU acceleration (optional but recommended).
+3. System config for realtime scheduling (see below).
 
-### Grant realtime privileges to non-root users
+### Grant realtime privileges to non-root users (Linux only)
 
 This is required to run the teleoperation module:
 
@@ -71,28 +80,7 @@ After installing, continue to [Start Flexiv Trainer](#start-flexiv-trainer).
 
 ### macOS (Apple Silicon)
 
-> macOS is suited to training and data processing. Live teleoperation and RealSense capture require the Flexiv robot SDK and RealSense, which target Linux.
-
-1. Install prerequisites with Homebrew:
-
-   ```bash
-   brew install python@3.12 git
-   ```
-
-2. Create and activate a virtual environment, then install (from the project directory):
-
-   ```bash
-   python3.12 -m venv .venv
-   source .venv/bin/activate
-   pip install --upgrade pip
-   pip install .
-   ```
-
-3. PyTorch uses the Apple GPU (Metal/MPS) automatically. Verify:
-
-   ```bash
-   python -c "import torch; print(torch.backends.mps.is_available())"
-   ```
+> Coming soon.
 
 ### NVIDIA Jetson (AGX Thor / JetPack 7 / CUDA 13)
 
