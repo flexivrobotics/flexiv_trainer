@@ -359,7 +359,6 @@ button:disabled {
     margin-bottom: 0.3rem;
 }
 
-.workflow-grid,
 .status-grid,
 .feed-row,
 .legend-grid,
@@ -368,13 +367,11 @@ button:disabled {
     gap: 1rem;
 }
 
-.workflow-grid,
 .status-grid,
 .policy-grid {
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
-.workflow-card,
 .status-card,
 .policy-card,
 .browser-item {
@@ -435,15 +432,9 @@ button:disabled {
     flex-shrink: 0;
 }
 
-.workflow-card h3,
 .status-card h3,
 .policy-card h3 {
     margin-top: 0.25rem;
-}
-
-.workflow-card__badge,
-.workflow-card__cta {
-    color: var(--accent-strong);
 }
 
 .panel-header,
