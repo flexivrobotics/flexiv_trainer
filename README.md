@@ -34,7 +34,8 @@ echo "${USER} soft memlock unlimited" | sudo tee -a /etc/security/limits.conf
 echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
 ```
 
-Restart device to take effect.
+> [!IMPORTANT]
+> Restart your device for the changes to take effect.
 
 ## Hardware Requirements
 
