@@ -45,10 +45,12 @@ class RecordingService:
         settings: AppSettings,
         teleop: Any,
         cameras: Any,
+        get_active_sides: Callable[[], list[str]],
     ) -> None:
         self._settings = settings
         self._teleop = teleop
         self._cameras = cameras
+        self._get_active_sides = get_active_sides
 
         self._lock = threading.Lock()
         self._active = False
@@ -58,6 +60,7 @@ class RecordingService:
         self._fps: int | None = None
         self._task: str | None = None
         self._recording_entries: list[str] | None = None
+        self._recording_sides: list[str] | None = None
         self._staging_path: Path | None = None
         self._dataset: Any = None
         self._capture_thread: threading.Thread | None = None
@@ -100,7 +103,8 @@ class RecordingService:
             if self._awaiting_save:
                 raise RuntimeError("Previous recording is awaiting save or discard")
 
-        entries = resolve_recording_entries(recording_entries)
+        sides = self._get_active_sides()
+        entries = resolve_recording_entries(recording_entries, sides)
         includes_observation_values = any(
             entry in STATE_ENTRY_KEYS for entry in entries
         )
@@ -110,7 +114,7 @@ class RecordingService:
         episode_name, staging_path = self._create_staging_path()
 
         try:
-            camera_names = resolve_recording_image_names(entries)
+            camera_names = resolve_recording_image_names(entries, sides)
             self._ensure_camera_streams(camera_names)
             images = self._grab_images(camera_names, require_all=True, attempts=3)
             robot_snapshot = (
@@ -123,7 +127,7 @@ class RecordingService:
             )
 
             features, _, _ = build_features_from_sample(
-                robot_snapshot, images, entries
+                robot_snapshot, images, entries, sides
             )
             if not features:
                 raise RuntimeError(
@@ -163,6 +167,7 @@ class RecordingService:
             self._fps = target_fps
             self._task = task
             self._recording_entries = entries
+            self._recording_sides = sides
             self._staging_path = staging_path
             self._dataset = dataset
             self._error = None
@@ -413,7 +418,8 @@ class RecordingService:
     def _capture_loop(self) -> None:
         interval = 1.0 / (self._fps or 30)
         entries = list(self._recording_entries or [])
-        camera_names = resolve_recording_image_names(entries)
+        sides = self._recording_sides
+        camera_names = resolve_recording_image_names(entries, sides)
         includes_observation_values = any(
             entry in STATE_ENTRY_KEYS for entry in entries
         )
@@ -440,7 +446,7 @@ class RecordingService:
                     else {}
                 )
 
-                selected_images = extract_recording_images(images, entries)
+                selected_images = extract_recording_images(images, entries, sides)
                 if len(selected_images) != len(camera_names):
                     missing = [
                         name for name in camera_names if name not in selected_images
@@ -459,7 +465,7 @@ class RecordingService:
 
                 if requires_robot_values:
                     arm_values = extract_recording_frame_values(
-                        robot_snapshot, entries
+                        robot_snapshot, entries, sides
                     )
                     for key, vector in arm_values.items():
                         frame[key] = np.array(vector, dtype=np.float32)

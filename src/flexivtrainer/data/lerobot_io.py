@@ -82,11 +82,9 @@ def resolve_recording_vcodec(preference: str) -> str:
     return _SOFTWARE_H264
 
 
-_IMAGE_ENTRY_TO_CAMERA = {
-    "observation.images.ego": "ego",
-    "observation.images.left_wrist": "left_wrist",
-    "observation.images.right_wrist": "right_wrist",
-}
+def _image_entry_to_camera(sides: list[str]) -> dict[str, str]:
+    cameras = ["ego"] + [side.replace("_arm", "_wrist") for side in sides]
+    return {f"observation.images.{name}": name for name in cameras}
 
 # Per-metric axis names. The full sub-feature label is "<metric>.<axis>", e.g.
 # "tcp_pose.x" or "tcp_wrench.fz". tcp_pose carries position + quaternion.
@@ -126,37 +124,53 @@ _METRICS: list[tuple[str, str, str, list[str]]] = [
     ("tcp_wrench", "ext_wrench_in_world", "ext_wrench_d", _TCP_WRENCH_AXES),
 ]
 
-# Arms in capture order (index 0 = left). Each arm's *selected* metrics are
-# concatenated into one grouped vector feature, so the checklist can include or
-# drop individual vectors per arm (e.g. record pose but not wrench).
-_RECORDING_SIDES: list[str] = ["left_arm", "right_arm"]
+# Arms in capture order (index 0 = left). Each arm's selected metrics are
+# concatenated into one grouped vector feature.
+_DUAL_SIDES: list[str] = ["left_arm", "right_arm"]
 
-STATE_ENTRY_KEYS: set[str] = {
-    f"observation.state.{side}.{label}"
-    for side in _RECORDING_SIDES
-    for label, _, _, _ in _METRICS
-}
-ACTION_ENTRY_KEYS: set[str] = {
-    f"action.{side}.{label}"
-    for side in _RECORDING_SIDES
-    for label, _, _, _ in _METRICS
-}
 
-# Recording entries mirror the dataset's plottable vectors one-for-one: the
-# three camera feeds plus each arm's per-metric state and action vectors.
-DEFAULT_RECORDING_ENTRY_KEYS: list[str] = (
-    list(_IMAGE_ENTRY_TO_CAMERA)
-    + [
+def _resolve_sides(sides: list[str] | None) -> list[str]:
+    return list(sides) if sides else list(_DUAL_SIDES)
+
+
+def state_entry_keys(sides: list[str] | None = None) -> set[str]:
+    return {
         f"observation.state.{side}.{label}"
-        for side in _RECORDING_SIDES
+        for side in _resolve_sides(sides)
         for label, _, _, _ in _METRICS
-    ]
-    + [
+    }
+
+
+def action_entry_keys(sides: list[str] | None = None) -> set[str]:
+    return {
         f"action.{side}.{label}"
-        for side in _RECORDING_SIDES
+        for side in _resolve_sides(sides)
         for label, _, _, _ in _METRICS
-    ]
-)
+    }
+
+
+# Recording entries mirror the dataset's plottable vectors one-for-one: each
+# arm's wrist camera (plus the shared ego) and its per-metric state/action.
+def default_recording_entry_keys(sides: list[str] | None = None) -> list[str]:
+    resolved = _resolve_sides(sides)
+    return (
+        list(_image_entry_to_camera(resolved))
+        + [
+            f"observation.state.{side}.{label}"
+            for side in resolved
+            for label, _, _, _ in _METRICS
+        ]
+        + [
+            f"action.{side}.{label}"
+            for side in resolved
+            for label, _, _, _ in _METRICS
+        ]
+    )
+
+
+STATE_ENTRY_KEYS: set[str] = state_entry_keys()
+ACTION_ENTRY_KEYS: set[str] = action_entry_keys()
+DEFAULT_RECORDING_ENTRY_KEYS: list[str] = default_recording_entry_keys()
 
 
 def arm_side_label(index: int) -> str:
@@ -187,24 +201,30 @@ def _normalize_unique(items: list[str]) -> list[str]:
     return deduped
 
 
-def resolve_recording_entries(entries: list[str] | None = None) -> list[str]:
+def resolve_recording_entries(
+    entries: list[str] | None = None, sides: list[str] | None = None
+) -> list[str]:
+    default = default_recording_entry_keys(sides)
     if entries is None:
-        return list(DEFAULT_RECORDING_ENTRY_KEYS)
+        return default
 
     resolved = _normalize_unique(entries)
-    allowed = set(DEFAULT_RECORDING_ENTRY_KEYS)
+    allowed = set(default)
     for entry in resolved:
         if entry not in allowed:
             raise ValueError(f"Unsupported recording entry: {entry}")
     return resolved
 
 
-def resolve_recording_image_names(entries: list[str] | None = None) -> list[str]:
-    resolved_entries = resolve_recording_entries(entries)
+def resolve_recording_image_names(
+    entries: list[str] | None = None, sides: list[str] | None = None
+) -> list[str]:
+    resolved_entries = resolve_recording_entries(entries, sides)
+    entry_to_camera = _image_entry_to_camera(_resolve_sides(sides))
     camera_names: list[str] = []
     seen: set[str] = set()
     for entry in resolved_entries:
-        camera_name = _IMAGE_ENTRY_TO_CAMERA.get(entry)
+        camera_name = entry_to_camera.get(entry)
         if not camera_name or camera_name in seen:
             continue
         camera_names.append(camera_name)
@@ -213,9 +233,11 @@ def resolve_recording_image_names(entries: list[str] | None = None) -> list[str]
 
 
 def extract_recording_images(
-    images: dict[str, np.ndarray], entries: list[str] | None = None
+    images: dict[str, np.ndarray],
+    entries: list[str] | None = None,
+    sides: list[str] | None = None,
 ) -> dict[str, np.ndarray]:
-    selected = resolve_recording_image_names(entries)
+    selected = resolve_recording_image_names(entries, sides)
     return {name: images[name] for name in selected if name in images}
 
 
@@ -252,7 +274,9 @@ def _collect_arm_group(
 
 
 def _iter_combined_features(
-    robot_snapshot: dict[str, Any], enabled_entries: set[str]
+    robot_snapshot: dict[str, Any],
+    enabled_entries: set[str],
+    sides: list[str] | None = None,
 ):
     """Yield (feature_key, values, axis_names) for the combined state and action.
 
@@ -268,6 +292,7 @@ def _iter_combined_features(
     if not isinstance(robots, dict):
         return
 
+    resolved_sides = _resolve_sides(sides)
     state_values: list[float] = []
     state_names: list[str] = []
     action_values: list[float] = []
@@ -275,7 +300,11 @@ def _iter_combined_features(
     for index, payload in enumerate(robots.values()):
         if not isinstance(payload, dict):
             continue
-        side = arm_side_label(index)
+        side = (
+            resolved_sides[index]
+            if index < len(resolved_sides)
+            else arm_side_label(index)
+        )
         arm_state_values, arm_state_names = _collect_arm_group(
             payload.get("states"), side, "state", enabled_entries
         )
@@ -294,13 +323,17 @@ def _iter_combined_features(
 
 
 def extract_recording_frame_values(
-    robot_snapshot: dict[str, Any], entries: list[str] | None = None
+    robot_snapshot: dict[str, Any],
+    entries: list[str] | None = None,
+    sides: list[str] | None = None,
 ) -> dict[str, list[float]]:
     """Per-frame vectors keyed by feature (``observation.state`` and ``action``)."""
-    resolved_entries = set(resolve_recording_entries(entries))
+    resolved_entries = set(resolve_recording_entries(entries, sides))
     return {
         key: values
-        for key, values, _ in _iter_combined_features(robot_snapshot, resolved_entries)
+        for key, values, _ in _iter_combined_features(
+            robot_snapshot, resolved_entries, sides
+        )
     }
 
 
@@ -308,9 +341,10 @@ def build_features_from_sample(
     robot_snapshot: dict[str, Any],
     images: dict[str, np.ndarray],
     entries: list[str] | None = None,
+    sides: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
-    resolved_entries = set(resolve_recording_entries(entries))
-    selected_images = extract_recording_images(images, resolved_entries)
+    resolved_entries = set(resolve_recording_entries(entries, sides))
+    selected_images = extract_recording_images(images, resolved_entries, sides)
 
     features: dict[str, dict[str, Any]] = {}
 
@@ -338,7 +372,9 @@ def build_features_from_sample(
     # (a list shape never compares equal to a tuple).
     state_keys: list[str] = []
     action_keys: list[str] = []
-    for key, values, axis_names in _iter_combined_features(robot_snapshot, resolved_entries):
+    for key, values, axis_names in _iter_combined_features(
+        robot_snapshot, resolved_entries, sides
+    ):
         features[key] = {
             "dtype": "float32",
             "shape": (len(values),),

@@ -45,6 +45,16 @@ limitations under the License.
                 <section class="home-config-grid">
                     <section class="panel robot-config-panel">
                         <div class="panel-header">
+                            <h2>Arm Configuration</h2>
+                        </div>
+                        <div class="robot-input-grid">
+                            <div id="home-arm-mode"></div>
+                            <div id="home-arm-side"></div>
+                        </div>
+                    </section>
+
+                    <section class="panel robot-config-panel">
+                        <div class="panel-header">
                             <h2>Leader Robots</h2>
                         </div>
                         <div class="robot-input-grid" id="home-leader-robots"></div>
@@ -167,7 +177,7 @@ limitations under the License.
                                 </div>
 
                                 <div class="feed-row">
-                                    <div class="wrist-column">
+                                    <div class="wrist-column" id="left-wrist-column">
                                         <div class="feed">
                                             <div class="feed__header">
                                                 <span class="feed__title">Left Wrist</span>
@@ -182,7 +192,7 @@ limitations under the License.
                                         <section class="telemetry-card telemetry-card--chart"
                                             id="left-moment-graph-panel"></section>
                                     </div>
-                                    <div class="wrist-column">
+                                    <div class="wrist-column" id="right-wrist-column">
                                         <div class="feed">
                                             <div class="feed__header">
                                                 <span class="feed__title">Right Wrist</span>
