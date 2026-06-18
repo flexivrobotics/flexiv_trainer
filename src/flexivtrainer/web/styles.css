@@ -511,6 +511,13 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* Single-arm mode: the lone wrist column fills the full width instead of
+   leaving the second half empty, so its feed and wrench/force/moment cards
+   read at full size. */
+.feed-row--single {
+    grid-template-columns: minmax(0, 1fr);
+}
+
 .wrist-column {
     display: grid;
     gap: 1rem;

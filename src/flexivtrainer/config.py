@@ -107,7 +107,6 @@ class TrainingConfig(BaseModel):
 
 class RobotSerialConfig(BaseModel):
     arm_mode: Literal["single", "dual"] = "dual"
-    single_arm_side: Literal["left", "right"] = "right"
     leader_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
     follower_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
 
@@ -131,7 +130,7 @@ class RobotSerialConfig(BaseModel):
 
     def active_sides(self) -> list[str]:
         if self.arm_mode == "single":
-            return [f"{self.single_arm_side}_arm"]
+            return ["single_arm"]
         return ["left_arm", "right_arm"]
 
     def _normalize_serials(self, values: list[str]) -> list[str]:
@@ -143,7 +142,6 @@ class RobotSerialConfig(BaseModel):
     def normalized(self) -> RobotSerialConfig:
         return RobotSerialConfig(
             arm_mode=self.arm_mode,
-            single_arm_side=self.single_arm_side,
             leader_robot_serials=self._normalize_serials(self.leader_robot_serials),
             follower_robot_serials=self._normalize_serials(self.follower_robot_serials),
         )
@@ -189,6 +187,7 @@ class AppSettings(BaseSettings):
             CameraConfig(name="ego", fps=30, width=640, height=480),
             CameraConfig(name="left_wrist", fps=30, width=640, height=480),
             CameraConfig(name="right_wrist", fps=30, width=640, height=480),
+            CameraConfig(name="wrist", fps=30, width=640, height=480),
         ]
     )
     storage: StorageConfig = Field(default_factory=StorageConfig)

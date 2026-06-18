@@ -73,7 +73,7 @@ def test_start_streams_fast_fails_when_no_cameras_are_detected(
     status = service.start_streams()
 
     assert start_calls == []
-    assert set(status["errors"]) == {"ego", "left_wrist", "right_wrist"}
+    assert set(status["errors"]) == {"ego", "left_wrist", "right_wrist", "wrist"}
     assert all(
         "No RealSense camera is available" in message
         for message in status["errors"].values()

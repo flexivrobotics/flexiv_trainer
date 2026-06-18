@@ -82,8 +82,19 @@ def resolve_recording_vcodec(preference: str) -> str:
     return _SOFTWARE_H264
 
 
+_WRIST_CAMERA_BY_SIDE = {
+    "left_arm": "left_wrist",
+    "right_arm": "right_wrist",
+    "single_arm": "wrist",
+}
+
+
+def active_camera_names(sides: list[str] | None = None) -> list[str]:
+    return ["ego"] + [_WRIST_CAMERA_BY_SIDE[side] for side in _resolve_sides(sides)]
+
+
 def _image_entry_to_camera(sides: list[str]) -> dict[str, str]:
-    cameras = ["ego"] + [side.replace("_arm", "_wrist") for side in sides]
+    cameras = ["ego"] + [_WRIST_CAMERA_BY_SIDE[side] for side in sides]
     return {f"observation.images.{name}": name for name in cameras}
 
 # Per-metric axis names. The full sub-feature label is "<metric>.<axis>", e.g.

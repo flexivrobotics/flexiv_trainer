@@ -27,6 +27,7 @@ from flexivtrainer.config import (
     TeleopRobotPair,
     get_settings,
 )
+from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.jobs.train_policy import TrainingService
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.teleop.service import TeleopService
@@ -78,6 +79,9 @@ class RuntimeManager:
         self._robot_config = self._load_robot_config()
         self.teleop = TeleopService(settings, self.get_teleop_robot_pairs)
         self.cameras = RealSenseService(settings)
+        self.cameras.set_active_locations(
+            active_camera_names(self._robot_config.active_sides())
+        )
         self._load_camera_config()
         try:
             from flexivtrainer.data.recording_service import RecordingService
@@ -142,10 +146,12 @@ class RuntimeManager:
         )
 
     def camera_config_snapshot(self) -> dict[str, Any]:
+        active = active_camera_names(self.get_active_sides())
+        configured = self.cameras.configured_serials()
         return {
             "cameras": [
-                {"name": name, "device_serial": serial or ""}
-                for name, serial in self.cameras.configured_serials().items()
+                {"name": name, "device_serial": configured.get(name) or ""}
+                for name in active
             ]
         }
 
@@ -180,6 +186,9 @@ class RuntimeManager:
         changed = normalized != self._robot_config
         self._robot_config = normalized
         self._save_robot_config()
+        self.cameras.set_active_locations(
+            active_camera_names(self._robot_config.active_sides())
+        )
         if changed:
             self.recording.shutdown()
             self.teleop.shutdown()

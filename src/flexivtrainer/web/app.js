@@ -143,11 +143,23 @@ const TELEOP_POLL_INTERVAL_MS = 100;
 // on the backend. Single mode exposes only the chosen side; the index in this
 // list is the arm's capture order (and its follower-serial index).
 const DUAL_SIDES = ["left_arm", "right_arm"];
+// Mirrors lerobot_io._WRIST_CAMERA_BY_SIDE. Single mode is side-free: the lone
+// arm is "single_arm" with a neutral "wrist" camera (no left/right).
+const WRIST_CAMERA_BY_SIDE = {
+    left_arm: "left_wrist",
+    right_arm: "right_wrist",
+    single_arm: "wrist",
+};
+const ARM_SIDE_LABELS = {
+    left_arm: { serial: "LEFT", feed: "Left Wrist", wrench: "LEFT" },
+    right_arm: { serial: "RIGHT", feed: "Right Wrist", wrench: "RIGHT" },
+    single_arm: { serial: "ARM", feed: "Wrist", wrench: "ARM" },
+};
 
 function getActiveSides() {
     const config = state.summary?.robot_config;
     if (config?.arm_mode === "single") {
-        return [`${config.single_arm_side || "right"}_arm`];
+        return ["single_arm"];
     }
     return [...DUAL_SIDES];
 }
@@ -200,7 +212,7 @@ function recordingEntryOptions() {
         { id: "observation.images.ego", label: "ego", group: "observation.images", bucket: "image", sourceField: "ego" },
     ];
     sides.forEach((side) => {
-        const camera = side.replace("_arm", "_wrist");
+        const camera = WRIST_CAMERA_BY_SIDE[side];
         images.push({ id: `observation.images.${camera}`, label: camera, group: "observation.images", bucket: "image", sourceField: camera });
     });
     return [...images, ...buildArmMetricRecordingOptions(sides)];
@@ -1707,24 +1719,23 @@ function allRobotSerialsConfigured() {
 // Per-side serial labels. In single mode the lone arm sits at index 0, so its
 // label comes from the chosen side rather than the dual LEFT/RIGHT order.
 function robotSerialSideLabels() {
-    return getActiveSides().map((side) => side.replace("_arm", "").toUpperCase());
+    return getActiveSides().map((side) => ARM_SIDE_LABELS[side].serial);
 }
 
 function renderArmConfig() {
     if (!state.summary) {
         return;
     }
-    const config = state.summary.robot_config || { arm_mode: "dual", single_arm_side: "right" };
+    const config = state.summary.robot_config || { arm_mode: "dual" };
     const armMode = config.arm_mode || "dual";
-    const armSide = config.single_arm_side || "right";
 
     const modeContainer = byId("home-arm-mode");
     modeContainer.innerHTML = `
         <label class="robot-input-group">
             <span>Arm Pair</span>
             <select id="arm-mode-select">
-                <option value="dual"${armMode === "dual" ? " selected" : ""}>Dual pair</option>
-                <option value="single"${armMode === "single" ? " selected" : ""}>Single pair</option>
+                <option value="dual"${armMode === "dual" ? " selected" : ""}>Dual</option>
+                <option value="single"${armMode === "single" ? " selected" : ""}>Single</option>
             </select>
         </label>
     `;
@@ -1732,26 +1743,6 @@ function renderArmConfig() {
         state.summary.robot_config.arm_mode = event.target.value;
         onArmConfigChanged();
     };
-
-    const sideContainer = byId("home-arm-side");
-    sideContainer.classList.toggle("hidden", armMode !== "single");
-    if (armMode === "single") {
-        sideContainer.innerHTML = `
-            <label class="robot-input-group">
-                <span>Single Arm Side</span>
-                <select id="arm-side-select">
-                    <option value="left"${armSide === "left" ? " selected" : ""}>Left</option>
-                    <option value="right"${armSide === "right" ? " selected" : ""}>Right</option>
-                </select>
-            </label>
-        `;
-        sideContainer.querySelector("select").onchange = (event) => {
-            state.summary.robot_config.single_arm_side = event.target.value;
-            onArmConfigChanged();
-        };
-    } else {
-        sideContainer.innerHTML = "";
-    }
 }
 
 // The arm count/side changed: re-derive the recording checklist to the now-valid
@@ -1869,6 +1860,7 @@ const CAMERA_LOCATION_LABELS = {
     ego: "Egocentric",
     left_wrist: "Left Wrist",
     right_wrist: "Right Wrist",
+    wrist: "Wrist",
 };
 
 async function loadTeleopCameraConfig() {
@@ -2129,12 +2121,8 @@ function readRobotTelemetry(robot) {
     };
 }
 
-function getRobotTelemetryForSide(side, teleopStatus) {
+function getRobotTelemetryByIndex(sideIndex, teleopStatus) {
     const robots = teleopStatus.robot_data?.robots || {};
-    const sideIndex = getActiveSides().indexOf(`${side}_arm`);
-    if (sideIndex < 0) {
-        return { serial: null, robot: null };
-    }
     const preferredSerial = state.summary?.robot_config?.follower_robot_serials?.[sideIndex];
     if (preferredSerial && robots[preferredSerial]) {
         return { serial: preferredSerial, robot: robots[preferredSerial] };
@@ -2145,6 +2133,20 @@ function getRobotTelemetryForSide(side, teleopStatus) {
         return { serial: fallback[0], robot: fallback[1] };
     }
     return { serial: preferredSerial || null, robot: null };
+}
+
+// One descriptor per active arm, mapped onto the two static teleop columns
+// (slot "left" = index 0, "right" = index 1). Single mode yields one descriptor
+// in the left slot with neutral camera/labels; the right column is then hidden.
+function activeArmPanels() {
+    const slots = ["left", "right"];
+    return getActiveSides().map((side, index) => ({
+        slot: slots[index],
+        camera: WRIST_CAMERA_BY_SIDE[side],
+        feedTitle: ARM_SIDE_LABELS[side].feed,
+        wrenchLabel: ARM_SIDE_LABELS[side].wrench,
+        followerIndex: index,
+    }));
 }
 
 function appendTelemetrySample(side, telemetry) {
@@ -2809,13 +2811,13 @@ function updateTeleopControlButtons(teleopStatus) {
     );
 }
 
-function renderForcePanel(side, robotEntry, telemetry, history) {
+function renderForcePanel(side, robotEntry, telemetry, history, wrenchLabel) {
     const panel = byId(`${side}-force-panel`);
     if (!panel) {
         return;
     }
 
-    const title = `${side.toUpperCase()} CARTESIAN WRENCH`;
+    const title = `${wrenchLabel || side.toUpperCase()} CARTESIAN WRENCH`;
     if (!telemetry.force) {
         setMarkupIfChanged(
             panel,
@@ -2967,14 +2969,14 @@ function buildTrendPath(history, kind, componentIndex, scale) {
     return path.trim();
 }
 
-function renderTrendGraph(side, kind, history, currentVector) {
+function renderTrendGraph(side, kind, history, currentVector, label) {
     const panel = byId(`${side}-${kind}-graph-panel`);
     if (!panel) {
         return;
     }
 
     const meta = TELEMETRY_SERIES[kind];
-    const title = `${side.toUpperCase()} CARTESIAN ${kind === "force" ? "FORCE" : "MOMENT"}`;
+    const title = `${label || side.toUpperCase()} CARTESIAN ${kind === "force" ? "FORCE" : "MOMENT"}`;
     const hasLiveData = Array.isArray(currentVector);
     const scale = hasLiveData
         ? computeTelemetryScale(history, kind)
@@ -3104,33 +3106,28 @@ function renderTeleop() {
 
     renderRecordingOptions(teleopStatus.recording || {});
 
-    const activeSides = getActiveSides();
-    const leftActive = activeSides.includes("left_arm");
-    const rightActive = activeSides.includes("right_arm");
-    byId("left-wrist-column")?.classList.toggle("hidden", !leftActive);
-    byId("right-wrist-column")?.classList.toggle("hidden", !rightActive);
+    const panels = activeArmPanels();
+    const usedSlots = new Set(panels.map((panel) => panel.slot));
+    ["left", "right"].forEach((slot) => {
+        byId(`${slot}-wrist-column`)?.classList.toggle("hidden", !usedSlots.has(slot));
+    });
+    byId("wrist-feed-row")?.classList.toggle("feed-row--single", panels.length === 1);
 
     const cameras = teleopStatus.cameras?.cameras || {};
     renderCameraFps("ego-fps", "ego", cameras.ego);
-    if (leftActive) renderCameraFps("left-wrist-fps", "left_wrist", cameras.left_wrist);
-    if (rightActive) renderCameraFps("right-wrist-fps", "right_wrist", cameras.right_wrist);
+    panels.forEach((panel) => {
+        const titleEl = byId(`${panel.slot}-wrist-title`);
+        if (titleEl) titleEl.textContent = panel.feedTitle;
+        renderCameraFps(`${panel.slot}-wrist-fps`, panel.camera, cameras[panel.camera]);
 
-    const leftRobotEntry = getRobotTelemetryForSide("left", teleopStatus);
-    const rightRobotEntry = getRobotTelemetryForSide("right", teleopStatus);
-    const leftTelemetry = readRobotTelemetry(leftRobotEntry.robot);
-    const rightTelemetry = readRobotTelemetry(rightRobotEntry.robot);
-    if (leftActive) {
-        if (state.teleopStatus) appendTelemetrySample("left", leftTelemetry);
-        renderForcePanel("left", leftRobotEntry, leftTelemetry, state.telemetryHistory.left);
-        renderTrendGraph("left", "force", state.telemetryHistory.left, leftTelemetry.force);
-        renderTrendGraph("left", "moment", state.telemetryHistory.left, leftTelemetry.moment);
-    }
-    if (rightActive) {
-        if (state.teleopStatus) appendTelemetrySample("right", rightTelemetry);
-        renderForcePanel("right", rightRobotEntry, rightTelemetry, state.telemetryHistory.right);
-        renderTrendGraph("right", "force", state.telemetryHistory.right, rightTelemetry.force);
-        renderTrendGraph("right", "moment", state.telemetryHistory.right, rightTelemetry.moment);
-    }
+        const robotEntry = getRobotTelemetryByIndex(panel.followerIndex, teleopStatus);
+        const telemetry = readRobotTelemetry(robotEntry.robot);
+        if (state.teleopStatus) appendTelemetrySample(panel.slot, telemetry);
+        const history = state.telemetryHistory[panel.slot];
+        renderForcePanel(panel.slot, robotEntry, telemetry, history, panel.wrenchLabel);
+        renderTrendGraph(panel.slot, "force", history, telemetry.force, panel.wrenchLabel);
+        renderTrendGraph(panel.slot, "moment", history, telemetry.moment, panel.wrenchLabel);
+    });
 
     const grid = byId("teleop-status-grid");
     const services = teleopStatus.services || state.summary?.services || {};
