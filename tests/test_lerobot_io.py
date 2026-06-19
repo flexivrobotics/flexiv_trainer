@@ -62,6 +62,22 @@ def test_resolve_recording_entries_defaults_to_all_options() -> None:
     assert resolve_recording_entries() == list(DEFAULT_RECORDING_ENTRY_KEYS)
 
 
+def test_resolve_recording_entries_accepts_single_arm_wrist() -> None:
+    # Single-arm uses the "wrist" camera; validating against single_arm sides
+    # must accept it (the route previously validated against the dual default
+    # and rejected observation.images.wrist, blocking recording).
+    entries = ["observation.images.ego", "observation.images.wrist"]
+    assert resolve_recording_entries(entries, ["single_arm"]) == entries
+
+
+def test_resolve_recording_entries_rejects_dual_wrist_in_single_arm() -> None:
+    try:
+        resolve_recording_entries(["observation.images.left_wrist"], ["single_arm"])
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for dual-only entry in single-arm mode")
+
+
 def test_resolve_vcodec_auto_prefers_hardware_h264(monkeypatch) -> None:
     # Only NVENC "available" -> auto picks it over software h264.
     monkeypatch.setattr(

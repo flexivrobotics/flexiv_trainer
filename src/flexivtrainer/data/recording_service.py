@@ -395,7 +395,12 @@ class RecordingService:
                 if image is None:
                     errors.append(f"{camera_name}: missing image payload")
                     continue
-                images[camera_name] = np.asarray(image)
+                # Cameras capture BGR (rs.format.bgr8); LeRobot stores RGB, so
+                # reverse the channel order before writing frames. Materialize a
+                # contiguous array since the encoder assumes C-contiguous input.
+                images[camera_name] = np.ascontiguousarray(
+                    np.asarray(image)[:, :, ::-1]
+                )
 
             if not require_all or all(name in images for name in camera_names):
                 return images

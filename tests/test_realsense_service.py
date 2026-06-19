@@ -214,3 +214,26 @@ def test_capture_frame_falls_back_to_cached_frame(tmp_path) -> None:
     frame = service.capture_frame("ego")
 
     assert frame is cached_payload
+
+
+def test_set_active_locations_releases_now_inactive_cameras(tmp_path) -> None:
+    # A camera started for a slot that is no longer active (e.g. the single-arm
+    # "wrist" slot after switching to dual) must be released so its device
+    # returns to the pool for the new mode's active slots.
+    service = RealSenseService(
+        AppSettings(
+            storage=StorageConfig(root=tmp_path),
+            cameras=[
+                CameraConfig(name="ego"),
+                CameraConfig(name="left_wrist"),
+                CameraConfig(name="wrist"),
+            ],
+        )
+    )
+    service._runtimes["wrist"].started = True
+    service._runtimes["wrist"].pipeline = SimpleNamespace(stop=lambda: None)
+
+    service.set_active_locations(["ego", "left_wrist"])
+
+    assert service._runtimes["wrist"].started is False
+    assert service._runtimes["wrist"].pipeline is None

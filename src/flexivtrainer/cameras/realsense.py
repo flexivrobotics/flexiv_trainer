@@ -67,7 +67,14 @@ class RealSenseService:
         self._lock = threading.Lock()
 
     def set_active_locations(self, names: list[str]) -> None:
-        self._active_locations = [name for name in names if name in self._runtimes]
+        with self._lock:
+            self._active_locations = [name for name in names if name in self._runtimes]
+            # Release cameras held by slots that are no longer active so their
+            # devices return to the pool for the new mode's active slots.
+            for name, runtime in self._runtimes.items():
+                if name not in self._active_locations and runtime.started:
+                    self._stop_runtime(runtime)
+                    runtime.actual_serial = None
 
     def available(self) -> bool:
         return rs is not None
@@ -296,17 +303,25 @@ class RealSenseService:
             if not serials:
                 return False
 
+            # Only active-location slots may claim a detected camera; inactive
+            # slots would otherwise starve an empty active slot of its device.
+            active = [
+                (name, self._runtimes[name])
+                for name in self._active_locations
+                if name in self._runtimes
+            ]
+
             available = list(serials)
             desired: dict[str, str | None] = {}
 
-            for name, runtime in self._runtimes.items():
+            for name, runtime in active:
                 serial = runtime.config.device_serial
                 if serial and serial in available:
                     desired[name] = serial
                     available.remove(serial)
 
             changed = False
-            for name, runtime in self._runtimes.items():
+            for name, runtime in active:
                 serial = desired.get(name)
                 if (
                     serial is None
