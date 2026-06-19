@@ -354,8 +354,9 @@ def build_features_from_sample(
     entries: list[str] | None = None,
     sides: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
-    resolved_entries = set(resolve_recording_entries(entries, sides))
-    selected_images = extract_recording_images(images, resolved_entries, sides)
+    resolved_list = resolve_recording_entries(entries, sides)
+    resolved_entries = set(resolved_list)
+    selected_images = extract_recording_images(images, resolved_list, sides)
 
     features: dict[str, dict[str, Any]] = {}
 
