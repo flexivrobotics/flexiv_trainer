@@ -21,7 +21,7 @@ limitations under the License.
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260615-4" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260618-3" />
 </head>
 
 <body>
@@ -43,6 +43,15 @@ limitations under the License.
         <main class="page-shell">
             <section class="view view--active" data-view="home">
                 <section class="home-config-grid">
+                    <section class="panel robot-config-panel">
+                        <div class="panel-header">
+                            <h2>Arm Configuration</h2>
+                        </div>
+                        <div class="robot-input-grid">
+                            <div id="home-arm-mode"></div>
+                        </div>
+                    </section>
+
                     <section class="panel robot-config-panel">
                         <div class="panel-header">
                             <h2>Leader Robots</h2>
@@ -166,11 +175,11 @@ limitations under the License.
                                     <div class="feed__placeholder">Egocentric camera view placeholder</div>
                                 </div>
 
-                                <div class="feed-row">
-                                    <div class="wrist-column">
+                                <div class="feed-row" id="wrist-feed-row">
+                                    <div class="wrist-column" id="left-wrist-column">
                                         <div class="feed">
                                             <div class="feed__header">
-                                                <span class="feed__title">Left Wrist</span>
+                                                <span class="feed__title" id="left-wrist-title">Left Wrist</span>
                                                 <strong class="feed__fps" id="left-wrist-fps">0.0 FPS</strong>
                                             </div>
                                             <div class="feed__placeholder">Left robot camera placeholder</div>
@@ -182,10 +191,10 @@ limitations under the License.
                                         <section class="telemetry-card telemetry-card--chart"
                                             id="left-moment-graph-panel"></section>
                                     </div>
-                                    <div class="wrist-column">
+                                    <div class="wrist-column" id="right-wrist-column">
                                         <div class="feed">
                                             <div class="feed__header">
-                                                <span class="feed__title">Right Wrist</span>
+                                                <span class="feed__title" id="right-wrist-title">Right Wrist</span>
                                                 <strong class="feed__fps" id="right-wrist-fps">0.0 FPS</strong>
                                             </div>
                                             <div class="feed__placeholder">Right robot camera placeholder</div>
@@ -332,7 +341,7 @@ limitations under the License.
         </section>
     </div>
 
-    <script type="module" src="/static/app.js?v=20260615-5"></script>
+    <script type="module" src="/static/app.js?v=20260618-3"></script>
 </body>
 
 </html>

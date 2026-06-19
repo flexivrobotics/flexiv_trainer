@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -105,6 +106,7 @@ class TrainingConfig(BaseModel):
 
 
 class RobotSerialConfig(BaseModel):
+    arm_mode: Literal["single", "dual"] = "dual"
     leader_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
     follower_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
 
@@ -123,14 +125,23 @@ class RobotSerialConfig(BaseModel):
             payload["follower_robot_serials"] = payload.get("remote_robot_serials")
         return payload
 
-    @staticmethod
-    def _normalize_serials(values: list[str]) -> list[str]:
-        serials = [str(value).strip() for value in values[:2]]
-        serials.extend([""] * (2 - len(serials)))
+    def active_arm_count(self) -> int:
+        return 1 if self.arm_mode == "single" else 2
+
+    def active_sides(self) -> list[str]:
+        if self.arm_mode == "single":
+            return ["single_arm"]
+        return ["left_arm", "right_arm"]
+
+    def _normalize_serials(self, values: list[str]) -> list[str]:
+        count = self.active_arm_count()
+        serials = [str(value).strip() for value in values[:count]]
+        serials.extend([""] * (count - len(serials)))
         return serials
 
     def normalized(self) -> RobotSerialConfig:
         return RobotSerialConfig(
+            arm_mode=self.arm_mode,
             leader_robot_serials=self._normalize_serials(self.leader_robot_serials),
             follower_robot_serials=self._normalize_serials(self.follower_robot_serials),
         )
@@ -139,10 +150,10 @@ class RobotSerialConfig(BaseModel):
     def from_settings(cls, settings: AppSettings) -> RobotSerialConfig:
         return cls(
             leader_robot_serials=[
-                pair.leader_serial for pair in settings.teleop_robot_pairs[:2]
+                pair.leader_serial for pair in settings.teleop_robot_pairs
             ],
             follower_robot_serials=[
-                pair.follower_serial for pair in settings.teleop_robot_pairs[:2]
+                pair.follower_serial for pair in settings.teleop_robot_pairs
             ],
         ).normalized()
 
@@ -176,6 +187,7 @@ class AppSettings(BaseSettings):
             CameraConfig(name="ego", fps=30, width=640, height=480),
             CameraConfig(name="left_wrist", fps=30, width=640, height=480),
             CameraConfig(name="right_wrist", fps=30, width=640, height=480),
+            CameraConfig(name="wrist", fps=30, width=640, height=480),
         ]
     )
     storage: StorageConfig = Field(default_factory=StorageConfig)

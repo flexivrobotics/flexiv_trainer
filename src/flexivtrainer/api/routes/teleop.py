@@ -243,7 +243,9 @@ def start_recording(
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
     try:
-        recording_entries = resolve_recording_entries(request.recording_entries)
+        recording_entries = resolve_recording_entries(
+            request.recording_entries, runtime.get_active_sides()
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

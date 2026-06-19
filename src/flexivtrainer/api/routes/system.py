@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -24,6 +26,7 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 
 class RobotConfigRequest(BaseModel):
+    arm_mode: Literal["single", "dual"] = "dual"
     leader_robot_serials: list[str] = Field(default_factory=list)
     follower_robot_serials: list[str] = Field(default_factory=list)
 

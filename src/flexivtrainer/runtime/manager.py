@@ -27,6 +27,7 @@ from flexivtrainer.config import (
     TeleopRobotPair,
     get_settings,
 )
+from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.jobs.train_policy import TrainingService
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.teleop.service import TeleopService
@@ -78,6 +79,9 @@ class RuntimeManager:
         self._robot_config = self._load_robot_config()
         self.teleop = TeleopService(settings, self.get_teleop_robot_pairs)
         self.cameras = RealSenseService(settings)
+        self.cameras.set_active_locations(
+            active_camera_names(self._robot_config.active_sides())
+        )
         self._load_camera_config()
         try:
             from flexivtrainer.data.recording_service import RecordingService
@@ -86,7 +90,9 @@ class RuntimeManager:
                 _optional_dependency_error("Episode recording", exc)
             )
         else:
-            self.recording = RecordingService(settings, self.teleop, self.cameras)
+            self.recording = RecordingService(
+                settings, self.teleop, self.cameras, self.get_active_sides
+            )
         self.training = TrainingService(settings)
         # Cache of constructed LeRobotDataset objects keyed by resolved path.
         # Building one parses metadata and the parquet index, which is far too
@@ -111,6 +117,9 @@ class RuntimeManager:
 
     def robot_config_snapshot(self) -> dict[str, Any]:
         return self._robot_config.model_dump()
+
+    def get_active_sides(self) -> list[str]:
+        return self._robot_config.active_sides()
 
     def _load_camera_config(self) -> None:
         path = self.settings.storage.camera_config_path
@@ -137,10 +146,12 @@ class RuntimeManager:
         )
 
     def camera_config_snapshot(self) -> dict[str, Any]:
+        active = active_camera_names(self.get_active_sides())
+        configured = self.cameras.configured_serials()
         return {
             "cameras": [
-                {"name": name, "device_serial": serial or ""}
-                for name, serial in self.cameras.configured_serials().items()
+                {"name": name, "device_serial": configured.get(name) or ""}
+                for name in active
             ]
         }
 
@@ -156,7 +167,7 @@ class RuntimeManager:
     def get_teleop_robot_pairs(self) -> list[TeleopRobotPair]:
         defaults = self.settings.teleop_robot_pairs
         pairs: list[TeleopRobotPair] = []
-        for index in range(2):
+        for index in range(self._robot_config.active_arm_count()):
             template = defaults[index] if index < len(defaults) else TeleopRobotPair()
             leader_serial = self._robot_config.leader_robot_serials[index]
             follower_serial = self._robot_config.follower_robot_serials[index]
@@ -175,6 +186,9 @@ class RuntimeManager:
         changed = normalized != self._robot_config
         self._robot_config = normalized
         self._save_robot_config()
+        self.cameras.set_active_locations(
+            active_camera_names(self._robot_config.active_sides())
+        )
         if changed:
             self.recording.shutdown()
             self.teleop.shutdown()
@@ -200,6 +214,10 @@ class RuntimeManager:
         teleop_errors = [
             item for item in [teleop_snapshot.error, teleop_snapshot.fault] if item
         ]
+        arm_counts = self._robot_config.active_arm_count()
+        serial_prompt = (
+            f"Enter {arm_counts} leader and {arm_counts} follower robot serial numbers."
+        )
         if not teleop_snapshot.available:
             teleop_state = "Unavailable"
             teleop_tone = "error"
@@ -209,7 +227,7 @@ class RuntimeManager:
         elif teleop_pair_count == 0:
             teleop_state = "Not configured"
             teleop_tone = "error"
-            teleop_detail = "Enter two leader and two follower robot serial numbers."
+            teleop_detail = serial_prompt
         elif teleop_snapshot.initialized:
             teleop_state = "Connected"
             teleop_tone = "ok"
@@ -232,9 +250,7 @@ class RuntimeManager:
         elif teleop_pair_count == 0:
             robot_data_state = "Not configured"
             robot_data_tone = "error"
-            robot_data_detail = (
-                "Enter two leader and two follower robot serial numbers."
-            )
+            robot_data_detail = serial_prompt
         elif teleop_snapshot.initialized:
             robot_data_state = "Connected"
             robot_data_tone = "ok"

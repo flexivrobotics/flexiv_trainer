@@ -139,25 +139,44 @@ const TELEMETRY_HISTORY_LIMIT = 90;
 // refresh rate (e.g. 100ms ≈ 10 FPS); refreshTeleopStatus() self-throttles via
 // a queue, so requests never pile up if the backend is briefly slower.
 const TELEOP_POLL_INTERVAL_MS = 100;
-// Arms in capture order (index 0 = left follower, 1 = right follower) and the
-// per-metric vectors each arm exposes. The checklist offers one toggle per
-// (side, metric); selected metrics from every arm are concatenated into the
-// single `observation.state` / `action` feature. Each row's label is the
-// feature name-prefix it contributes (e.g. `left_arm.tcp_pose`), so the list
-// matches the per-axis names in those features (`left_arm.tcp_pose.x`, ...).
-const RECORDING_ARM_SIDES = [
-    { side: "left_arm", index: 0 },
-    { side: "right_arm", index: 1 },
-];
+// Active arm sides in capture order, mirroring RobotSerialConfig.active_sides()
+// on the backend. Single mode exposes only the chosen side; the index in this
+// list is the arm's capture order (and its follower-serial index).
+const DUAL_SIDES = ["left_arm", "right_arm"];
+// Mirrors lerobot_io._WRIST_CAMERA_BY_SIDE. Single mode is side-free: the lone
+// arm is "single_arm" with a neutral "wrist" camera (no left/right).
+const WRIST_CAMERA_BY_SIDE = {
+    left_arm: "left_wrist",
+    right_arm: "right_wrist",
+    single_arm: "wrist",
+};
+const ARM_SIDE_LABELS = {
+    left_arm: { serial: "LEFT", feed: "Left Wrist", wrench: "LEFT" },
+    right_arm: { serial: "RIGHT", feed: "Right Wrist", wrench: "RIGHT" },
+    single_arm: { serial: "ARM", feed: "Wrist", wrench: "ARM" },
+};
+
+function getActiveSides() {
+    const config = state.summary?.robot_config;
+    if (config?.arm_mode === "single") {
+        return ["single_arm"];
+    }
+    return [...DUAL_SIDES];
+}
+
 const RECORDING_METRICS = [
     { metric: "tcp_pose", stateField: "tcp_pose", actionField: "tcp_pose_d" },
     { metric: "tcp_twist", stateField: "tcp_vel", actionField: "tcp_vel_d" },
     { metric: "tcp_wrench", stateField: "ext_wrench_in_world", actionField: "ext_wrench_d" },
 ];
 
-function buildArmMetricRecordingOptions() {
+// The checklist offers one toggle per (side, metric); selected metrics from
+// every arm are concatenated into the single `observation.state` / `action`
+// feature. Each row's label is the feature name-prefix it contributes (e.g.
+// `left_arm.tcp_pose`), matching the per-axis names in those features.
+function buildArmMetricRecordingOptions(sides) {
     const options = [];
-    for (const { side, index } of RECORDING_ARM_SIDES) {
+    sides.forEach((side, index) => {
         for (const { metric, stateField } of RECORDING_METRICS) {
             options.push({
                 id: `observation.state.${side}.${metric}`,
@@ -169,8 +188,8 @@ function buildArmMetricRecordingOptions() {
                 verifyField: stateField,
             });
         }
-    }
-    for (const { side, index } of RECORDING_ARM_SIDES) {
+    });
+    sides.forEach((side, index) => {
         for (const { metric, actionField } of RECORDING_METRICS) {
             options.push({
                 id: `action.${side}.${metric}`,
@@ -182,17 +201,26 @@ function buildArmMetricRecordingOptions() {
                 verifyField: actionField,
             });
         }
-    }
+    });
     return options;
 }
 
-const RECORDING_ENTRY_OPTIONS = [
-    { id: "observation.images.ego", label: "ego", group: "observation.images", bucket: "image", sourceField: "ego" },
-    { id: "observation.images.left_wrist", label: "left_wrist", group: "observation.images", bucket: "image", sourceField: "left_wrist" },
-    { id: "observation.images.right_wrist", label: "right_wrist", group: "observation.images", bucket: "image", sourceField: "right_wrist" },
-    ...buildArmMetricRecordingOptions(),
-];
-const DEFAULT_RECORDING_ENTRY_IDS = RECORDING_ENTRY_OPTIONS.map((option) => option.id);
+// The ego camera is shared; each active arm contributes its own wrist camera.
+function recordingEntryOptions() {
+    const sides = getActiveSides();
+    const images = [
+        { id: "observation.images.ego", label: "ego", group: "observation.images", bucket: "image", sourceField: "ego" },
+    ];
+    sides.forEach((side) => {
+        const camera = WRIST_CAMERA_BY_SIDE[side];
+        images.push({ id: `observation.images.${camera}`, label: camera, group: "observation.images", bucket: "image", sourceField: camera });
+    });
+    return [...images, ...buildArmMetricRecordingOptions(sides)];
+}
+
+function defaultRecordingEntryIds() {
+    return recordingEntryOptions().map((option) => option.id);
+}
 const SERVICE_RESET_TARGETS = {
     teleop_service: "teleop",
     cameras: "cameras",
@@ -375,7 +403,7 @@ const LOADING_WHEEL_SEGMENTS = Array.from(
     { length: 12 },
     (_, index) => `<span style="--spinner-index:${index}"></span>`,
 ).join("");
-state.recordingEntries = [...DEFAULT_RECORDING_ENTRY_IDS];
+state.recordingEntries = [...defaultRecordingEntryIds()];
 
 let teleopStatusRefreshPromise = null;
 let teleopStatusRefreshQueued = false;
@@ -1671,40 +1699,82 @@ function setComponentLoading(wrapperId, loading, label = "Initializing") {
 }
 
 const ROBOT_SERIALS_REQUIRED_MESSAGE =
-    "Enter all four robot serial numbers (LEFT/RIGHT leader and follower) before connecting the teleop service.";
+    "Enter every leader and follower robot serial number before connecting the teleop service.";
 
-// Teleoperation needs both leader and both follower serials. Require all four
-// before the teleop service can be connected or reconnected, so a half-typed
-// configuration can't start a pairing with a missing arm.
+// Teleoperation needs each active arm's leader and follower serial. Require the
+// full set for the active arm count before the teleop service can be connected,
+// so a half-typed configuration can't start a pairing with a missing arm.
 function allRobotSerialsConfigured() {
     const config = state.summary?.robot_config;
     if (!config) return false;
-    const required = [
-        config.leader_robot_serials?.[0],
-        config.leader_robot_serials?.[1],
-        config.follower_robot_serials?.[0],
-        config.follower_robot_serials?.[1],
-    ];
+    const count = getActiveSides().length;
+    const required = [];
+    for (let index = 0; index < count; index += 1) {
+        required.push(config.leader_robot_serials?.[index]);
+        required.push(config.follower_robot_serials?.[index]);
+    }
     return required.every((serial) => typeof serial === "string" && serial.trim() !== "");
+}
+
+// Per-side serial labels. In single mode the lone arm sits at index 0, so its
+// label comes from the chosen side rather than the dual LEFT/RIGHT order.
+function robotSerialSideLabels() {
+    return getActiveSides().map((side) => ARM_SIDE_LABELS[side].serial);
+}
+
+function renderArmConfig() {
+    if (!state.summary) {
+        return;
+    }
+    const config = state.summary.robot_config || { arm_mode: "dual" };
+    const armMode = config.arm_mode || "dual";
+
+    const modeContainer = byId("home-arm-mode");
+    modeContainer.innerHTML = `
+        <label class="robot-input-group">
+            <span>Arm Pair</span>
+            <select id="arm-mode-select">
+                <option value="dual"${armMode === "dual" ? " selected" : ""}>Dual</option>
+                <option value="single"${armMode === "single" ? " selected" : ""}>Single</option>
+            </select>
+        </label>
+    `;
+    modeContainer.querySelector("select").onchange = (event) => {
+        state.summary.robot_config.arm_mode = event.target.value;
+        onArmConfigChanged();
+    };
+}
+
+// The arm count/side changed: re-derive the recording checklist to the now-valid
+// entries, persist, and re-render the affected home controls.
+function onArmConfigChanged() {
+    const valid = new Set(defaultRecordingEntryIds());
+    state.recordingEntries = state.recordingEntries.filter((entry) => valid.has(entry));
+    renderArmConfig();
+    renderHomeRobotConfigInputs();
+    renderHomeStatus();
+    queueRobotConfigSave();
 }
 
 function renderHomeRobotConfigInputs() {
     if (!state.summary) {
         return;
     }
-    const sideLabels = ["LEFT", "RIGHT"];
+    const sideLabels = robotSerialSideLabels();
+    const count = sideLabels.length;
     const robotConfig = state.summary.robot_config || {
         leader_robot_serials: ["", ""],
         follower_robot_serials: ["", ""],
     };
     const configs = [
-        ["home-leader-robots", "leader_robot_serials", robotConfig.leader_robot_serials || ["", ""]],
-        ["home-follower-robots", "follower_robot_serials", robotConfig.follower_robot_serials || ["", ""]],
+        ["home-leader-robots", "leader_robot_serials", robotConfig.leader_robot_serials || []],
+        ["home-follower-robots", "follower_robot_serials", robotConfig.follower_robot_serials || []],
     ];
     configs.forEach(([containerId, key, serials]) => {
         const container = byId(containerId);
         container.innerHTML = "";
-        serials.forEach((serial, index) => {
+        for (let index = 0; index < count; index += 1) {
+            const serial = serials[index] || "";
             const field = document.createElement("label");
             field.className = "robot-input-group";
             field.innerHTML = `
@@ -1720,7 +1790,7 @@ function renderHomeRobotConfigInputs() {
                 queueRobotConfigSave();
             };
             container.appendChild(field);
-        });
+        }
     });
 }
 
@@ -1758,6 +1828,7 @@ function renderHome() {
     if (!state.summary) {
         return;
     }
+    renderArmConfig();
     renderHomeRobotConfigInputs();
     renderHomeStatus();
     renderHomeStorage();
@@ -1789,6 +1860,7 @@ const CAMERA_LOCATION_LABELS = {
     ego: "Egocentric",
     left_wrist: "Left Wrist",
     right_wrist: "Right Wrist",
+    wrist: "Wrist",
 };
 
 async function loadTeleopCameraConfig() {
@@ -2049,9 +2121,8 @@ function readRobotTelemetry(robot) {
     };
 }
 
-function getRobotTelemetryForSide(side, teleopStatus) {
+function getRobotTelemetryByIndex(sideIndex, teleopStatus) {
     const robots = teleopStatus.robot_data?.robots || {};
-    const sideIndex = side === "left" ? 0 : 1;
     const preferredSerial = state.summary?.robot_config?.follower_robot_serials?.[sideIndex];
     if (preferredSerial && robots[preferredSerial]) {
         return { serial: preferredSerial, robot: robots[preferredSerial] };
@@ -2062,6 +2133,20 @@ function getRobotTelemetryForSide(side, teleopStatus) {
         return { serial: fallback[0], robot: fallback[1] };
     }
     return { serial: preferredSerial || null, robot: null };
+}
+
+// One descriptor per active arm, mapped onto the two static teleop columns
+// (slot "left" = index 0, "right" = index 1). Single mode yields one descriptor
+// in the left slot with neutral camera/labels; the right column is then hidden.
+function activeArmPanels() {
+    const slots = ["left", "right"];
+    return getActiveSides().map((side, index) => ({
+        slot: slots[index],
+        camera: WRIST_CAMERA_BY_SIDE[side],
+        feedTitle: ARM_SIDE_LABELS[side].feed,
+        wrenchLabel: ARM_SIDE_LABELS[side].wrench,
+        followerIndex: index,
+    }));
 }
 
 function appendTelemetrySample(side, telemetry) {
@@ -2320,14 +2405,20 @@ function renderRecordingOptions(recording = {}) {
     }
 
     const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
+    const options = recordingEntryOptions();
+    const defaultIds = options.map((option) => option.id);
+    // Drop any selection left over from a different arm mode so the checklist
+    // and the started recording only ever reference active-side entries.
+    const validIds = new Set(defaultIds);
+    state.recordingEntries = state.recordingEntries.filter((entry) => validIds.has(entry));
     const selected = new Set(state.recordingEntries);
-    const allSelected = DEFAULT_RECORDING_ENTRY_IDS.every((entryId) => selected.has(entryId));
+    const allSelected = defaultIds.every((entryId) => selected.has(entryId));
 
     // renderTeleop runs on every poll tick (~10x/sec). Rebuilding these
     // controls unconditionally made the Select All button and checkboxes flash
     // and swallowed clicks landing mid-rerender. Only rebuild when something
     // that affects the rendered output actually changed.
-    const renderKey = `${locked ? 1 : 0}|${state.recordingEntries.join(",")}`;
+    const renderKey = `${locked ? 1 : 0}|${getActiveSides().join("+")}|${state.recordingEntries.join(",")}`;
     if (container.dataset.renderKey === renderKey) {
         return;
     }
@@ -2340,14 +2431,14 @@ function renderRecordingOptions(recording = {}) {
     selectAllButton.disabled = locked;
     setToggleAllButton(selectAllButton, allSelected);
     selectAllButton.onclick = () => {
-        state.recordingEntries = allSelected ? [] : [...DEFAULT_RECORDING_ENTRY_IDS];
+        state.recordingEntries = allSelected ? [] : [...defaultIds];
         renderRecordingOptions(recording);
         renderRecordingStatusPanel(state.teleopStatus);
     };
     container.appendChild(selectAllButton);
 
     let currentGroup = null;
-    RECORDING_ENTRY_OPTIONS.forEach((option) => {
+    options.forEach((option) => {
         // Section header whenever the feature group changes, so the list reads
         // as observation.images / observation.state / action.
         if (option.group && option.group !== currentGroup) {
@@ -2374,7 +2465,7 @@ function renderRecordingOptions(recording = {}) {
             } else {
                 nextSelected.delete(option.id);
             }
-            state.recordingEntries = DEFAULT_RECORDING_ENTRY_IDS.filter((entryId) => nextSelected.has(entryId));
+            state.recordingEntries = defaultIds.filter((entryId) => nextSelected.has(entryId));
             renderRecordingOptions(recording);
             renderRecordingStatusPanel(state.teleopStatus);
         };
@@ -2399,7 +2490,7 @@ function getConfiguredFollowerSerials() {
 }
 
 function areSelectedRecordingEntriesAvailable(teleopStatus) {
-    const selectedOptions = RECORDING_ENTRY_OPTIONS.filter((option) => state.recordingEntries.includes(option.id));
+    const selectedOptions = recordingEntryOptions().filter((option) => state.recordingEntries.includes(option.id));
     if (!selectedOptions.length) {
         return false;
     }
@@ -2720,13 +2811,13 @@ function updateTeleopControlButtons(teleopStatus) {
     );
 }
 
-function renderForcePanel(side, robotEntry, telemetry, history) {
+function renderForcePanel(side, robotEntry, telemetry, history, wrenchLabel) {
     const panel = byId(`${side}-force-panel`);
     if (!panel) {
         return;
     }
 
-    const title = `${side.toUpperCase()} CARTESIAN WRENCH`;
+    const title = `${wrenchLabel || side.toUpperCase()} CARTESIAN WRENCH`;
     if (!telemetry.force) {
         setMarkupIfChanged(
             panel,
@@ -2878,14 +2969,14 @@ function buildTrendPath(history, kind, componentIndex, scale) {
     return path.trim();
 }
 
-function renderTrendGraph(side, kind, history, currentVector) {
+function renderTrendGraph(side, kind, history, currentVector, label) {
     const panel = byId(`${side}-${kind}-graph-panel`);
     if (!panel) {
         return;
     }
 
     const meta = TELEMETRY_SERIES[kind];
-    const title = `${side.toUpperCase()} CARTESIAN ${kind === "force" ? "FORCE" : "MOMENT"}`;
+    const title = `${label || side.toUpperCase()} CARTESIAN ${kind === "force" ? "FORCE" : "MOMENT"}`;
     const hasLiveData = Array.isArray(currentVector);
     const scale = hasLiveData
         ? computeTelemetryScale(history, kind)
@@ -3015,25 +3106,28 @@ function renderTeleop() {
 
     renderRecordingOptions(teleopStatus.recording || {});
 
+    const panels = activeArmPanels();
+    const usedSlots = new Set(panels.map((panel) => panel.slot));
+    ["left", "right"].forEach((slot) => {
+        byId(`${slot}-wrist-column`)?.classList.toggle("hidden", !usedSlots.has(slot));
+    });
+    byId("wrist-feed-row")?.classList.toggle("feed-row--single", panels.length === 1);
+
     const cameras = teleopStatus.cameras?.cameras || {};
     renderCameraFps("ego-fps", "ego", cameras.ego);
-    renderCameraFps("left-wrist-fps", "left_wrist", cameras.left_wrist);
-    renderCameraFps("right-wrist-fps", "right_wrist", cameras.right_wrist);
+    panels.forEach((panel) => {
+        const titleEl = byId(`${panel.slot}-wrist-title`);
+        if (titleEl) titleEl.textContent = panel.feedTitle;
+        renderCameraFps(`${panel.slot}-wrist-fps`, panel.camera, cameras[panel.camera]);
 
-    const leftRobotEntry = getRobotTelemetryForSide("left", teleopStatus);
-    const rightRobotEntry = getRobotTelemetryForSide("right", teleopStatus);
-    const leftTelemetry = readRobotTelemetry(leftRobotEntry.robot);
-    const rightTelemetry = readRobotTelemetry(rightRobotEntry.robot);
-    if (state.teleopStatus) {
-        appendTelemetrySample("left", leftTelemetry);
-        appendTelemetrySample("right", rightTelemetry);
-    }
-    renderForcePanel("left", leftRobotEntry, leftTelemetry, state.telemetryHistory.left);
-    renderForcePanel("right", rightRobotEntry, rightTelemetry, state.telemetryHistory.right);
-    renderTrendGraph("left", "force", state.telemetryHistory.left, leftTelemetry.force);
-    renderTrendGraph("left", "moment", state.telemetryHistory.left, leftTelemetry.moment);
-    renderTrendGraph("right", "force", state.telemetryHistory.right, rightTelemetry.force);
-    renderTrendGraph("right", "moment", state.telemetryHistory.right, rightTelemetry.moment);
+        const robotEntry = getRobotTelemetryByIndex(panel.followerIndex, teleopStatus);
+        const telemetry = readRobotTelemetry(robotEntry.robot);
+        if (state.teleopStatus) appendTelemetrySample(panel.slot, telemetry);
+        const history = state.telemetryHistory[panel.slot];
+        renderForcePanel(panel.slot, robotEntry, telemetry, history, panel.wrenchLabel);
+        renderTrendGraph(panel.slot, "force", history, telemetry.force, panel.wrenchLabel);
+        renderTrendGraph(panel.slot, "moment", history, telemetry.moment, panel.wrenchLabel);
+    });
 
     const grid = byId("teleop-status-grid");
     const services = teleopStatus.services || state.summary?.services || {};

@@ -56,9 +56,25 @@ class RealSenseService:
             )
             for camera in settings.cameras
         }
+        # Camera locations surfaced/streamed for the current arm mode. Runtimes
+        # for inactive locations stay constructed (so their serials survive a
+        # mode switch) but are excluded from status, default streaming, and
+        # capture. Defaults to every configured location until the manager
+        # narrows it via set_active_locations().
+        self._active_locations: list[str] = list(self._runtimes)
         self._last_frames: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, str] = {}
         self._lock = threading.Lock()
+
+    def set_active_locations(self, names: list[str]) -> None:
+        with self._lock:
+            self._active_locations = [name for name in names if name in self._runtimes]
+            # Release cameras held by slots that are no longer active so their
+            # devices return to the pool for the new mode's active slots.
+            for name, runtime in self._runtimes.items():
+                if name not in self._active_locations and runtime.started:
+                    self._stop_runtime(runtime)
+                    runtime.actual_serial = None
 
     def available(self) -> bool:
         return rs is not None
@@ -158,7 +174,9 @@ class RealSenseService:
             self._start_runtime(runtime, available_serials)
 
     def _resolve_camera_names(self, camera_names: list[str] | None = None) -> list[str]:
-        selected = list(self._runtimes) if camera_names is None else list(camera_names)
+        selected = (
+            list(self._active_locations) if camera_names is None else list(camera_names)
+        )
         unknown = [name for name in selected if name not in self._runtimes]
         if unknown:
             raise ValueError(f"Unsupported cameras: {', '.join(unknown)}")
@@ -285,17 +303,25 @@ class RealSenseService:
             if not serials:
                 return False
 
+            # Only active-location slots may claim a detected camera; inactive
+            # slots would otherwise starve an empty active slot of its device.
+            active = [
+                (name, self._runtimes[name])
+                for name in self._active_locations
+                if name in self._runtimes
+            ]
+
             available = list(serials)
             desired: dict[str, str | None] = {}
 
-            for name, runtime in self._runtimes.items():
+            for name, runtime in active:
                 serial = runtime.config.device_serial
                 if serial and serial in available:
                     desired[name] = serial
                     available.remove(serial)
 
             changed = False
-            for name, runtime in self._runtimes.items():
+            for name, runtime in active:
                 serial = desired.get(name)
                 if (
                     serial is None
@@ -346,16 +372,23 @@ class RealSenseService:
             "available": rs is not None,
             "cameras": {
                 name: {
-                    "configured_serial": runtime.config.device_serial,
-                    "actual_serial": runtime.actual_serial,
-                    "started": runtime.started,
-                    "fps": runtime.fps,
-                    "resolution": [runtime.config.width, runtime.config.height],
+                    "configured_serial": self._runtimes[name].config.device_serial,
+                    "actual_serial": self._runtimes[name].actual_serial,
+                    "started": self._runtimes[name].started,
+                    "fps": self._runtimes[name].fps,
+                    "resolution": [
+                        self._runtimes[name].config.width,
+                        self._runtimes[name].config.height,
+                    ],
                     "error": self._errors.get(name),
                 }
-                for name, runtime in self._runtimes.items()
+                for name in self._active_locations
             },
-            "errors": dict(self._errors),
+            "errors": {
+                name: error
+                for name, error in self._errors.items()
+                if name in self._active_locations
+            },
         }
 
     def _acquire_loop(self, runtime: CameraRuntime) -> None:
