@@ -267,6 +267,12 @@ class TeleopService:
         if self._controller is None:
             return self.snapshot()
         try:
+            # Enable grippers and switch tools first, before Init()/Start(): the
+            # follower is IDLE right after connect (Tool.Switch() is IDLE-only),
+            # and switching the tool up front lets Init()'s F/T zeroing and the
+            # robot's gravity compensation account for the gripper's mass. Once
+            # the teleop control loop is started the tool can no longer change.
+            self._prepare_end_effectors()
             init_method = getattr(self._controller, "Init", None)
             if callable(init_method):
                 if ZeroFTSensor is not None:
@@ -286,11 +292,12 @@ class TeleopService:
             self._error = describe_exception(exc)
         return self.snapshot()
 
-    def _start_end_effectors(self) -> None:
-        # Spin up the leader-DI -> follower-effector mirror for the current
-        # config. Any failure here must not break teleop start, so swallow and
-        # surface as a non-fatal warning via the controller's own logging.
-        self._stop_end_effectors()
+    def _prepare_end_effectors(self) -> None:
+        # Build the leader-DI -> follower-effector mirror for the current config
+        # and run its IDLE-only setup (gripper enable + tool switch). The mirror
+        # thread itself only starts on engage. Any failure here must not break
+        # teleop start, so swallow and rely on the controller's own warnings.
+        self._teardown_end_effectors()
         if self._controller is None:
             return
         try:
@@ -299,14 +306,14 @@ class TeleopService:
                 self._get_active_sides(),
                 dict(self._get_end_effector_config() or {}),
             )
-            controller.start()
+            controller.prepare()
             self._end_effectors = controller
         except Exception:  # pragma: no cover - hardware specific
             self._end_effectors = None
 
-    def _stop_end_effectors(self) -> None:
+    def _teardown_end_effectors(self) -> None:
         if self._end_effectors is not None:
-            self._end_effectors.stop()
+            self._end_effectors.shutdown()
             self._end_effectors = None
 
     def stop(self) -> TeleopSnapshot:
@@ -315,7 +322,7 @@ class TeleopService:
         if self._controller is None:
             return self.snapshot()
         try:
-            self._stop_end_effectors()
+            self._teardown_end_effectors()
             self._controller.Stop()
             self._started = False
             self._engaged = False
@@ -340,11 +347,13 @@ class TeleopService:
                 self._controller.Engage(idx, engaged)
             self._engaged = engaged
             self._error = None
-            # End effector mirroring runs only while the pairs are engaged.
-            if engaged:
-                self._start_end_effectors()
-            else:
-                self._stop_end_effectors()
+            # The mirror thread runs only while the pairs are engaged; the
+            # gripper enable/tool switch already happened in start() (IDLE).
+            if self._end_effectors is not None:
+                if engaged:
+                    self._end_effectors.start()
+                else:
+                    self._end_effectors.stop()
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
@@ -355,7 +364,7 @@ class TeleopService:
 
         # Disconnect / service reset is the only path that fully stops the
         # teleop control loop (Stop()); the Stop button merely disengages.
-        self._stop_end_effectors()
+        self._teardown_end_effectors()
         try:
             if self._started:
                 self._controller.Stop()

@@ -305,20 +305,23 @@ def test_end_effectors_run_only_while_engaged(tmp_path) -> None:
     service._controller = FakeEngageController()
     service._initialized = True
 
-    # Starting the loop must not start end effector control.
+    # Starting the loop prepares the controller (IDLE setup) but the mirror
+    # thread must not run until engaged.
     service.start()
-    assert service._end_effectors is None
-
-    # Engaging starts it; disengaging stops it.
-    service.set_engaged(True)
     assert service._end_effectors is not None
+    assert service._end_effectors.is_running() is False
+
+    # Engaging runs the mirror thread; disengaging stops it (controller stays).
+    service.set_engaged(True)
+    assert service._end_effectors.is_running() is True
 
     service.set_engaged(False)
-    assert service._end_effectors is None
-
-    # Re-engage, then a full Stop must also tear it down.
-    service.set_engaged(True)
     assert service._end_effectors is not None
+    assert service._end_effectors.is_running() is False
+
+    # Re-engage, then a full Stop tears the controller down entirely.
+    service.set_engaged(True)
+    assert service._end_effectors.is_running() is True
     service.stop()
     assert service._end_effectors is None
 

@@ -40,6 +40,7 @@ except ImportError:  # pragma: no cover - environment-specific
     flexivrdk = None
 
 Gripper = getattr(flexivrdk, "Gripper", None) if flexivrdk is not None else None
+Tool = getattr(flexivrdk, "Tool", None) if flexivrdk is not None else None
 
 
 def _side_config(value: Any) -> EndEffectorSideConfig | None:
@@ -70,7 +71,7 @@ class EndEffectorController:
     POLL_HZ = 30.0
     # Defaults used when commanding a gripper, clamped into each gripper's own
     # reported parameter range before use.
-    GRIPPER_VELOCITY = 0.1  # [m/s]
+    GRIPPER_VELOCITY = 0.2  # [m/s]
     GRIPPER_FORCE = 20.0  # [N]
 
     def __init__(
@@ -89,8 +90,9 @@ class EndEffectorController:
             self._configs.append(usable)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # Lazily-enabled grippers and the last commands issued, keyed by pair
-        # index, so we only issue a (blocking) command on an actual state change.
+        # Grippers enabled during prepare() (while the robot is IDLE) and the
+        # last commands issued, keyed by pair index, so we only issue a
+        # (blocking) command on an actual state change.
         self._grippers: dict[int, Any] = {}
         self._gripper_params: dict[int, Any] = {}
         self._last_do: dict[int, bool] = {}
@@ -108,6 +110,30 @@ class EndEffectorController:
     def has_work(self) -> bool:
         return any(cfg is not None for cfg in self._configs)
 
+    def is_running(self) -> bool:
+        return self._thread is not None
+
+    def prepare(self) -> None:
+        """Enable grippers and switch tools while the robots are IDLE.
+
+        Tool.Switch() updates the follower's gravity compensation and TCP for
+        the gripper's mass and is only valid in IDLE control mode, so this runs
+        right after connect -- before Init()/Start() -- so that Init()'s F/T
+        zeroing and the gravity model account for the gripper, and before the
+        teleop control loop (which prevents tool changes) is started. Only
+        gripper followers need setup; digital-output ports need none.
+        """
+        for index, cfg in enumerate(self._configs):
+            if cfg is None or cfg.follower != "gripper":
+                continue
+            try:
+                self._setup_gripper(index, cfg)
+                self._errors.pop(index, None)
+            except Exception as exc:
+                message = describe_exception(exc)
+                warn(f"Gripper setup failed for pair {index}", message)
+                self._errors[index] = message
+
     def start(self) -> None:
         if not self.has_work() or self._thread is not None:
             return
@@ -118,11 +144,21 @@ class EndEffectorController:
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop the mirroring thread (on disengage); keep grippers enabled.
+
+        Grippers stay enabled and the tool stays switched across engage/
+        disengage cycles within one teleop session; they are only released by
+        shutdown() when the control loop is fully stopped.
+        """
         self._stop_event.set()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=2.0)
         self._thread = None
+
+    def shutdown(self) -> None:
+        """Stop the thread and release all gripper/command state (on Stop)."""
+        self.stop()
         self._grippers.clear()
         self._gripper_params.clear()
         self._last_do.clear()
@@ -142,9 +178,7 @@ class EndEffectorController:
                     # Log only on the first failure (or when it changes) to avoid
                     # flooding the console at the poll rate.
                     if self._errors.get(index) != message:
-                        warn(
-                            f"End effector control failed for pair {index}", message
-                        )
+                        warn(f"End effector control failed for pair {index}", message)
                     self._errors[index] = message
             self._stop_event.wait(period)
 
@@ -187,7 +221,13 @@ class EndEffectorController:
         if self._last_gripper_target.get(index) == target:
             return
 
-        gripper = self._ensure_gripper(index, cfg)
+        gripper = self._grippers.get(index)
+        if gripper is None:
+            # prepare() did not enable this gripper (setup failed or was
+            # skipped); nothing to command.
+            raise RuntimeError(
+                f"Gripper for pair {index} is not enabled; setup may have failed"
+            )
         params = self._gripper_params[index]
         width = params.min_width if target == "close" else params.max_width
         velocity = _clamp(self.GRIPPER_VELOCITY, params.min_vel, params.max_vel)
@@ -195,15 +235,15 @@ class EndEffectorController:
         gripper.Move(width, velocity, force)
         self._last_gripper_target[index] = target
 
-    def _ensure_gripper(self, index: int, cfg: EndEffectorSideConfig) -> Any:
-        gripper = self._grippers.get(index)
-        if gripper is not None:
-            return gripper
+    def _setup_gripper(self, index: int, cfg: EndEffectorSideConfig) -> None:
+        # Enable the gripper as a device and switch the follower's tool so its
+        # mass is accounted for in gravity compensation/TCP. IDLE-mode only.
         if Gripper is None:
             raise RuntimeError("flexivrdk is not available; cannot control gripper")
         _, follower = self._controller.instances(index)
         gripper = Gripper(follower)
         gripper.Enable(cfg.gripper_model)
+        if Tool is not None:
+            Tool(follower).Switch(cfg.gripper_model)
         self._grippers[index] = gripper
         self._gripper_params[index] = gripper.params()
-        return gripper
