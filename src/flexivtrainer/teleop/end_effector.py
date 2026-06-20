@@ -81,16 +81,16 @@ class EndEffectorController:
         configs: dict[str, Any],
     ) -> None:
         self._controller = controller
-        # Per-pair config in pair-index order (None for sides without a usable
-        # leader-trigger -> follower-effector mapping).
-        self._configs: list[EndEffectorSideConfig | None] = []
-        for side in sides:
-            cfg = _side_config(configs.get(side))
-            usable = cfg if cfg is not None and self._has_work(cfg) else None
-            self._configs.append(usable)
+        # Arm sides and their config in pair-index order. The side name at index
+        # i drives teleop pair i (instances(i)/digital_inputs(i)); a None config
+        # means that side configured nothing.
+        self._sides: list[str] = list(sides)
+        self._configs: list[EndEffectorSideConfig | None] = [
+            _side_config(configs.get(side)) for side in self._sides
+        ]
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # Grippers enabled during prepare() (while the robot is IDLE) and the
+        # Grippers enabled by initialize_grippers() (the panel's Init button) and the
         # last commands issued, keyed by pair index, so we only issue a
         # (blocking) command on an actual state change.
         self._grippers: dict[int, Any] = {}
@@ -100,29 +100,44 @@ class EndEffectorController:
         self._errors: dict[int, str] = {}
 
     @staticmethod
-    def _has_work(cfg: EndEffectorSideConfig) -> bool:
-        # Mirroring needs a leader trigger to read and a follower effector to drive.
-        return cfg.leader == "digital_input" and cfg.follower in {
+    def _should_mirror(cfg: EndEffectorSideConfig | None) -> bool:
+        # Mirroring needs a leader trigger to read and a follower effector to
+        # drive. A gripper without a leader trigger is still enabled (for manual
+        # control) but is not mirrored.
+        return cfg is not None and cfg.leader == "digital_input" and cfg.follower in {
             "digital_output",
             "gripper",
         }
 
     def has_work(self) -> bool:
-        return any(cfg is not None for cfg in self._configs)
+        # "Work" for the background thread is the set of mirrored pairs.
+        return any(self._should_mirror(cfg) for cfg in self._configs)
+
+    def has_grippers(self) -> bool:
+        return any(
+            cfg is not None and cfg.follower == "gripper" for cfg in self._configs
+        )
+
+    def _index_for_side(self, side: str) -> int:
+        try:
+            return self._sides.index(side)
+        except ValueError as exc:
+            raise ValueError(f"Unknown arm side: {side}") from exc
 
     def is_running(self) -> bool:
         return self._thread is not None
 
-    def prepare(self) -> None:
-        """Enable grippers and switch tools while the robots are IDLE.
+    def initialize_grippers(self) -> dict[str, str]:
+        """Enable every configured gripper, switch its tool, and read its params.
 
-        Tool.Switch() updates the follower's gravity compensation and TCP for
-        the gripper's mass and is only valid in IDLE control mode, so this runs
-        right after connect -- before Init()/Start() -- so that Init()'s F/T
-        zeroing and the gravity model account for the gripper, and before the
-        teleop control loop (which prevents tool changes) is started. Only
-        gripper followers need setup; digital-output ports need none.
+        Triggered by the Gripper Control panel's Init button. Tool.Switch()
+        updates the follower's gravity compensation and TCP for the gripper's
+        mass and is only valid in IDLE control mode, so this should be run after
+        connect but before TDK Init()/Start() (i.e. before the teleop control
+        loop). Returns a per-side map of error messages for grippers that failed
+        to set up (empty on full success).
         """
+        errors: dict[str, str] = {}
         for index, cfg in enumerate(self._configs):
             if cfg is None or cfg.follower != "gripper":
                 continue
@@ -133,6 +148,8 @@ class EndEffectorController:
                 message = describe_exception(exc)
                 warn(f"Gripper setup failed for pair {index}", message)
                 self._errors[index] = message
+                errors[self._sides[index]] = message
+        return errors
 
     def start(self) -> None:
         if not self.has_work() or self._thread is not None:
@@ -168,7 +185,7 @@ class EndEffectorController:
         period = 1.0 / self.POLL_HZ
         while not self._stop_event.is_set():
             for index, cfg in enumerate(self._configs):
-                if cfg is None:
+                if cfg is None or not self._should_mirror(cfg):
                     continue
                 try:
                     self._tick(index, cfg)
@@ -223,8 +240,8 @@ class EndEffectorController:
 
         gripper = self._grippers.get(index)
         if gripper is None:
-            # prepare() did not enable this gripper (setup failed or was
-            # skipped); nothing to command.
+            # initialize_grippers() did not enable this gripper (setup
+            # failed or Init was not run); nothing to command.
             raise RuntimeError(
                 f"Gripper for pair {index} is not enabled; setup may have failed"
             )
@@ -238,12 +255,70 @@ class EndEffectorController:
     def _setup_gripper(self, index: int, cfg: EndEffectorSideConfig) -> None:
         # Enable the gripper as a device and switch the follower's tool so its
         # mass is accounted for in gravity compensation/TCP. IDLE-mode only.
+        # Idempotent: a re-Init keeps the already-enabled gripper (Enable() would
+        # otherwise raise) and just refreshes the tool switch and params.
         if Gripper is None:
             raise RuntimeError("flexivrdk is not available; cannot control gripper")
         _, follower = self._controller.instances(index)
-        gripper = Gripper(follower)
-        gripper.Enable(cfg.gripper_model)
+        if index not in self._grippers:
+            gripper = Gripper(follower)
+            gripper.Enable(cfg.gripper_model)
+            self._grippers[index] = gripper
         if Tool is not None:
             Tool(follower).Switch(cfg.gripper_model)
-        self._grippers[index] = gripper
-        self._gripper_params[index] = gripper.params()
+        self._gripper_params[index] = self._grippers[index].params()
+
+    def gripper_snapshot(self) -> dict[str, Any]:
+        """Per-side gripper parameters/state, for sides with an enabled gripper.
+
+        Keyed by arm side; present only once initialize_grippers() has enabled it
+        (i.e. while teleop is running), so the UI can read the valid ranges and
+        defaults straight from the hardware.
+        """
+        snapshot: dict[str, Any] = {}
+        for index, cfg in enumerate(self._configs):
+            if cfg is None or cfg.follower != "gripper":
+                continue
+            params = self._gripper_params.get(index)
+            gripper = self._grippers.get(index)
+            if params is None or gripper is None:
+                continue
+            entry = {
+                "model": params.name,
+                "min_vel": params.min_vel,
+                "max_vel": params.max_vel,
+                "min_force": params.min_force,
+                "max_force": params.max_force,
+                "min_width": params.min_width,
+                "max_width": params.max_width,
+            }
+            try:  # pragma: no cover - hardware specific
+                states = gripper.states()
+                entry["width"] = states.width
+                entry["is_moving"] = states.is_moving
+            except Exception:  # pragma: no cover - hardware specific
+                pass
+            snapshot[self._sides[index]] = entry
+        return snapshot
+
+    def command_gripper(
+        self, side: str, action: str, velocity: float, force: float
+    ) -> None:
+        """Manually open/close one side's gripper (used while NOT engaged).
+
+        ``velocity``/``force`` are clamped into the gripper's reported ranges as
+        a safety net; the UI also constrains them. ``action`` is "open"/"close".
+        """
+        if action not in {"open", "close"}:
+            raise ValueError(f"Unsupported gripper action: {action}")
+        index = self._index_for_side(side)
+        gripper = self._grippers.get(index)
+        params = self._gripper_params.get(index)
+        if gripper is None or params is None:
+            raise RuntimeError(f"Gripper for side {side} is not enabled")
+        width = params.max_width if action == "open" else params.min_width
+        velocity = _clamp(velocity, params.min_vel, params.max_vel)
+        force = _clamp(force, params.min_force, params.max_force)
+        gripper.Move(width, velocity, force)
+        # Keep the mirror's edge-detection consistent with the manual command.
+        self._last_gripper_target[index] = action

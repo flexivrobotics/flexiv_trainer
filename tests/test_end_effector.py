@@ -183,7 +183,7 @@ def test_prepare_enables_gripper_and_switches_tool(monkeypatch) -> None:
     )
     ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
 
-    ctl.prepare()
+    ctl.initialize_grippers()
     assert ctl._grippers[0].enabled_name == "Flexiv-GN01"
     assert tools[-1].switched_to == "Flexiv-GN01"
 
@@ -227,7 +227,7 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
         gripper_activated_state="close",
     )
     ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
-    ctl.prepare()
+    ctl.initialize_grippers()
 
     # Idle: not triggered, activated state "close" -> open (max width).
     ctl._tick(0, ctl._configs[0])
@@ -239,8 +239,9 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
     tdk._leader_ports[0] = True
     ctl._tick(0, ctl._configs[0])
     assert gripper.moves[-1][0] == 0.0  # min_width (close)
-    assert gripper.moves[-1][1] == 0.1  # GRIPPER_VELOCITY within [0.01, 0.5]
-    assert gripper.moves[-1][2] == 20.0  # GRIPPER_FORCE within [1.0, 50.0]
+    # Velocity/force are the controller defaults, clamped into the params range.
+    assert gripper.moves[-1][1] == EndEffectorController.GRIPPER_VELOCITY
+    assert gripper.moves[-1][2] == EndEffectorController.GRIPPER_FORCE
 
     # No state change -> no extra move.
     moves_before = len(gripper.moves)
@@ -263,6 +264,75 @@ def test_side_index_maps_to_pair_index() -> None:
     assert ctl._configs[1] is not None
     ctl._tick(1, ctl._configs[1])
     assert follower.digital_outputs == {7: True}
+
+
+def test_gripper_snapshot_exposes_params_after_prepare(monkeypatch) -> None:
+    import flexivtrainer.teleop.end_effector as ee
+
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+
+    follower = FakeFollower()
+    tdk = FakeTDK(follower, [False] * 18)
+    # Gripper follower with NO leader trigger: still set up and reported.
+    cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
+    ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
+
+    # Nothing before prepare().
+    assert ctl.gripper_snapshot() == {}
+    assert ctl.has_work() is False  # no leader -> no mirror thread work
+
+    ctl.initialize_grippers()
+    snap = ctl.gripper_snapshot()
+    assert set(snap) == {"single_arm"}
+    entry = snap["single_arm"]
+    assert entry["model"] == "fake"
+    assert entry["max_vel"] == 0.5
+    assert entry["max_force"] == 50.0
+    assert entry["max_width"] == 0.1
+
+
+def test_command_gripper_moves_and_clamps(monkeypatch) -> None:
+    import flexivtrainer.teleop.end_effector as ee
+
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+
+    follower = FakeFollower()
+    tdk = FakeTDK(follower, [False] * 18)
+    cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
+    ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
+    ctl.initialize_grippers()
+    gripper = ctl._grippers[0]
+
+    # Open at an in-range velocity/force.
+    ctl.command_gripper("single_arm", "open", velocity=0.3, force=10.0)
+    assert gripper.moves[-1] == (0.1, 0.3, 10.0)  # max_width
+
+    # Close, with out-of-range inputs clamped to the params range.
+    ctl.command_gripper("single_arm", "close", velocity=99.0, force=99.0)
+    assert gripper.moves[-1] == (0.0, 0.5, 50.0)  # min_width, clamped vel/force
+
+
+def test_command_gripper_rejects_unknown_side_and_action(monkeypatch) -> None:
+    import flexivtrainer.teleop.end_effector as ee
+
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+
+    follower = FakeFollower()
+    tdk = FakeTDK(follower, [False] * 18)
+    cfg = EndEffectorSideConfig(follower="gripper")
+    ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
+    ctl.initialize_grippers()
+
+    for side, action in [("left_arm", "open"), ("single_arm", "wiggle")]:
+        try:
+            ctl.command_gripper(side, action, velocity=0.1, force=1.0)
+        except (ValueError, RuntimeError):
+            pass
+        else:  # pragma: no cover - failure path
+            raise AssertionError(f"expected error for side={side} action={action}")
 
 
 def test_single_arm_uses_pair_index_zero() -> None:

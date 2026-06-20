@@ -15,6 +15,10 @@
 const state = {
     activeView: "home",
     summary: null,
+    // Per-side manual gripper control inputs (velocity/force), keyed by arm
+    // side. Seeded from the gripper params once teleop is running; kept in
+    // memory so user edits survive re-renders within a session.
+    gripperControl: {},
     teleopStatus: null,
     cameraConfig: null,
     trainingPolicies: null,
@@ -109,6 +113,12 @@ const state = {
         // frames between status polls. Reset whenever a recording (re)starts.
         recordingFps: 0,
         recordingFpsSample: null,
+        // Signature of the currently-built Gripper Control panel; the panel is
+        // only rebuilt when the set of gripper sides or their params change, so
+        // velocity/force inputs aren't clobbered on every status poll.
+        gripperPanelSignature: null,
+        // True while the Gripper Control Init request is in flight.
+        gripperInitBusy: false,
         serviceResetBusy: {
             teleop_service: false,
             cameras: false,
@@ -2976,6 +2986,268 @@ function updateTeleopControlButtons(teleopStatus) {
     );
 }
 
+// The Gripper Control panel appears when any active arm has a gripper selected
+// as its follower end effector. An Init button at the top enables every gripper,
+// switches its tool, and reads its params (must run after Connect but before
+// Start, while the follower is IDLE). Each gripper side then gets a unified
+// Open/Close button plus velocity/force inputs; Open/Close is gated to NOT
+// engaged (the mirror loop owns the gripper while engaged).
+const GRIPPER_SIDE_LABELS = {
+    left_arm: "Left",
+    right_arm: "Right",
+    single_arm: "",
+};
+
+function gripperConfiguredSides() {
+    const eec = state.summary?.robot_config?.end_effector_config || {};
+    return getActiveSides().filter((side) => eec[side]?.follower === "gripper");
+}
+
+function roundForInput(value, decimals) {
+    const factor = 10 ** decimals;
+    return Math.round(value * factor) / factor;
+}
+
+function renderGripperControl(teleopStatus) {
+    const panel = byId("teleop-gripper-panel");
+    const content = byId("teleop-gripper-content");
+    if (!panel || !content) {
+        return;
+    }
+    const sides = gripperConfiguredSides();
+    panel.classList.toggle("hidden", sides.length === 0);
+    if (sides.length === 0) {
+        state.ui.gripperPanelSignature = null;
+        return;
+    }
+
+    const grippers = teleopStatus?.gripper || {};
+    // Rebuild the panel structure (and re-seed default inputs) only when the set
+    // of sides or their params availability changes, so typing isn't clobbered
+    // by the ~10Hz status poll.
+    const signature = sides
+        .map((side) => `${side}:${grippers[side] ? "params" : "none"}`)
+        .join(",");
+    if (state.ui.gripperPanelSignature !== signature) {
+        state.ui.gripperPanelSignature = signature;
+        buildGripperControlPanel(content, sides, grippers);
+    }
+
+    const teleop = teleopStatus?.teleop || {};
+    updateGripperInitButton(teleop);
+    sides.forEach((side) =>
+        updateGripperControlBlock(side, grippers[side], teleop),
+    );
+}
+
+function buildGripperControlPanel(content, sides, grippers) {
+    content.innerHTML = "";
+
+    // Panel-level Init button (enables/switches/reads params for all grippers).
+    const initButton = document.createElement("button");
+    initButton.type = "button";
+    initButton.className = "secondary-button gripper-init";
+    initButton.textContent = "Init";
+    initButton.onclick = () => initGrippers();
+    content.appendChild(initButton);
+
+    const multiple = sides.length > 1;
+    sides.forEach((side) => {
+        const params = grippers[side];
+        const label = GRIPPER_SIDE_LABELS[side] ?? "";
+        const block = document.createElement("div");
+        block.className = "gripper-control-block";
+        block.dataset.side = side;
+        block.innerHTML = `
+            ${multiple && label ? `<div class="gripper-control-title">${label}</div>` : ""}
+            <button class="start-button gripper-toggle" type="button">Open</button>
+            <label class="gripper-input-group">
+                <span>Velocity (m/s)</span>
+                <input type="number" class="gripper-velocity" step="0.001" min="0" />
+                <small class="gripper-input-note"></small>
+            </label>
+            <label class="gripper-input-group">
+                <span>Grasping force (N)</span>
+                <input type="number" class="gripper-force" step="0.1" min="0" />
+                <small class="gripper-input-note"></small>
+            </label>
+            <p class="gripper-control-hint"></p>
+        `;
+        content.appendChild(block);
+
+        const velInput = block.querySelector(".gripper-velocity");
+        const forceInput = block.querySelector(".gripper-force");
+        const velNote = velInput.nextElementSibling;
+        const forceNote = forceInput.nextElementSibling;
+
+        if (params) {
+            const store = (state.gripperControl[side] ||= {});
+            // Defaults: velocity = max_vel, grasping force = 1/4 of max_force.
+            if (store.velocity == null) store.velocity = params.max_vel;
+            if (store.force == null) store.force = params.max_force / 4;
+            // Clamp any carried-over value into the (possibly new) range.
+            store.velocity = clampNumber(store.velocity, params.min_vel, params.max_vel);
+            store.force = clampNumber(store.force, params.min_force, params.max_force);
+
+            velInput.min = params.min_vel;
+            velInput.max = params.max_vel;
+            velInput.value = roundForInput(store.velocity, 3);
+            forceInput.min = params.min_force;
+            forceInput.max = params.max_force;
+            forceInput.value = roundForInput(store.force, 1);
+            velNote.textContent = `Range: ${roundForInput(params.min_vel, 3)}–${roundForInput(params.max_vel, 3)} m/s`;
+            forceNote.textContent = `Range: ${roundForInput(params.min_force, 1)}–${roundForInput(params.max_force, 1)} N`;
+
+            bindGripperInput(velInput, side, "velocity", params.min_vel, params.max_vel, 3);
+            bindGripperInput(forceInput, side, "force", params.min_force, params.max_force, 1);
+
+            block.querySelector(".gripper-toggle").onclick = () =>
+                commandGripper(side);
+        } else {
+            // Params (and thus the valid range) are obtained on Init; leave the
+            // range notes blank until then.
+            velInput.disabled = true;
+            forceInput.disabled = true;
+            velNote.textContent = "";
+            forceNote.textContent = "";
+        }
+    });
+}
+
+// Live-store on input; clamp into range on change (blur/Enter) so a value
+// outside the valid range can't be submitted.
+function bindGripperInput(input, side, field, min, max, decimals) {
+    input.oninput = () => {
+        const value = parseFloat(input.value);
+        if (!Number.isNaN(value)) {
+            (state.gripperControl[side] ||= {})[field] = value;
+        }
+    };
+    input.onchange = () => {
+        const clamped = clampNumber(parseFloat(input.value), min, max);
+        (state.gripperControl[side] ||= {})[field] = clamped;
+        input.value = roundForInput(clamped, decimals);
+    };
+}
+
+function clampNumber(value, min, max) {
+    if (Number.isNaN(value)) return min;
+    return Math.min(max, Math.max(min, value));
+}
+
+function updateGripperControlBlock(side, params, teleop) {
+    const block = byId("teleop-gripper-content")?.querySelector(
+        `.gripper-control-block[data-side="${side}"]`,
+    );
+    if (!block) {
+        return;
+    }
+    const button = block.querySelector(".gripper-toggle");
+    const hint = block.querySelector(".gripper-control-hint");
+    const store = state.gripperControl[side] || {};
+    const started = !!teleop.started;
+    const engaged = !!teleop.engaged;
+    const busy = !!store.busy;
+
+    // Derive the current open/closed state from the measured width so the single
+    // button always offers the opposite action.
+    let action = "open";
+    if (params && typeof params.width === "number") {
+        const mid = (params.min_width + params.max_width) / 2;
+        action = params.width >= mid ? "close" : "open";
+    }
+    button.dataset.action = action;
+    setMarkupIfChanged(
+        button,
+        `gripper-${side}:${action}`,
+        action === "close" ? "Close" : "Open",
+    );
+
+    // Manual open/close needs the gripper initialized (params present) and the
+    // robots disengaged; it does not require the teleop loop to be started.
+    const ready = !!params && !engaged && !busy;
+    button.disabled = !ready;
+
+    let message = "";
+    if (!params) {
+        message = "Initialize the gripper to enable manual control.";
+    } else if (engaged) {
+        message = "Disengage the robots to control the gripper manually.";
+    } else if (busy) {
+        message = "Working …";
+    }
+    hint.textContent = message;
+    hint.classList.toggle("hidden", message === "");
+}
+
+function updateGripperInitButton(teleop) {
+    const button = byId("teleop-gripper-content")?.querySelector(".gripper-init");
+    if (!button) {
+        return;
+    }
+    const initialized = !!teleop.initialized;
+    const started = !!teleop.started;
+    const engaged = !!teleop.engaged;
+    const busy = !!state.ui.gripperInitBusy;
+
+    // Init must run after Connect but before Start (Tool.Switch is IDLE-only).
+    button.disabled = !initialized || started || engaged || busy;
+    setMarkupIfChanged(
+        button,
+        `gripper-init:${busy ? "busy" : "idle"}`,
+        busy ? "Initializing …" : "Init",
+    );
+    button.title = !initialized
+        ? "Connect teleoperation first"
+        : started
+          ? "Initialize grippers before starting teleoperation"
+          : engaged
+            ? "Disengage before initializing grippers"
+            : "";
+}
+
+async function initGrippers() {
+    if (state.ui.gripperInitBusy) {
+        return;
+    }
+    state.ui.gripperInitBusy = true;
+    renderTeleop();
+    try {
+        await api("/teleop/gripper/init", { method: "POST" });
+        await refreshTeleopStatus();
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.ui.gripperInitBusy = false;
+        renderTeleop();
+    }
+}
+
+async function commandGripper(side) {
+    const store = (state.gripperControl[side] ||= {});
+    const block = byId("teleop-gripper-content")?.querySelector(
+        `.gripper-control-block[data-side="${side}"]`,
+    );
+    const action = block?.querySelector(".gripper-toggle")?.dataset.action || "open";
+    if (store.busy) {
+        return;
+    }
+    store.busy = true;
+    renderTeleop();
+    try {
+        await api(`/teleop/gripper/${side}/${action}`, {
+            method: "POST",
+            body: JSON.stringify({ velocity: store.velocity, force: store.force }),
+        });
+        await refreshTeleopStatus();
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        store.busy = false;
+        renderTeleop();
+    }
+}
+
 function renderForcePanel(side, robotEntry, telemetry, history, wrenchLabel) {
     const panel = byId(`${side}-force-panel`);
     if (!panel) {
@@ -3301,6 +3573,7 @@ function renderTeleop() {
     renderRecordingStatusPanel(teleopStatus);
     renderRecordingActionButtons(teleopStatus.recording || {});
     updateTeleopControlButtons(teleopStatus);
+    renderGripperControl(teleopStatus);
 
     const showRecordingSaveButtons = !!teleopStatus.recording.awaiting_save || !!state.ui.recordingSaveBusy || !!teleopStatus.recording.save_in_progress;
     byId("record-save").classList.toggle("hidden", !showRecordingSaveButtons);

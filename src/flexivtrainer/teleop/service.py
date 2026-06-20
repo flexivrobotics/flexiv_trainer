@@ -267,12 +267,6 @@ class TeleopService:
         if self._controller is None:
             return self.snapshot()
         try:
-            # Enable grippers and switch tools first, before Init()/Start(): the
-            # follower is IDLE right after connect (Tool.Switch() is IDLE-only),
-            # and switching the tool up front lets Init()'s F/T zeroing and the
-            # robot's gravity compensation account for the gripper's mass. Once
-            # the teleop control loop is started the tool can no longer change.
-            self._prepare_end_effectors()
             init_method = getattr(self._controller, "Init", None)
             if callable(init_method):
                 if ZeroFTSensor is not None:
@@ -288,28 +282,52 @@ class TeleopService:
             self._started = True
             self._engaged = False
             self._error = None
+            # Keep any controller built by the Gripper Control Init button (with
+            # its enabled grippers) so the mirror loop can use it on engage; only
+            # build a fresh one if none exists yet (e.g. digital-output mirroring
+            # with no gripper init).
+            self._ensure_end_effectors()
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
 
-    def _prepare_end_effectors(self) -> None:
-        # Build the leader-DI -> follower-effector mirror for the current config
-        # and run its IDLE-only setup (gripper enable + tool switch). The mirror
-        # thread itself only starts on engage. Any failure here must not break
-        # teleop start, so swallow and rely on the controller's own warnings.
-        self._teardown_end_effectors()
-        if self._controller is None:
+    def _ensure_end_effectors(self) -> None:
+        # Construct the end effector controller for the current config if one is
+        # not already present. Does not enable grippers -- that is the Init
+        # button's job (init_grippers). Safe to call repeatedly.
+        if self._end_effectors is not None or self._controller is None:
             return
         try:
-            controller = EndEffectorController(
+            self._end_effectors = EndEffectorController(
                 self._controller,
                 self._get_active_sides(),
                 dict(self._get_end_effector_config() or {}),
             )
-            controller.prepare()
-            self._end_effectors = controller
         except Exception:  # pragma: no cover - hardware specific
             self._end_effectors = None
+
+    def init_grippers(self) -> dict[str, Any]:
+        # Enable + tool-switch + read params for every configured gripper. Run
+        # from the panel's Init button after connect but before Start, while the
+        # follower is IDLE (Tool.Switch() is IDLE-only).
+        if self._controller is None:
+            return {
+                "ok": False,
+                "error": "Connect teleoperation before initializing grippers",
+            }
+        if self._started:
+            return {
+                "ok": False,
+                "error": "Initialize grippers before starting teleoperation",
+            }
+        self._ensure_end_effectors()
+        if self._end_effectors is None or not self._end_effectors.has_grippers():
+            return {"ok": False, "error": "No grippers configured"}
+        errors = self._end_effectors.initialize_grippers()
+        snapshot = self._end_effectors.gripper_snapshot()
+        if errors and not snapshot:
+            return {"ok": False, "error": "; ".join(errors.values())}
+        return {"ok": True, "gripper": snapshot, "errors": errors}
 
     def _teardown_end_effectors(self) -> None:
         if self._end_effectors is not None:
@@ -357,6 +375,34 @@ class TeleopService:
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
+
+    def gripper_snapshot(self) -> dict[str, Any]:
+        # Empty until teleop is started (grippers are enabled in start()).
+        if self._end_effectors is None:
+            return {}
+        return self._end_effectors.gripper_snapshot()
+
+    def command_gripper(
+        self, side: str, action: str, velocity: float, force: float
+    ) -> dict[str, Any]:
+        # Manual open/close is only allowed while the pairs are NOT engaged:
+        # during engagement the mirror thread owns the gripper, and a competing
+        # blocking Move would fight the leader-driven commands.
+        if self._end_effectors is None:
+            return {
+                "ok": False,
+                "error": "Initialize the gripper before controlling it",
+            }
+        if self._engaged:
+            return {
+                "ok": False,
+                "error": "Disengage the robots before controlling the gripper manually",
+            }
+        try:
+            self._end_effectors.command_gripper(side, action, velocity, force)
+            return {"ok": True}
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
 
     def shutdown(self) -> None:
         if self._controller is None:

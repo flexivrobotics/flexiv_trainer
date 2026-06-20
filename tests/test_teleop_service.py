@@ -326,6 +326,39 @@ def test_end_effectors_run_only_while_engaged(tmp_path) -> None:
     assert service._end_effectors is None
 
 
+def test_command_gripper_blocked_until_initialized_and_disengaged(tmp_path) -> None:
+    from flexivtrainer.config import EndEffectorSideConfig
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
+    configs = {"single_arm": EndEffectorSideConfig(follower="gripper")}
+    service = TeleopService(
+        settings,
+        get_robot_pairs=lambda: pairs,
+        get_active_sides=lambda: ["single_arm"],
+        get_end_effector_config=lambda: configs,
+    )
+    service._controller = FakeEngageController()
+    service._initialized = True
+
+    # Grippers not initialized yet: manual control rejected.
+    result = service.command_gripper("single_arm", "open", 0.1, 1.0)
+    assert result["ok"] is False
+    assert "Initialize" in result["error"]
+
+    # Init must happen before Start (Tool.Switch is IDLE-only).
+    service.start()
+    init_result = service.init_grippers()
+    assert init_result["ok"] is False
+    assert "before starting" in init_result["error"]
+
+    # Engaged: manual control rejected (the mirror thread owns the gripper).
+    service.set_engaged(True)
+    result = service.command_gripper("single_arm", "open", 0.1, 1.0)
+    assert result["ok"] is False
+    assert "Disengage" in result["error"]
+
+
 def test_engage_requires_started_control_loop(tmp_path) -> None:
     service = _configured_service(tmp_path)
     controller = service._controller

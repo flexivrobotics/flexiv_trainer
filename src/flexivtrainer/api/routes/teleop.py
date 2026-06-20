@@ -43,6 +43,13 @@ class StartTeleopRequest(BaseModel):
     zero_ft_sensor: bool = True
 
 
+class GripperCommandRequest(BaseModel):
+    # Position-control parameters for a manual open/close. Both must be positive;
+    # they are additionally clamped into the gripper's reported range server-side.
+    velocity: float = Field(gt=0)
+    force: float = Field(gt=0)
+
+
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
@@ -125,6 +132,7 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return {
         "teleop": runtime.teleop.snapshot().__dict__,
         "robot_data": runtime.teleop.robot_data_snapshot(),
+        "gripper": runtime.teleop.gripper_snapshot(),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
@@ -219,6 +227,46 @@ def disengage_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> 
         error("Teleoperation disengage failed", str(result.get("error")))
     else:
         info("Teleoperation disengaged")
+    return result
+
+
+@router.post("/gripper/init")
+def init_grippers(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.init_grippers()
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str(result.get("error") or "Gripper initialization failed"),
+        )
+    if result.get("errors"):
+        warn(
+            "Some grippers failed to initialize",
+            "; ".join(f"{side}={msg}" for side, msg in result["errors"].items()),
+        )
+    else:
+        ok("Grippers initialized")
+    return result
+
+
+@router.post("/gripper/{side}/{action}")
+def command_gripper(
+    side: str,
+    action: str,
+    request: GripperCommandRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    if action not in {"open", "close"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
+    result = runtime.teleop.command_gripper(
+        side, action, request.velocity, request.force
+    )
+    if not result.get("ok"):
+        # 409: the gripper can't be commanded in the current state (engaged, or
+        # teleop not started). The message guides the user.
+        raise HTTPException(
+            status_code=409, detail=str(result.get("error") or "Gripper command failed")
+        )
+    info(f"Gripper {action}", f"side={side}")
     return result
 
 
