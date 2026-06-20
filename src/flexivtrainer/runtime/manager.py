@@ -77,7 +77,12 @@ class RuntimeManager:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self._robot_config = self._load_robot_config()
-        self.teleop = TeleopService(settings, self.get_teleop_robot_pairs)
+        self.teleop = TeleopService(
+            settings,
+            self.get_teleop_robot_pairs,
+            self.get_active_sides,
+            self.get_end_effector_config,
+        )
         self.cameras = RealSenseService(settings)
         self.cameras.set_active_locations(
             active_camera_names(self._robot_config.active_sides())
@@ -120,6 +125,9 @@ class RuntimeManager:
 
     def get_active_sides(self) -> list[str]:
         return self._robot_config.active_sides()
+
+    def get_end_effector_config(self) -> dict[str, Any]:
+        return self._robot_config.end_effector_config
 
     def _load_camera_config(self) -> None:
         path = self.settings.storage.camera_config_path

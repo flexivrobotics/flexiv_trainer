@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from typing import Any
 from typing import Callable
 
-from flexivtrainer.config import AppSettings, TeleopRobotPair
+from flexivtrainer.config import AppSettings, EndEffectorSideConfig, TeleopRobotPair
 from flexivtrainer.observability import describe_exception
+from flexivtrainer.teleop.end_effector import EndEffectorController
 
 try:
     import flexivtdk
@@ -76,9 +77,20 @@ class TeleopService:
         self,
         settings: AppSettings,
         get_robot_pairs: Callable[[], list[TeleopRobotPair]] | None = None,
+        get_active_sides: Callable[[], list[str]] | None = None,
+        get_end_effector_config: (
+            Callable[[], dict[str, EndEffectorSideConfig]] | None
+        ) = None,
     ) -> None:
         self._settings = settings
         self._get_robot_pairs = get_robot_pairs or (lambda: settings.teleop_robot_pairs)
+        # Active arm sides (in pair-index order) and the per-side end effector
+        # config drive the optional end effector controller; defaults keep the
+        # service usable without that wiring.
+        self._get_active_sides = get_active_sides or (
+            lambda: ["left_arm", "right_arm"]
+        )
+        self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._controller: Any | None = None
         self._error: str | None = None
         self._initialized = False
@@ -88,6 +100,9 @@ class TeleopService:
         # stopping the loop.
         self._started = False
         self._engaged = False
+        # Background mirror of leader digital inputs onto follower end effectors;
+        # runs only while the pairs are engaged.
+        self._end_effectors: EndEffectorController | None = None
 
     def _configured_remote_serials(self) -> list[str]:
         serials: list[str] = []
@@ -271,12 +286,36 @@ class TeleopService:
             self._error = describe_exception(exc)
         return self.snapshot()
 
+    def _start_end_effectors(self) -> None:
+        # Spin up the leader-DI -> follower-effector mirror for the current
+        # config. Any failure here must not break teleop start, so swallow and
+        # surface as a non-fatal warning via the controller's own logging.
+        self._stop_end_effectors()
+        if self._controller is None:
+            return
+        try:
+            controller = EndEffectorController(
+                self._controller,
+                self._get_active_sides(),
+                dict(self._get_end_effector_config() or {}),
+            )
+            controller.start()
+            self._end_effectors = controller
+        except Exception:  # pragma: no cover - hardware specific
+            self._end_effectors = None
+
+    def _stop_end_effectors(self) -> None:
+        if self._end_effectors is not None:
+            self._end_effectors.stop()
+            self._end_effectors = None
+
     def stop(self) -> TeleopSnapshot:
         # The Stop button stops the teleop control loop. Engagement is cleared
         # because Engage requires a running loop.
         if self._controller is None:
             return self.snapshot()
         try:
+            self._stop_end_effectors()
             self._controller.Stop()
             self._started = False
             self._engaged = False
@@ -301,6 +340,11 @@ class TeleopService:
                 self._controller.Engage(idx, engaged)
             self._engaged = engaged
             self._error = None
+            # End effector mirroring runs only while the pairs are engaged.
+            if engaged:
+                self._start_end_effectors()
+            else:
+                self._stop_end_effectors()
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
@@ -311,6 +355,7 @@ class TeleopService:
 
         # Disconnect / service reset is the only path that fully stops the
         # teleop control loop (Stop()); the Stop button merely disengages.
+        self._stop_end_effectors()
         try:
             if self._started:
                 self._controller.Stop()

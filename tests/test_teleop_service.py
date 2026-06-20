@@ -264,6 +264,65 @@ def test_engage_then_disengage_toggles_every_pair(tmp_path) -> None:
     assert disengaged.engaged is False
 
 
+class FakeEngageController(FakeTeleopController):
+    """Adds the DI/instance surface the end effector controller polls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.follower = FakeRobot()
+        self.follower.digital_outputs = {}
+
+        def _set_outputs(outputs: dict) -> None:
+            self.follower.digital_outputs.update(outputs)
+
+        self.follower.SetDigitalOutputs = _set_outputs  # type: ignore[attr-defined]
+
+    def digital_inputs(self, idx: int):
+        return ([False] * 18, [False] * 18)
+
+    def instances(self, idx: int):
+        return (object(), self.follower)
+
+
+def test_end_effectors_run_only_while_engaged(tmp_path) -> None:
+    from flexivtrainer.config import EndEffectorSideConfig
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
+    configs = {
+        "left_arm": EndEffectorSideConfig(
+            leader="digital_input",
+            follower="digital_output",
+            follower_channel=2,
+        )
+    }
+    service = TeleopService(
+        settings,
+        get_robot_pairs=lambda: pairs,
+        get_active_sides=lambda: ["left_arm"],
+        get_end_effector_config=lambda: configs,
+    )
+    service._controller = FakeEngageController()
+    service._initialized = True
+
+    # Starting the loop must not start end effector control.
+    service.start()
+    assert service._end_effectors is None
+
+    # Engaging starts it; disengaging stops it.
+    service.set_engaged(True)
+    assert service._end_effectors is not None
+
+    service.set_engaged(False)
+    assert service._end_effectors is None
+
+    # Re-engage, then a full Stop must also tear it down.
+    service.set_engaged(True)
+    assert service._end_effectors is not None
+    service.stop()
+    assert service._end_effectors is None
+
+
 def test_engage_requires_started_control_loop(tmp_path) -> None:
     service = _configured_service(tmp_path)
     controller = service._controller
