@@ -155,9 +155,9 @@ const WRIST_CAMERA_BY_SIDE = {
     single_arm: "wrist",
 };
 const ARM_SIDE_LABELS = {
-    left_arm: { serial: "LEFT", feed: "Left Wrist", wrench: "LEFT" },
-    right_arm: { serial: "RIGHT", feed: "Right Wrist", wrench: "RIGHT" },
-    single_arm: { serial: "ARM", feed: "Wrist", wrench: "ARM" },
+    left_arm: { serial: "Serial Number - Left", feed: "Left Wrist", wrench: "LEFT" },
+    right_arm: { serial: "Serial Number - Right", feed: "Right Wrist", wrench: "RIGHT" },
+    single_arm: { serial: "Serial Number", feed: "Wrist", wrench: "ARM" },
 };
 
 function getActiveSides() {
@@ -1736,7 +1736,7 @@ function renderArmConfig() {
     const modeContainer = byId("home-arm-mode");
     modeContainer.innerHTML = `
         <label class="robot-input-group">
-            <span>Arm Pair</span>
+            <span>Arm Pairs</span>
             <select id="arm-mode-select">
                 <option value="dual"${armMode === "dual" ? " selected" : ""}>Dual</option>
                 <option value="single"${armMode === "single" ? " selected" : ""}>Single</option>
@@ -1784,7 +1784,7 @@ function renderHomeRobotConfigInputs() {
             field.className = "robot-input-group";
             field.innerHTML = `
                 <span>${sideLabels[index] || `Robot ${index + 1}`}</span>
-                <input type="text" value="${serial}" placeholder="Enter robot serial number" />
+                <input type="text" value="${serial}" placeholder="Rizon4s-xxxxxx" />
             `;
             const input = field.querySelector("input");
             input.oninput = () => {

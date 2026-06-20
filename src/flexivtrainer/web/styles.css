@@ -216,7 +216,9 @@ button:disabled {
 
 .home-config-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* The Arm Configuration tile holds a single dropdown, so give it less width
+       and let the robot-serial tiles grow enough to show the full placeholder. */
+    grid-template-columns: minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 1rem;
 }
 
