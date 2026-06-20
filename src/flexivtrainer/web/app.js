@@ -15,6 +15,10 @@
 const state = {
     activeView: "home",
     summary: null,
+    // Per-side end effector selections, keyed by arm side ("left_arm",
+    // "right_arm", "single_arm"). Front-end only for now; not yet persisted to
+    // the backend (wired up in a later step).
+    endEffectorConfig: {},
     teleopStatus: null,
     cameraConfig: null,
     trainingPolicies: null,
@@ -1753,6 +1757,7 @@ function onArmConfigChanged() {
     renderArmConfig();
     renderHomeRobotConfigInputs();
     renderHomeStatus();
+    renderHomeEndEffectors();
     queueRobotConfigSave();
 }
 
@@ -1824,6 +1829,156 @@ function renderHomeStatus() {
     });
 }
 
+// Tile titles per arm side. Dual mode shows one tile per side; single mode
+// shows a single side-free tile.
+const END_EFFECTOR_TILE_LABELS = {
+    left_arm: "End Effector Configuration - Left",
+    right_arm: "End Effector Configuration - Right",
+    single_arm: "End Effector Configuration",
+};
+
+const GRIPPER_MODELS = ["Flexiv-GN01", "Robotiq-2F-85", "Robotiq-Hand-E"];
+
+function defaultEndEffectorConfig() {
+    return {
+        leader: "none", // "none" | "digital_input"
+        leaderChannel: 0, // DI[0]..DI[15]
+        leaderActivatingState: "high", // "high" | "low" (digital input)
+        follower: "none", // "none" | "digital_output" | "gripper"
+        followerChannel: 0, // DO[0]..DO[15]
+        followerActivatedState: "high", // "high" | "low" (digital output)
+        gripperModel: GRIPPER_MODELS[0],
+        gripperActivatedState: "close", // "close" | "open" (gripper)
+    };
+}
+
+function getEndEffectorConfig(side) {
+    if (!state.endEffectorConfig[side]) {
+        state.endEffectorConfig[side] = defaultEndEffectorConfig();
+    }
+    return state.endEffectorConfig[side];
+}
+
+// Build the 16 DI/DO channel <option>s, marking the current selection.
+function channelOptionsHtml(prefix, selected) {
+    let html = "";
+    for (let i = 0; i < 16; i += 1) {
+        html += `<option value="${i}"${i === selected ? " selected" : ""}>${prefix}[${i}]</option>`;
+    }
+    return html;
+}
+
+// Build a labelled state dropdown (e.g. Activating/Activated state). `options`
+// is a list of [value, label] pairs; `selected` marks the current value.
+function stateSelectHtml(title, field, options, selected) {
+    const optionsHtml = options
+        .map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`)
+        .join("");
+    return `<label class="robot-input-group">
+                    <span>${title}</span>
+                    <select data-field="${field}">${optionsHtml}</select>
+                </label>`;
+}
+
+function renderHomeEndEffectors() {
+    if (!state.summary) {
+        return;
+    }
+    const container = byId("home-end-effectors");
+    if (!container) {
+        return;
+    }
+    container.innerHTML = "";
+    getActiveSides().forEach((side) => {
+        const cfg = getEndEffectorConfig(side);
+
+        // The leader's secondary dropdowns only appear for a digital input device.
+        const leaderExtra =
+            cfg.leader === "digital_input"
+                ? `<label class="robot-input-group">
+                    <span>Digital input channel</span>
+                    <select data-field="leaderChannel">${channelOptionsHtml("DI", cfg.leaderChannel)}</select>
+                </label>${stateSelectHtml(
+                    "Activating state",
+                    "leaderActivatingState",
+                    [["high", "Port high"], ["low", "Port low"]],
+                    cfg.leaderActivatingState,
+                )}`
+                : "";
+
+        // The follower's secondary dropdowns depend on the device kind.
+        let followerExtra = "";
+        if (cfg.follower === "digital_output") {
+            followerExtra = `<label class="robot-input-group">
+                    <span>Digital output channel</span>
+                    <select data-field="followerChannel">${channelOptionsHtml("DO", cfg.followerChannel)}</select>
+                </label>${stateSelectHtml(
+                "Activated state",
+                "followerActivatedState",
+                [["high", "Port high"], ["low", "Port low"]],
+                cfg.followerActivatedState,
+            )}`;
+        } else if (cfg.follower === "gripper") {
+            const options = GRIPPER_MODELS.map(
+                (model) =>
+                    `<option value="${model}"${model === cfg.gripperModel ? " selected" : ""}>${model}</option>`,
+            ).join("");
+            followerExtra = `<label class="robot-input-group">
+                    <span>Gripper model</span>
+                    <select data-field="gripperModel">${options}</select>
+                </label>${stateSelectHtml(
+                "Activated state",
+                "gripperActivatedState",
+                [["close", "Close"], ["open", "Open"]],
+                cfg.gripperActivatedState,
+            )}`;
+        }
+
+        const tile = document.createElement("section");
+        tile.className = "panel end-effector-tile";
+        tile.innerHTML = `
+            <div class="panel-header">
+                <h2>${END_EFFECTOR_TILE_LABELS[side] || "End Effector Configuration"}</h2>
+            </div>
+            <div class="end-effector-row">
+                <label class="robot-input-group">
+                    <span>Leader end effector</span>
+                    <select data-field="leader">
+                        <option value="none"${cfg.leader === "none" ? " selected" : ""}>None</option>
+                        <option value="digital_input"${cfg.leader === "digital_input" ? " selected" : ""}>Digital input device</option>
+                    </select>
+                </label>
+                ${leaderExtra}
+            </div>
+            <div class="end-effector-row">
+                <label class="robot-input-group">
+                    <span>Follower end effector</span>
+                    <select data-field="follower">
+                        <option value="none"${cfg.follower === "none" ? " selected" : ""}>None</option>
+                        <option value="digital_output"${cfg.follower === "digital_output" ? " selected" : ""}>Digital output device</option>
+                        <option value="gripper"${cfg.follower === "gripper" ? " selected" : ""}>Gripper</option>
+                    </select>
+                </label>
+                ${followerExtra}
+            </div>
+        `;
+
+        tile.querySelectorAll("select[data-field]").forEach((select) => {
+            select.onchange = () => {
+                const field = select.dataset.field;
+                cfg[field] =
+                    field === "leaderChannel" || field === "followerChannel"
+                        ? Number(select.value)
+                        : select.value;
+                // Re-render so the dependent secondary dropdowns appear/hide.
+                renderHomeEndEffectors();
+            };
+        });
+
+        container.appendChild(tile);
+    });
+}
+
 function renderHome() {
     if (!state.summary) {
         return;
@@ -1831,6 +1986,7 @@ function renderHome() {
     renderArmConfig();
     renderHomeRobotConfigInputs();
     renderHomeStatus();
+    renderHomeEndEffectors();
     renderHomeStorage();
 }
 

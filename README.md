@@ -39,7 +39,7 @@ echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
 
 ## Hardware Requirements
 
-1. A dual-arm teleoperation setup eligible for high-transparency teleoperation.
+1. A single- or dual-arm teleoperation setup eligible for high-transparency teleoperation.
 2. Supported cameras connected to your computer: 1 egocentric and 2 in-hand (left and right wrist), with the two in-hand cameras mounted on the follower robots.
 
 ### Supported robots

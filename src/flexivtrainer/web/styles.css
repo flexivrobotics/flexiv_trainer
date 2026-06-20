@@ -277,6 +277,38 @@ button:disabled {
     box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
 }
 
+.end-effector-grid {
+    display: grid;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.end-effector-grid+.panel-grid {
+    margin-top: 1rem;
+}
+
+.end-effector-tile {
+    padding: 1.1rem 1.2rem;
+}
+
+.end-effector-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+}
+
+.end-effector-row+.end-effector-row {
+    margin-top: 0.8rem;
+}
+
+/* Keep each dropdown at a constant one-third width (accounting for the two
+   0.8rem gaps) so the primary Leader/Follower menus stay the same length
+   whether or not the secondary dropdowns are shown. */
+.end-effector-row .robot-input-group {
+    flex: 0 0 calc((100% - 1.6rem) / 3);
+    min-width: 0;
+}
+
 .camera-control-stack {
     gap: 0.85rem;
 }
