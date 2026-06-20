@@ -35,6 +35,9 @@ class FakeGripper:
     def Enable(self, name: str) -> None:
         self.enabled_name = name
 
+    def Init(self) -> None:
+        self.init_count = getattr(self, "init_count", 0) + 1
+
     def params(self) -> SimpleNamespace:
         return SimpleNamespace(
             name="fake",
@@ -160,10 +163,9 @@ def test_digital_output_only_writes_on_change() -> None:
     assert len(writes) == 1
 
 
-def test_prepare_enables_gripper_and_switches_tool(monkeypatch) -> None:
-    # The gripper must be enabled and the tool switched (for gravity
-    # compensation) during prepare() -- while the robot is IDLE -- not lazily
-    # during the engaged mirror loop.
+def test_prepare_enables_switches_and_inits_gripper(monkeypatch) -> None:
+    # Setup must enable the gripper, switch the tool (for gravity compensation),
+    # and trigger the gripper's own Init() -- all while the robot is IDLE.
     import flexivtrainer.teleop.end_effector as ee
 
     tools: list[FakeTool] = []
@@ -186,6 +188,7 @@ def test_prepare_enables_gripper_and_switches_tool(monkeypatch) -> None:
     ctl.initialize_grippers()
     assert ctl._grippers[0].enabled_name == "Flexiv-GN01"
     assert tools[-1].switched_to == "Flexiv-GN01"
+    assert getattr(ctl._grippers[0], "init_count", 0) == 1
 
 
 def test_gripper_requires_prepare_before_moving(monkeypatch) -> None:

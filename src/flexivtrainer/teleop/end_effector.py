@@ -285,10 +285,12 @@ class EndEffectorController:
         return velocity, force
 
     def _setup_gripper(self, index: int, cfg: EndEffectorSideConfig) -> None:
-        # Enable the gripper as a device and switch the follower's tool so its
-        # mass is accounted for in gravity compensation/TCP. IDLE-mode only.
-        # Idempotent: a re-Init keeps the already-enabled gripper (Enable() would
-        # otherwise raise) and just refreshes the tool switch and params.
+        # Enable the gripper as a device, switch the follower's tool so its mass
+        # is accounted for in gravity compensation/TCP (IDLE-mode only), then
+        # trigger the gripper's own initialization. Idempotent: a re-Init keeps
+        # the already-enabled gripper (Enable() would otherwise raise) and just
+        # refreshes the tool switch, re-triggers Init(), and refreshes params.
+        # The caller (UI) waits for the gripper to physically finish init.
         if Gripper is None:
             raise RuntimeError("flexivrdk is not available; cannot control gripper")
         _, follower = self._controller.instances(index)
@@ -298,6 +300,7 @@ class EndEffectorController:
             self._grippers[index] = gripper
         if Tool is not None:
             Tool(follower).Switch(cfg.gripper_model)
+        self._grippers[index].Init()
         self._gripper_params[index] = self._grippers[index].params()
 
     def gripper_snapshot(self) -> dict[str, Any]:

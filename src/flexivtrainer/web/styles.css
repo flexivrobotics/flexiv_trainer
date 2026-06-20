@@ -323,6 +323,13 @@ button:disabled {
     width: 100%;
 }
 
+.gripper-init.button--busy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+}
+
 .gripper-control-block {
     display: grid;
     gap: 0.6rem;

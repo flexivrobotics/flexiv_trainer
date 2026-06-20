@@ -2998,6 +2998,10 @@ const GRIPPER_SIDE_LABELS = {
     single_arm: "",
 };
 
+// After Init triggers gripper.Init() on the backend, wait this long for the
+// gripper hardware to finish initializing before unblocking manual control.
+const GRIPPER_INIT_WAIT_MS = 10000;
+
 function gripperConfiguredSides() {
     const eec = state.summary?.robot_config?.end_effector_config || {};
     return getActiveSides().filter((side) => eec[side]?.follower === "gripper");
@@ -3167,7 +3171,8 @@ function updateGripperControlBlock(side, params, teleop) {
     const store = state.gripperControl[side] || {};
     const started = !!teleop.started;
     const engaged = !!teleop.engaged;
-    const busy = !!store.busy;
+    const initializing = !!state.ui.gripperInitBusy;
+    const busy = !!store.busy || initializing;
 
     // Derive the current open/closed state from the measured width so the single
     // button always offers the opposite action.
@@ -3189,7 +3194,9 @@ function updateGripperControlBlock(side, params, teleop) {
     button.disabled = !ready;
 
     let message = "";
-    if (!params) {
+    if (initializing) {
+        message = "Initializing gripper …";
+    } else if (!params) {
         message = "Initialize the gripper to enable manual control.";
     } else if (engaged) {
         message = "Disengage the robots to control the gripper manually.";
@@ -3212,10 +3219,13 @@ function updateGripperInitButton(teleop) {
 
     // Init must run after Connect but before Start (Tool.Switch is IDLE-only).
     button.disabled = !initialized || started || engaged || busy;
+    button.classList.toggle("button--busy", busy);
     setMarkupIfChanged(
         button,
         `gripper-init:${busy ? "busy" : "idle"}`,
-        busy ? "Initializing …" : "Init",
+        busy
+            ? '<span class="button-spinner" aria-hidden="true"></span><span>Initializing …</span>'
+            : "Init",
     );
     button.title = !initialized
         ? "Connect teleoperation first"
@@ -3239,6 +3249,12 @@ async function initGrippers() {
         // the user touches the inputs.
         await refreshTeleopStatus();
         await Promise.all(gripperConfiguredSides().map((side) => sendGripperParams(side)));
+        // The backend triggered gripper.Init(); wait for it to physically finish
+        // before unblocking manual control (busy stays true, so the buttons stay
+        // disabled and the Init button keeps spinning throughout).
+        await new Promise((resolve) =>
+            window.setTimeout(resolve, GRIPPER_INIT_WAIT_MS),
+        );
     } catch (error) {
         showToast(error.message, true);
     } finally {
