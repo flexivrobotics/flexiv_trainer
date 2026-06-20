@@ -105,10 +105,27 @@ class TrainingConfig(BaseModel):
     save_frequency: int = 5_000
 
 
+class EndEffectorSideConfig(BaseModel):
+    """End effector selections for one arm side (leader + follower devices)."""
+
+    leader: Literal["none", "digital_input"] = "none"
+    leader_channel: int = Field(default=0, ge=0, le=15)
+    leader_activating_state: Literal["high", "low"] = "high"
+    follower: Literal["none", "digital_output", "gripper"] = "none"
+    follower_channel: int = Field(default=0, ge=0, le=15)
+    follower_activated_state: Literal["high", "low"] = "high"
+    gripper_model: str = "Flexiv-GN01"
+    gripper_activated_state: Literal["close", "open"] = "close"
+
+
 class RobotSerialConfig(BaseModel):
     arm_mode: Literal["single", "dual"] = "dual"
     leader_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
     follower_robot_serials: list[str] = Field(default_factory=lambda: ["", ""])
+    # Per-side end effector selections, keyed by arm side ("left_arm",
+    # "right_arm", "single_arm"). Cached alongside the serials so selections
+    # survive reloads.
+    end_effector_config: dict[str, EndEffectorSideConfig] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -144,6 +161,9 @@ class RobotSerialConfig(BaseModel):
             arm_mode=self.arm_mode,
             leader_robot_serials=self._normalize_serials(self.leader_robot_serials),
             follower_robot_serials=self._normalize_serials(self.follower_robot_serials),
+            # Preserve selections for every side (even ones not currently active),
+            # so toggling between single/dual keeps cached choices.
+            end_effector_config=dict(self.end_effector_config),
         )
 
     @classmethod

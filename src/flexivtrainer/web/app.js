@@ -15,10 +15,6 @@
 const state = {
     activeView: "home",
     summary: null,
-    // Per-side end effector selections, keyed by arm side ("left_arm",
-    // "right_arm", "single_arm"). Front-end only for now; not yet persisted to
-    // the backend (wired up in a later step).
-    endEffectorConfig: {},
     teleopStatus: null,
     cameraConfig: null,
     trainingPolicies: null,
@@ -1842,21 +1838,28 @@ const GRIPPER_MODELS = ["Flexiv-GN01", "Robotiq-2F-85", "Robotiq-Hand-E"];
 function defaultEndEffectorConfig() {
     return {
         leader: "none", // "none" | "digital_input"
-        leaderChannel: 0, // DI[0]..DI[15]
-        leaderActivatingState: "high", // "high" | "low" (digital input)
+        leader_channel: 0, // DI[0]..DI[15]
+        leader_activating_state: "high", // "high" | "low" (digital input)
         follower: "none", // "none" | "digital_output" | "gripper"
-        followerChannel: 0, // DO[0]..DO[15]
-        followerActivatedState: "high", // "high" | "low" (digital output)
-        gripperModel: GRIPPER_MODELS[0],
-        gripperActivatedState: "close", // "close" | "open" (gripper)
+        follower_channel: 0, // DO[0]..DO[15]
+        follower_activated_state: "high", // "high" | "low" (digital output)
+        gripper_model: GRIPPER_MODELS[0],
+        gripper_activated_state: "close", // "close" | "open" (gripper)
     };
 }
 
+// Selections live inside robot_config.end_effector_config so they ride the same
+// PUT /system/robot-config save path as the serial numbers and are cached in
+// robot_serials.json across reloads. Lazily seed defaults per side.
 function getEndEffectorConfig(side) {
-    if (!state.endEffectorConfig[side]) {
-        state.endEffectorConfig[side] = defaultEndEffectorConfig();
+    const robotConfig = state.summary.robot_config || (state.summary.robot_config = {});
+    if (!robotConfig.end_effector_config) {
+        robotConfig.end_effector_config = {};
     }
-    return state.endEffectorConfig[side];
+    if (!robotConfig.end_effector_config[side]) {
+        robotConfig.end_effector_config[side] = defaultEndEffectorConfig();
+    }
+    return robotConfig.end_effector_config[side];
 }
 
 // Build the 16 DI/DO channel <option>s, marking the current selection.
@@ -1897,12 +1900,12 @@ function renderHomeEndEffectors() {
             cfg.leader === "digital_input"
                 ? `<label class="robot-input-group">
                     <span>Digital input channel</span>
-                    <select data-field="leaderChannel">${channelOptionsHtml("DI", cfg.leaderChannel)}</select>
+                    <select data-field="leader_channel">${channelOptionsHtml("DI", cfg.leader_channel)}</select>
                 </label>${stateSelectHtml(
                     "Activating state",
-                    "leaderActivatingState",
+                    "leader_activating_state",
                     [["high", "Port high"], ["low", "Port low"]],
-                    cfg.leaderActivatingState,
+                    cfg.leader_activating_state,
                 )}`
                 : "";
 
@@ -1911,26 +1914,26 @@ function renderHomeEndEffectors() {
         if (cfg.follower === "digital_output") {
             followerExtra = `<label class="robot-input-group">
                     <span>Digital output channel</span>
-                    <select data-field="followerChannel">${channelOptionsHtml("DO", cfg.followerChannel)}</select>
+                    <select data-field="follower_channel">${channelOptionsHtml("DO", cfg.follower_channel)}</select>
                 </label>${stateSelectHtml(
                 "Activated state",
-                "followerActivatedState",
+                "follower_activated_state",
                 [["high", "Port high"], ["low", "Port low"]],
-                cfg.followerActivatedState,
+                cfg.follower_activated_state,
             )}`;
         } else if (cfg.follower === "gripper") {
             const options = GRIPPER_MODELS.map(
                 (model) =>
-                    `<option value="${model}"${model === cfg.gripperModel ? " selected" : ""}>${model}</option>`,
+                    `<option value="${model}"${model === cfg.gripper_model ? " selected" : ""}>${model}</option>`,
             ).join("");
             followerExtra = `<label class="robot-input-group">
                     <span>Gripper model</span>
-                    <select data-field="gripperModel">${options}</select>
+                    <select data-field="gripper_model">${options}</select>
                 </label>${stateSelectHtml(
                 "Activated state",
-                "gripperActivatedState",
+                "gripper_activated_state",
                 [["close", "Close"], ["open", "Open"]],
-                cfg.gripperActivatedState,
+                cfg.gripper_activated_state,
             )}`;
         }
 
@@ -1966,12 +1969,18 @@ function renderHomeEndEffectors() {
         tile.querySelectorAll("select[data-field]").forEach((select) => {
             select.onchange = () => {
                 const field = select.dataset.field;
-                cfg[field] =
-                    field === "leaderChannel" || field === "followerChannel"
+                // Look the config up fresh: a completed save replaces
+                // state.summary.robot_config, orphaning the `cfg` captured above,
+                // so mutating that stale reference would silently no-op.
+                const current = getEndEffectorConfig(side);
+                current[field] =
+                    field === "leader_channel" || field === "follower_channel"
                         ? Number(select.value)
                         : select.value;
-                // Re-render so the dependent secondary dropdowns appear/hide.
+                // Re-render so the dependent secondary dropdowns appear/hide,
+                // then persist alongside the serial numbers.
                 renderHomeEndEffectors();
+                queueRobotConfigSave();
             };
         });
 
