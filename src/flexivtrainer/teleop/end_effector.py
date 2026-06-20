@@ -69,10 +69,9 @@ class EndEffectorController:
     # The poll rate only needs to track button presses, so a modest rate keeps
     # the (blocking) digital-output / gripper writes from saturating the bus.
     POLL_HZ = 30.0
-    # Defaults used when commanding a gripper, clamped into each gripper's own
-    # reported parameter range before use.
-    GRIPPER_VELOCITY = 0.2  # [m/s]
-    GRIPPER_FORCE = 20.0  # [N]
+    # Fraction of a gripper's max force used as the default grasping force until
+    # the Gripper Control panel sets a value (matches the panel's own default).
+    DEFAULT_FORCE_FRACTION = 0.25
 
     def __init__(
         self,
@@ -95,6 +94,10 @@ class EndEffectorController:
         # (blocking) command on an actual state change.
         self._grippers: dict[int, Any] = {}
         self._gripper_params: dict[int, Any] = {}
+        # User-set (velocity, force) per pair index from the Gripper Control
+        # panel, applied to BOTH manual open/close and the engaged mirror loop.
+        # Falls back to the GRIPPER_* defaults until the panel sets a value.
+        self._command_params: dict[int, tuple[float, float]] = {}
         self._last_do: dict[int, bool] = {}
         self._last_gripper_target: dict[int, str] = {}
         self._errors: dict[int, str] = {}
@@ -178,6 +181,7 @@ class EndEffectorController:
         self.stop()
         self._grippers.clear()
         self._gripper_params.clear()
+        self._command_params.clear()
         self._last_do.clear()
         self._last_gripper_target.clear()
 
@@ -247,10 +251,38 @@ class EndEffectorController:
             )
         params = self._gripper_params[index]
         width = params.min_width if target == "close" else params.max_width
-        velocity = _clamp(self.GRIPPER_VELOCITY, params.min_vel, params.max_vel)
-        force = _clamp(self.GRIPPER_FORCE, params.min_force, params.max_force)
+        # Use the panel-set velocity/force (shared with manual control), falling
+        # back to the controller defaults until the panel sets them.
+        velocity, force = self._move_params_for(index)
         gripper.Move(width, velocity, force)
         self._last_gripper_target[index] = target
+
+    def _move_params_for(self, index: int) -> tuple[float, float]:
+        params = self._gripper_params[index]
+        # Until the panel sets a value, default to the gripper's own max velocity
+        # (Move() rejects 0) and a fraction of its max force.
+        velocity, force = self._command_params.get(
+            index, (params.max_vel, params.max_force * self.DEFAULT_FORCE_FRACTION)
+        )
+        velocity = _clamp(velocity, params.min_vel, params.max_vel)
+        force = _clamp(force, params.min_force, params.max_force)
+        return velocity, force
+
+    def set_command_params(
+        self, side: str, velocity: float, force: float
+    ) -> tuple[float, float]:
+        """Store the (velocity, force) the panel set for this side's gripper.
+
+        Applied to both manual open/close and the engaged mirror loop. Clamped
+        into the gripper's range when known. Returns the stored values.
+        """
+        index = self._index_for_side(side)
+        params = self._gripper_params.get(index)
+        if params is not None:
+            velocity = _clamp(velocity, params.min_vel, params.max_vel)
+            force = _clamp(force, params.min_force, params.max_force)
+        self._command_params[index] = (velocity, force)
+        return velocity, force
 
     def _setup_gripper(self, index: int, cfg: EndEffectorSideConfig) -> None:
         # Enable the gripper as a device and switch the follower's tool so its
@@ -316,9 +348,9 @@ class EndEffectorController:
         params = self._gripper_params.get(index)
         if gripper is None or params is None:
             raise RuntimeError(f"Gripper for side {side} is not enabled")
+        # Persist the requested velocity/force so the mirror loop reuses them too.
+        velocity, force = self.set_command_params(side, velocity, force)
         width = params.max_width if action == "open" else params.min_width
-        velocity = _clamp(velocity, params.min_vel, params.max_vel)
-        force = _clamp(force, params.min_force, params.max_force)
         gripper.Move(width, velocity, force)
         # Keep the mirror's edge-detection consistent with the manual command.
         self._last_gripper_target[index] = action

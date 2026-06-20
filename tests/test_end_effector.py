@@ -239,9 +239,10 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
     tdk._leader_ports[0] = True
     ctl._tick(0, ctl._configs[0])
     assert gripper.moves[-1][0] == 0.0  # min_width (close)
-    # Velocity/force are the controller defaults, clamped into the params range.
-    assert gripper.moves[-1][1] == EndEffectorController.GRIPPER_VELOCITY
-    assert gripper.moves[-1][2] == EndEffectorController.GRIPPER_FORCE
+    # No panel value set yet -> defaults derived from the gripper's own params:
+    # max velocity, and DEFAULT_FORCE_FRACTION of max force.
+    assert gripper.moves[-1][1] == 0.5  # max_vel
+    assert gripper.moves[-1][2] == 50.0 * EndEffectorController.DEFAULT_FORCE_FRACTION
 
     # No state change -> no extra move.
     moves_before = len(gripper.moves)
@@ -312,6 +313,37 @@ def test_command_gripper_moves_and_clamps(monkeypatch) -> None:
     # Close, with out-of-range inputs clamped to the params range.
     ctl.command_gripper("single_arm", "close", velocity=99.0, force=99.0)
     assert gripper.moves[-1] == (0.0, 0.5, 50.0)  # min_width, clamped vel/force
+
+
+def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:
+    # The panel's velocity/force (set_command_params) must drive the engaged
+    # mirror loop too, not just manual open/close.
+    import flexivtrainer.teleop.end_effector as ee
+
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+
+    follower = FakeFollower()
+    tdk = FakeTDK(follower, [False] * 18)
+    # Gripper mirrored from a leader DI.
+    cfg = EndEffectorSideConfig(
+        leader="digital_input",
+        leader_channel=0,
+        follower="gripper",
+        gripper_activated_state="close",
+    )
+    ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
+    ctl.initialize_grippers()
+    gripper = ctl._grippers[0]
+
+    # Panel sets velocity/force (clamped into [0.01,0.5] / [1,50]).
+    stored = ctl.set_command_params("single_arm", velocity=0.3, force=12.0)
+    assert stored == (0.3, 12.0)
+
+    # Mirror tick: leader triggered -> close, using the panel velocity/force.
+    tdk._leader_ports[0] = True
+    ctl._tick(0, ctl._configs[0])
+    assert gripper.moves[-1] == (0.0, 0.3, 12.0)  # min_width, panel vel/force
 
 
 def test_command_gripper_rejects_unknown_side_and_action(monkeypatch) -> None:

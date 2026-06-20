@@ -404,6 +404,26 @@ class TeleopService:
         except Exception as exc:  # pragma: no cover - hardware specific
             return {"ok": False, "error": describe_exception(exc)}
 
+    def set_gripper_params(
+        self, side: str, velocity: float, force: float
+    ) -> dict[str, Any]:
+        # Store the panel's velocity/force for this side; used by both manual
+        # control and the engaged mirror loop. Allowed any time after init
+        # (including while engaged, to tune the mirror live) -- it only records
+        # values, it does not move the gripper.
+        if self._end_effectors is None:
+            return {
+                "ok": False,
+                "error": "Initialize the gripper before setting its parameters",
+            }
+        try:
+            velocity, force = self._end_effectors.set_command_params(
+                side, velocity, force
+            )
+            return {"ok": True, "velocity": velocity, "force": force}
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
+
     def shutdown(self) -> None:
         if self._controller is None:
             return

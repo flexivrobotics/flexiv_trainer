@@ -3127,7 +3127,27 @@ function bindGripperInput(input, side, field, min, max, decimals) {
         const clamped = clampNumber(parseFloat(input.value), min, max);
         (state.gripperControl[side] ||= {})[field] = clamped;
         input.value = roundForInput(clamped, decimals);
+        // Push to the backend so both manual control and the engaged mirror loop
+        // use the new value.
+        sendGripperParams(side);
     };
+}
+
+// Persist this side's velocity/force on the backend (shared by manual open/close
+// and the engaged mirror loop). Best-effort; surfaced on failure.
+async function sendGripperParams(side) {
+    const store = state.gripperControl[side] || {};
+    if (store.velocity == null || store.force == null) {
+        return;
+    }
+    try {
+        await api(`/teleop/gripper/${side}/params`, {
+            method: "POST",
+            body: JSON.stringify({ velocity: store.velocity, force: store.force }),
+        });
+    } catch (error) {
+        showToast(error.message, true);
+    }
 }
 
 function clampNumber(value, min, max) {
@@ -3214,7 +3234,11 @@ async function initGrippers() {
     renderTeleop();
     try {
         await api("/teleop/gripper/init", { method: "POST" });
+        // refreshTeleopStatus() rebuilds the panel and seeds the default
+        // velocity/force; push those so the mirror loop uses them even before
+        // the user touches the inputs.
         await refreshTeleopStatus();
+        await Promise.all(gripperConfiguredSides().map((side) => sendGripperParams(side)));
     } catch (error) {
         showToast(error.message, true);
     } finally {

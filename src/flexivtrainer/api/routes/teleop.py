@@ -248,6 +248,23 @@ def init_grippers(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dic
     return result
 
 
+@router.post("/gripper/{side}/params")
+def set_gripper_params(
+    side: str,
+    request: GripperCommandRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    # Declared before /gripper/{side}/{action} so "params" isn't matched as an
+    # action. Records the panel's velocity/force for manual + mirror control.
+    result = runtime.teleop.set_gripper_params(side, request.velocity, request.force)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str(result.get("error") or "Failed to set gripper parameters"),
+        )
+    return result
+
+
 @router.post("/gripper/{side}/{action}")
 def command_gripper(
     side: str,
