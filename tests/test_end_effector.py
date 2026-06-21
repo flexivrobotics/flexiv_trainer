@@ -18,12 +18,20 @@ from flexivtrainer.config import EndEffectorSideConfig
 from flexivtrainer.teleop.end_effector import EndEffectorController
 
 
+class FakeMode:
+    IDLE = "IDLE"
+
+
 class FakeFollower:
-    def __init__(self) -> None:
+    def __init__(self, mode: str = FakeMode.IDLE) -> None:
         self.digital_outputs: dict[int, bool] = {}
+        self._mode = mode
 
     def SetDigitalOutputs(self, outputs: dict[int, bool]) -> None:
         self.digital_outputs.update(outputs)
+
+    def mode(self) -> str:
+        return self._mode
 
 
 class FakeGripper:
@@ -163,9 +171,9 @@ def test_digital_output_only_writes_on_change() -> None:
     assert len(writes) == 1
 
 
-def test_prepare_enables_switches_and_inits_gripper(monkeypatch) -> None:
-    # Setup must enable the gripper, switch the tool (for gravity compensation),
-    # and trigger the gripper's own Init() -- all while the robot is IDLE.
+def test_setup_enables_switches_and_inits_gripper_when_idle(monkeypatch) -> None:
+    # Setup must enable the gripper, switch the tool (for gravity compensation)
+    # while the robot is IDLE, and trigger the gripper's own Init() when asked.
     import flexivtrainer.teleop.end_effector as ee
 
     tools: list[FakeTool] = []
@@ -177,18 +185,49 @@ def test_prepare_enables_switches_and_inits_gripper(monkeypatch) -> None:
 
     monkeypatch.setattr(ee, "Gripper", FakeGripper)
     monkeypatch.setattr(ee, "Tool", _make_tool)
+    monkeypatch.setattr(ee, "Mode", FakeMode)
 
-    follower = FakeFollower()
+    follower = FakeFollower(mode=FakeMode.IDLE)
     tdk = FakeTDK(follower, [False] * 18)
     cfg = EndEffectorSideConfig(
         leader="digital_input", follower="gripper", gripper_model="Flexiv-GN01"
     )
     ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
 
-    ctl.initialize_grippers()
+    ctl._setup_gripper(0, ctl._configs[0], trigger_init=True)
     assert ctl._grippers[0].enabled_name == "Flexiv-GN01"
     assert tools[-1].switched_to == "Flexiv-GN01"
     assert getattr(ctl._grippers[0], "init_count", 0) == 1
+
+
+def test_setup_skips_tool_switch_when_not_idle(monkeypatch) -> None:
+    # Tool.Switch() is IDLE-only; when teleop is running (follower not IDLE) the
+    # switch is skipped so it can't trip a control-mode mismatch, but the gripper
+    # is still enabled and (when asked) initialized.
+    import flexivtrainer.teleop.end_effector as ee
+
+    tools: list[FakeTool] = []
+
+    def _make_tool(robot: object) -> FakeTool:
+        tool = FakeTool(robot)
+        tools.append(tool)
+        return tool
+
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", _make_tool)
+    monkeypatch.setattr(ee, "Mode", FakeMode)
+
+    follower = FakeFollower(mode="RT_CARTESIAN")  # not IDLE
+    tdk = FakeTDK(follower, [False] * 18)
+    cfg = EndEffectorSideConfig(
+        leader="digital_input", follower="gripper", gripper_model="Flexiv-GN01"
+    )
+    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
+
+    ctl._setup_gripper(0, ctl._configs[0], trigger_init=False)
+    assert ctl._grippers[0].enabled_name == "Flexiv-GN01"
+    assert tools == []  # switch skipped: follower not IDLE
+    assert getattr(ctl._grippers[0], "init_count", 0) == 0  # init not requested
 
 
 def test_gripper_requires_prepare_before_moving(monkeypatch) -> None:
@@ -230,7 +269,7 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
         gripper_activated_state="close",
     )
     ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
-    ctl.initialize_grippers()
+    ctl._setup_gripper(0, ctl._configs[0], trigger_init=False)
 
     # Idle: not triggered, activated state "close" -> open (max width).
     ctl._tick(0, ctl._configs[0])
@@ -286,7 +325,7 @@ def test_gripper_snapshot_exposes_params_after_prepare(monkeypatch) -> None:
     assert ctl.gripper_snapshot() == {}
     assert ctl.has_work() is False  # no leader -> no mirror thread work
 
-    ctl.initialize_grippers()
+    ctl._setup_gripper(0, ctl._configs[0], trigger_init=False)
     snap = ctl.gripper_snapshot()
     assert set(snap) == {"single_arm"}
     entry = snap["single_arm"]
@@ -306,7 +345,7 @@ def test_command_gripper_moves_and_clamps(monkeypatch) -> None:
     tdk = FakeTDK(follower, [False] * 18)
     cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
     ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
-    ctl.initialize_grippers()
+    ctl._setup_gripper(0, ctl._configs[0], trigger_init=False)
     gripper = ctl._grippers[0]
 
     # Open at an in-range velocity/force.
@@ -336,7 +375,7 @@ def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:
         gripper_activated_state="close",
     )
     ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
-    ctl.initialize_grippers()
+    ctl._setup_gripper(0, ctl._configs[0], trigger_init=False)
     gripper = ctl._grippers[0]
 
     # Panel sets velocity/force (clamped into [0.01,0.5] / [1,50]).
@@ -359,7 +398,7 @@ def test_command_gripper_rejects_unknown_side_and_action(monkeypatch) -> None:
     tdk = FakeTDK(follower, [False] * 18)
     cfg = EndEffectorSideConfig(follower="gripper")
     ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
-    ctl.initialize_grippers()
+    ctl._setup_gripper(0, ctl._configs[0], trigger_init=False)
 
     for side, action in [("left_arm", "open"), ("single_arm", "wiggle")]:
         try:

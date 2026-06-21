@@ -319,15 +319,41 @@ button:disabled {
     gap: 0.85rem;
 }
 
-.gripper-init {
+.gripper-start {
     width: 100%;
 }
 
-.gripper-init.button--busy {
+.gripper-start.button--busy {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 0.4rem;
+}
+
+.gripper-init-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.92rem;
+}
+
+.gripper-init-toggle input {
+    flex: 0 0 auto;
+}
+
+.do-control-port {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: rgba(40, 60, 75, 0.85);
+}
+
+.do-control-buttons {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.do-control-buttons button {
+    flex: 1 1 0;
 }
 
 .gripper-control-block {

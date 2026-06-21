@@ -282,10 +282,9 @@ class TeleopService:
             self._started = True
             self._engaged = False
             self._error = None
-            # Keep any controller built by the Gripper Control Init button (with
-            # its enabled grippers) so the mirror loop can use it on engage; only
-            # build a fresh one if none exists yet (e.g. digital-output mirroring
-            # with no gripper init).
+            # Keep any controller built by the Gripper Control Start button (with
+            # its enabled grippers and running mirror thread) so it survives a
+            # teleop (re)start; only build a fresh one if none exists yet.
             self._ensure_end_effectors()
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
@@ -293,8 +292,8 @@ class TeleopService:
 
     def _ensure_end_effectors(self) -> None:
         # Construct the end effector controller for the current config if one is
-        # not already present. Does not enable grippers -- that is the Init
-        # button's job (init_grippers). Safe to call repeatedly.
+        # not already present. Does not enable grippers -- that is the gripper
+        # panel's Start button's job (start_end_effectors). Safe to call repeatedly.
         if self._end_effectors is not None or self._controller is None:
             return
         try:
@@ -306,28 +305,38 @@ class TeleopService:
         except Exception:  # pragma: no cover - hardware specific
             self._end_effectors = None
 
-    def init_grippers(self) -> dict[str, Any]:
-        # Enable + tool-switch + read params for every configured gripper. Run
-        # from the panel's Init button after connect but before Start, while the
-        # follower is IDLE (Tool.Switch() is IDLE-only).
+    def start_end_effectors(self, trigger_init: bool = False) -> dict[str, Any]:
+        # Set up every configured gripper (enable + IDLE-only tool-switch +
+        # optional Init + read params) and start the mirror thread for all
+        # mirrored sides (gripper or digital output). Driven by the End Effector
+        # Control panel's Start button and independent of teleop engage/disengage;
+        # gripper.Move() does not change the arm's control mode, so the mirror
+        # loop coexists with a running teleop loop. Tool.Switch() is skipped
+        # unless the follower is IDLE (the controller guards this internally).
         if self._controller is None:
             return {
                 "ok": False,
-                "error": "Connect teleoperation before initializing grippers",
-            }
-        if self._started:
-            return {
-                "ok": False,
-                "error": "Initialize grippers before starting teleoperation",
+                "error": "Connect teleoperation before starting end effectors",
             }
         self._ensure_end_effectors()
-        if self._end_effectors is None or not self._end_effectors.has_grippers():
-            return {"ok": False, "error": "No grippers configured"}
-        errors = self._end_effectors.initialize_grippers()
+        if self._end_effectors is None or not self._end_effectors.has_end_effectors():
+            return {"ok": False, "error": "No end effectors configured"}
+        errors = self._end_effectors.start(trigger_init)
         snapshot = self._end_effectors.gripper_snapshot()
-        if errors and not snapshot:
+        # Gripper setup can fail; digital-output sides never produce setup errors.
+        if errors and not snapshot and self._end_effectors.has_grippers():
             return {"ok": False, "error": "; ".join(errors.values())}
         return {"ok": True, "gripper": snapshot, "errors": errors}
+
+    def stop_end_effectors(self) -> dict[str, Any]:
+        # Stop the mirror thread and release gripper state (panel's Stop button).
+        if self._end_effectors is None:
+            return {"ok": True}
+        self._end_effectors.stop()
+        return {"ok": True}
+
+    def end_effectors_running(self) -> bool:
+        return self._end_effectors is not None and self._end_effectors.is_running()
 
     def _teardown_end_effectors(self) -> None:
         if self._end_effectors is not None:
@@ -365,13 +374,9 @@ class TeleopService:
                 self._controller.Engage(idx, engaged)
             self._engaged = engaged
             self._error = None
-            # The mirror thread runs only while the pairs are engaged; the
-            # gripper enable/tool switch already happened in start() (IDLE).
-            if self._end_effectors is not None:
-                if engaged:
-                    self._end_effectors.start()
-                else:
-                    self._end_effectors.stop()
+            # Gripper control is independent of engage/disengage now: the mirror
+            # thread is owned by the Gripper Control panel's Start/Stop buttons
+            # and keeps running across engage cycles.
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
@@ -382,24 +387,38 @@ class TeleopService:
             return {}
         return self._end_effectors.gripper_snapshot()
 
+    def _manual_blocked(self, side: str) -> str | None:
+        # Manual control of an effector is only allowed when the mirror thread
+        # does not own this side: a side with a leader trigger is mirrored while
+        # end-effector control is running, and a competing command would fight
+        # the leader-driven one. A side without a leader trigger is never
+        # mirrored, so it stays manually controllable.
+        if self._end_effectors is None:
+            return "Start end effector control before controlling it"
+        if self._end_effectors.is_running() and self._end_effectors.is_mirrored(side):
+            return "Stop end effector control to manually control this side"
+        return None
+
     def command_gripper(
         self, side: str, action: str, velocity: float, force: float
     ) -> dict[str, Any]:
-        # Manual open/close is only allowed while the pairs are NOT engaged:
-        # during engagement the mirror thread owns the gripper, and a competing
-        # blocking Move would fight the leader-driven commands.
-        if self._end_effectors is None:
-            return {
-                "ok": False,
-                "error": "Initialize the gripper before controlling it",
-            }
-        if self._engaged:
-            return {
-                "ok": False,
-                "error": "Disengage the robots before controlling the gripper manually",
-            }
+        blocked = self._manual_blocked(side)
+        if blocked is not None:
+            return {"ok": False, "error": blocked}
         try:
             self._end_effectors.command_gripper(side, action, velocity, force)
+            return {"ok": True}
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
+
+    def command_digital_output(self, side: str, high: bool) -> dict[str, Any]:
+        # Manually drive a digital-output side's configured port high/low, gated
+        # the same way as manual gripper control.
+        blocked = self._manual_blocked(side)
+        if blocked is not None:
+            return {"ok": False, "error": blocked}
+        try:
+            self._end_effectors.command_digital_output(side, high)
             return {"ok": True}
         except Exception as exc:  # pragma: no cover - hardware specific
             return {"ok": False, "error": describe_exception(exc)}

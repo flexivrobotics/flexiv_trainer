@@ -50,6 +50,17 @@ class GripperCommandRequest(BaseModel):
     force: float = Field(gt=0)
 
 
+class StartEndEffectorsRequest(BaseModel):
+    # When True, call Gripper.Init() during start (for grippers that do not
+    # auto-initialize on power-on, e.g. 48V Grav grippers).
+    trigger_init: bool = False
+
+
+class DigitalOutputRequest(BaseModel):
+    # Target level for a manual digital-output write.
+    high: bool
+
+
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
@@ -133,6 +144,7 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
         "teleop": runtime.teleop.snapshot().__dict__,
         "robot_data": runtime.teleop.robot_data_snapshot(),
         "gripper": runtime.teleop.gripper_snapshot(),
+        "end_effectors_running": runtime.teleop.end_effectors_running(),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
@@ -230,21 +242,47 @@ def disengage_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> 
     return result
 
 
-@router.post("/gripper/init")
-def init_grippers(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    result = runtime.teleop.init_grippers()
+@router.post("/end_effector/start")
+def start_end_effectors(
+    request: StartEndEffectorsRequest = StartEndEffectorsRequest(),
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    result = runtime.teleop.start_end_effectors(trigger_init=request.trigger_init)
     if not result.get("ok"):
         raise HTTPException(
             status_code=409,
-            detail=str(result.get("error") or "Gripper initialization failed"),
+            detail=str(result.get("error") or "End effector start failed"),
         )
     if result.get("errors"):
         warn(
-            "Some grippers failed to initialize",
+            "Some grippers failed to start",
             "; ".join(f"{side}={msg}" for side, msg in result["errors"].items()),
         )
     else:
-        ok("Grippers initialized")
+        ok("End effector control started")
+    return result
+
+
+@router.post("/end_effector/stop")
+def stop_end_effectors(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.stop_end_effectors()
+    info("End effector control stopped")
+    return result
+
+
+@router.post("/end_effector/{side}/digital_output")
+def command_digital_output(
+    side: str,
+    request: DigitalOutputRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    result = runtime.teleop.command_digital_output(side, request.high)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str(result.get("error") or "Digital output command failed"),
+        )
+    info(f"Digital output {'high' if request.high else 'low'}", f"side={side}")
     return result
 
 

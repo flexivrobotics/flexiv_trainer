@@ -117,8 +117,10 @@ const state = {
         // only rebuilt when the set of gripper sides or their params change, so
         // velocity/force inputs aren't clobbered on every status poll.
         gripperPanelSignature: null,
-        // True while the Gripper Control Init request is in flight.
-        gripperInitBusy: false,
+        // True while a Gripper Control Start/Stop request is in flight.
+        gripperStartBusy: false,
+        // Whether the "Trigger gripper initialization" checkbox is checked.
+        gripperTriggerInit: false,
         serviceResetBusy: {
             teleop_service: false,
             cameras: false,
@@ -2987,24 +2989,44 @@ function updateTeleopControlButtons(teleopStatus) {
 }
 
 // The Gripper Control panel appears when any active arm has a gripper selected
-// as its follower end effector. An Init button at the top enables every gripper,
-// switches its tool, and reads its params (must run after Connect but before
-// Start, while the follower is IDLE). Each gripper side then gets a unified
-// Open/Close button plus velocity/force inputs; Open/Close is gated to NOT
-// engaged (the mirror loop owns the gripper while engaged).
+// as its follower end effector. A "Trigger gripper initialization" checkbox and
+// a Start/Stop button at the top own the gripper lifecycle, independent of
+// teleop engage/disengage: Start enables every gripper, switches its tool (only
+// while the follower is IDLE), optionally calls Gripper.Init(), reads params,
+// and runs the leader-mirror thread; Stop tears it all down. Each gripper side
+// then gets a unified Open/Close button plus velocity/force inputs; manual
+// Open/Close is gated to when gripper control is NOT running (the mirror loop
+// owns mirrored sides while running).
 const GRIPPER_SIDE_LABELS = {
     left_arm: "Left",
     right_arm: "Right",
     single_arm: "",
 };
 
-// After Init triggers gripper.Init() on the backend, wait this long for the
-// gripper hardware to finish initializing before unblocking manual control.
+// After Start triggers gripper.Init() on the backend, wait this long for the
+// gripper hardware to finish initializing before the panel settles.
 const GRIPPER_INIT_WAIT_MS = 10000;
 
-function gripperConfiguredSides() {
+// Sides the End Effector Control panel can drive: gripper or digital output.
+function endEffectorConfiguredSides() {
     const eec = state.summary?.robot_config?.end_effector_config || {};
-    return getActiveSides().filter((side) => eec[side]?.follower === "gripper");
+    return getActiveSides().filter((side) =>
+        ["gripper", "digital_output"].includes(eec[side]?.follower),
+    );
+}
+
+function endEffectorFollower(side) {
+    return state.summary?.robot_config?.end_effector_config?.[side]?.follower;
+}
+
+function gripperConfiguredSides() {
+    return endEffectorConfiguredSides().filter(
+        (side) => endEffectorFollower(side) === "gripper",
+    );
+}
+
+function anyGripperConfigured() {
+    return gripperConfiguredSides().length > 0;
 }
 
 function roundForInput(value, decimals) {
@@ -3018,7 +3040,7 @@ function renderGripperControl(teleopStatus) {
     if (!panel || !content) {
         return;
     }
-    const sides = gripperConfiguredSides();
+    const sides = endEffectorConfiguredSides();
     panel.classList.toggle("hidden", sides.length === 0);
     if (sides.length === 0) {
         state.ui.gripperPanelSignature = null;
@@ -3027,10 +3049,13 @@ function renderGripperControl(teleopStatus) {
 
     const grippers = teleopStatus?.gripper || {};
     // Rebuild the panel structure (and re-seed default inputs) only when the set
-    // of sides or their params availability changes, so typing isn't clobbered
-    // by the ~10Hz status poll.
+    // of sides, their follower type, or their params availability changes, so
+    // typing isn't clobbered by the ~10Hz status poll.
     const signature = sides
-        .map((side) => `${side}:${grippers[side] ? "params" : "none"}`)
+        .map(
+            (side) =>
+                `${side}:${endEffectorFollower(side)}:${grippers[side] ? "params" : "none"}`,
+        )
         .join(",");
     if (state.ui.gripperPanelSignature !== signature) {
         state.ui.gripperPanelSignature = signature;
@@ -3038,27 +3063,53 @@ function renderGripperControl(teleopStatus) {
     }
 
     const teleop = teleopStatus?.teleop || {};
-    updateGripperInitButton(teleop);
-    sides.forEach((side) =>
-        updateGripperControlBlock(side, grippers[side], teleop),
-    );
+    const running = !!teleopStatus?.end_effectors_running;
+    updateGripperStartButton(teleop, running);
+    sides.forEach((side) => {
+        if (endEffectorFollower(side) === "digital_output") {
+            updateDigitalOutputBlock(side, running);
+        } else {
+            updateGripperControlBlock(side, grippers[side], teleop, running);
+        }
+    });
 }
 
 function buildGripperControlPanel(content, sides, grippers) {
     content.innerHTML = "";
 
-    // Panel-level Init button (enables/switches/reads params for all grippers).
-    const initButton = document.createElement("button");
-    initButton.type = "button";
-    initButton.className = "secondary-button gripper-init";
-    initButton.textContent = "Init";
-    initButton.onclick = () => initGrippers();
-    content.appendChild(initButton);
+    // Panel-level controls: a gripper-init checkbox (only when a gripper is
+    // configured) plus a Start/Stop toggle that owns the mirror-thread lifecycle
+    // for all sides (gripper enable/switch/init/params happens on Start).
+    if (anyGripperConfigured()) {
+        const initLabel = document.createElement("label");
+        initLabel.className = "gripper-init-toggle";
+        initLabel.innerHTML = `
+            <input type="checkbox" class="gripper-trigger-init" />
+            <span>Trigger gripper initialization</span>
+        `;
+        const initCheckbox = initLabel.querySelector(".gripper-trigger-init");
+        initCheckbox.checked = !!state.ui.gripperTriggerInit;
+        initCheckbox.onchange = () => {
+            state.ui.gripperTriggerInit = initCheckbox.checked;
+        };
+        content.appendChild(initLabel);
+    }
+
+    const startButton = document.createElement("button");
+    startButton.type = "button";
+    startButton.className = "secondary-button gripper-start";
+    startButton.textContent = "Start";
+    startButton.onclick = () => toggleGrippers();
+    content.appendChild(startButton);
 
     const multiple = sides.length > 1;
     sides.forEach((side) => {
-        const params = grippers[side];
         const label = GRIPPER_SIDE_LABELS[side] ?? "";
+        if (endEffectorFollower(side) === "digital_output") {
+            buildDigitalOutputBlock(content, side, label, multiple);
+            return;
+        }
+        const params = grippers[side];
         const block = document.createElement("div");
         block.className = "gripper-control-block";
         block.dataset.side = side;
@@ -3159,7 +3210,19 @@ function clampNumber(value, min, max) {
     return Math.min(max, Math.max(min, value));
 }
 
-function updateGripperControlBlock(side, params, teleop) {
+// A side is "mirrored" (owned by the running mirror thread) when it has a
+// leader digital-input trigger driving its follower. Such a side can't be
+// manually commanded while gripper control is running.
+function gripperSideIsMirrored(side) {
+    const cfg = state.summary?.robot_config?.end_effector_config?.[side];
+    return (
+        !!cfg &&
+        cfg.leader === "digital_input" &&
+        (cfg.follower === "gripper" || cfg.follower === "digital_output")
+    );
+}
+
+function updateGripperControlBlock(side, params, teleop, running) {
     const block = byId("teleop-gripper-content")?.querySelector(
         `.gripper-control-block[data-side="${side}"]`,
     );
@@ -3169,10 +3232,11 @@ function updateGripperControlBlock(side, params, teleop) {
     const button = block.querySelector(".gripper-toggle");
     const hint = block.querySelector(".gripper-control-hint");
     const store = state.gripperControl[side] || {};
-    const started = !!teleop.started;
-    const engaged = !!teleop.engaged;
-    const initializing = !!state.ui.gripperInitBusy;
-    const busy = !!store.busy || initializing;
+    const starting = !!state.ui.gripperStartBusy;
+    const busy = !!store.busy || starting;
+    // While gripper control runs, the mirror thread owns sides with a leader
+    // trigger; only those are locked out of manual control.
+    const mirrored = running && gripperSideIsMirrored(side);
 
     // Derive the current open/closed state from the measured width so the single
     // button always offers the opposite action.
@@ -3188,18 +3252,18 @@ function updateGripperControlBlock(side, params, teleop) {
         action === "close" ? "Close" : "Open",
     );
 
-    // Manual open/close needs the gripper initialized (params present) and the
-    // robots disengaged; it does not require the teleop loop to be started.
-    const ready = !!params && !engaged && !busy;
+    // Manual open/close needs the gripper started (params present) and this
+    // side not currently mirror-owned.
+    const ready = !!params && !mirrored && !busy;
     button.disabled = !ready;
 
     let message = "";
-    if (initializing) {
-        message = "Initializing gripper …";
+    if (starting) {
+        message = "Starting gripper …";
     } else if (!params) {
-        message = "Initialize the gripper to enable manual control.";
-    } else if (engaged) {
-        message = "Disengage the robots to control the gripper manually.";
+        message = "Start gripper control to enable manual control.";
+    } else if (mirrored) {
+        message = "Stop gripper control to manually control this side.";
     } else if (busy) {
         message = "Working …";
     }
@@ -3207,58 +3271,148 @@ function updateGripperControlBlock(side, params, teleop) {
     hint.classList.toggle("hidden", message === "");
 }
 
-function updateGripperInitButton(teleop) {
-    const button = byId("teleop-gripper-content")?.querySelector(".gripper-init");
+function buildDigitalOutputBlock(content, side, label, multiple) {
+    const cfg = state.summary?.robot_config?.end_effector_config?.[side] || {};
+    const port = cfg.follower_channel ?? 0;
+    const block = document.createElement("div");
+    block.className = "gripper-control-block do-control-block";
+    block.dataset.side = side;
+    block.innerHTML = `
+        ${multiple && label ? `<div class="gripper-control-title">${label}</div>` : ""}
+        <div class="do-control-port">Digital output port DO[${port}]</div>
+        <div class="do-control-buttons">
+            <button class="start-button do-set-high" type="button">Set High</button>
+            <button class="secondary-button do-set-low" type="button">Set Low</button>
+        </div>
+        <p class="gripper-control-hint"></p>
+    `;
+    content.appendChild(block);
+    block.querySelector(".do-set-high").onclick = () =>
+        commandDigitalOutput(side, true);
+    block.querySelector(".do-set-low").onclick = () =>
+        commandDigitalOutput(side, false);
+}
+
+function updateDigitalOutputBlock(side, running) {
+    const block = byId("teleop-gripper-content")?.querySelector(
+        `.do-control-block[data-side="${side}"]`,
+    );
+    if (!block) {
+        return;
+    }
+    const high = block.querySelector(".do-set-high");
+    const low = block.querySelector(".do-set-low");
+    const hint = block.querySelector(".gripper-control-hint");
+    const store = state.gripperControl[side] || {};
+    const starting = !!state.ui.gripperStartBusy;
+    const busy = !!store.busy || starting;
+    // The mirror thread owns a DO side with a leader trigger while running.
+    const mirrored = running && gripperSideIsMirrored(side);
+    const ready = !mirrored && !busy;
+    high.disabled = !ready;
+    low.disabled = !ready;
+
+    let message = "";
+    if (starting) {
+        message = "Starting end effector control …";
+    } else if (mirrored) {
+        message = "Stop end effector control to manually drive this port.";
+    } else if (busy) {
+        message = "Working …";
+    }
+    hint.textContent = message;
+    hint.classList.toggle("hidden", message === "");
+}
+
+async function commandDigitalOutput(side, high) {
+    const store = (state.gripperControl[side] ||= {});
+    if (store.busy) {
+        return;
+    }
+    store.busy = true;
+    renderTeleop();
+    try {
+        await api(`/teleop/end_effector/${side}/digital_output`, {
+            method: "POST",
+            body: JSON.stringify({ high }),
+        });
+        await refreshTeleopStatus();
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        store.busy = false;
+        renderTeleop();
+    }
+}
+
+function updateGripperStartButton(teleop, running) {
+    const button = byId("teleop-gripper-content")?.querySelector(".gripper-start");
+    const checkbox = byId("teleop-gripper-content")?.querySelector(
+        ".gripper-trigger-init",
+    );
     if (!button) {
         return;
     }
     const initialized = !!teleop.initialized;
-    const started = !!teleop.started;
-    const engaged = !!teleop.engaged;
-    const busy = !!state.ui.gripperInitBusy;
+    const busy = !!state.ui.gripperStartBusy;
 
-    // Init must run after Connect but before Start (Tool.Switch is IDLE-only).
-    button.disabled = !initialized || started || engaged || busy;
+    // Gripper control needs a connected controller; otherwise it is independent
+    // of teleop start/engage (the mirror loop coexists with a running loop).
+    button.disabled = (!running && !initialized) || busy;
     button.classList.toggle("button--busy", busy);
+    button.classList.toggle("danger-button", running && !busy);
+    // The init checkbox only applies at Start, so freeze it while running.
+    if (checkbox) {
+        checkbox.disabled = running || busy;
+    }
+    const verb = running ? "Stop" : "Start";
     setMarkupIfChanged(
         button,
-        `gripper-init:${busy ? "busy" : "idle"}`,
+        `gripper-start:${busy ? "busy" : verb}`,
         busy
-            ? '<span class="button-spinner" aria-hidden="true"></span><span>Initializing …</span>'
-            : "Init",
+            ? '<span class="button-spinner" aria-hidden="true"></span><span>Working …</span>'
+            : verb,
     );
-    button.title = !initialized
-        ? "Connect teleoperation first"
-        : started
-          ? "Initialize grippers before starting teleoperation"
-          : engaged
-            ? "Disengage before initializing grippers"
-            : "";
+    button.title = !initialized && !running ? "Connect teleoperation first" : "";
 }
 
-async function initGrippers() {
-    if (state.ui.gripperInitBusy) {
+async function toggleGrippers() {
+    if (state.ui.gripperStartBusy) {
         return;
     }
-    state.ui.gripperInitBusy = true;
+    const running = !!state.teleopStatus?.end_effectors_running;
+    state.ui.gripperStartBusy = true;
     renderTeleop();
     try {
-        await api("/teleop/gripper/init", { method: "POST" });
-        // refreshTeleopStatus() rebuilds the panel and seeds the default
-        // velocity/force; push those so the mirror loop uses them even before
-        // the user touches the inputs.
-        await refreshTeleopStatus();
-        await Promise.all(gripperConfiguredSides().map((side) => sendGripperParams(side)));
-        // The backend triggered gripper.Init(); wait for it to physically finish
-        // before unblocking manual control (busy stays true, so the buttons stay
-        // disabled and the Init button keeps spinning throughout).
-        await new Promise((resolve) =>
-            window.setTimeout(resolve, GRIPPER_INIT_WAIT_MS),
-        );
+        if (running) {
+            await api("/teleop/end_effector/stop", { method: "POST" });
+            await refreshTeleopStatus();
+        } else {
+            await api("/teleop/end_effector/start", {
+                method: "POST",
+                body: JSON.stringify({
+                    trigger_init: !!state.ui.gripperTriggerInit,
+                }),
+            });
+            // refreshTeleopStatus() rebuilds the panel and seeds the default
+            // velocity/force; push those so the mirror loop uses them even
+            // before the user touches the inputs.
+            await refreshTeleopStatus();
+            await Promise.all(
+                gripperConfiguredSides().map((side) => sendGripperParams(side)),
+            );
+            // If init was triggered, give the gripper hardware time to finish
+            // physically initializing before the panel settles.
+            if (state.ui.gripperTriggerInit) {
+                await new Promise((resolve) =>
+                    window.setTimeout(resolve, GRIPPER_INIT_WAIT_MS),
+                );
+            }
+        }
     } catch (error) {
         showToast(error.message, true);
     } finally {
-        state.ui.gripperInitBusy = false;
+        state.ui.gripperStartBusy = false;
         renderTeleop();
     }
 }
