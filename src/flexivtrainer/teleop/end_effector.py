@@ -90,14 +90,14 @@ class EndEffectorController:
         ]
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # Grippers enabled by start() (the panel's Start button) and the
-        # last commands issued, keyed by pair index, so we only issue a
+        # Grippers enabled by initialize_grippers() (the panel's Init button) and
+        # the last commands issued, keyed by pair index, so we only issue a
         # (blocking) command on an actual state change.
         self._grippers: dict[int, Any] = {}
         self._gripper_params: dict[int, Any] = {}
         # User-set (velocity, force) per pair index from the Gripper Control
-        # panel, applied to BOTH manual open/close and the engaged mirror loop.
-        # Falls back to the GRIPPER_* defaults until the panel sets a value.
+        # panel's sliders, applied to the mirror loop's Move() calls. Falls back
+        # to the gripper's own params-derived defaults until a slider sets one.
         self._command_params: dict[int, tuple[float, float]] = {}
         self._last_do: dict[int, bool] = {}
         self._last_gripper_target: dict[int, str] = {}
@@ -122,14 +122,6 @@ class EndEffectorController:
             cfg is not None and cfg.follower == "gripper" for cfg in self._configs
         )
 
-    def has_end_effectors(self) -> bool:
-        # Any configured follower the panel can control (gripper or digital
-        # output), whether or not it is mirrored from a leader trigger.
-        return any(
-            cfg is not None and cfg.follower in {"gripper", "digital_output"}
-            for cfg in self._configs
-        )
-
     def _index_for_side(self, side: str) -> int:
         try:
             return self._sides.index(side)
@@ -139,47 +131,39 @@ class EndEffectorController:
     def is_running(self) -> bool:
         return self._thread is not None
 
-    def is_mirrored(self, side: str) -> bool:
-        # True if this side has a leader trigger driving its follower, i.e. the
-        # mirror thread owns it. A gripper without a leader trigger is enabled
-        # but not mirrored, so it stays available for manual control.
-        index = self._index_for_side(side)
-        return self._should_mirror(self._configs[index])
+    def initialize_grippers(self) -> dict[str, str]:
+        """Enable, tool-switch, init, and read params for every configured gripper.
 
-    def start(self, trigger_init: bool = False) -> dict[str, str]:
-        """Set up every configured gripper, then start the mirror thread.
-
-        Triggered by the End Effector Control panel's Start button. This is the
-        only place grippers are enabled and the follower tool is switched.
-        Digital-output sides need no setup; the thread mirrors them once started.
-        For each configured gripper: Enable() it as a device, Tool.Switch() to
-        account for its mass (only when the follower is in IDLE control mode --
-        the switch is IDLE-only, so it is skipped when teleop is already
-        running), optionally Gripper.Init() when ``trigger_init`` is set, and
-        read its params.
-
-        The mirror thread then runs until stop()/shutdown() regardless of teleop
-        engage state: gripper.Move()/Init() do not change the arm's control mode,
-        so they coexist with a running teleop loop. Returns a per-side map of
-        error messages for grippers that failed to set up (empty on full
-        success).
+        Triggered by the Gripper Control panel's Init button while teleop is NOT
+        started (so the follower is IDLE and Tool.Switch() is valid). For each
+        gripper side: Enable() it as a device, Tool.Switch() to account for its
+        mass, Gripper.Init() to trigger the gripper's own initialization, and
+        read its params. The enabled grippers and their params stay cached across
+        teleop start/stop and are only released by shutdown() (disconnect); a
+        re-Init refreshes them. Returns a per-side map of error messages for
+        grippers that failed to set up (empty on full success).
         """
         errors: dict[str, str] = {}
         for index, cfg in enumerate(self._configs):
             if cfg is None or cfg.follower != "gripper":
                 continue
             try:
-                self._setup_gripper(index, cfg, trigger_init)
+                self._setup_gripper(index, cfg)
                 self._errors.pop(index, None)
             except Exception as exc:
                 message = describe_exception(exc)
                 warn(f"Gripper setup failed for pair {index}", message)
                 self._errors[index] = message
                 errors[self._sides[index]] = message
-        self._start_thread()
         return errors
 
-    def _start_thread(self) -> None:
+    def start(self) -> None:
+        """Start the mirror thread (on teleop Start).
+
+        The thread mirrors every leader-triggered follower (gripper or digital
+        output). Gripper sides that were not initialized are skipped per-tick
+        (the panel surfaces a warning), so a forgotten Init never blocks teleop.
+        """
         if not self.has_work() or self._thread is not None:
             return
         self._stop_event.clear()
@@ -189,24 +173,26 @@ class EndEffectorController:
         self._thread.start()
 
     def stop(self) -> None:
-        """Stop the mirror thread and release all gripper/command state.
+        """Stop the mirror thread (on teleop Stop); keep grippers enabled/cached.
 
-        Triggered by the End Effector Control panel's Stop button. Control is
-        fully torn down here -- it is independent of teleop engage/disengage.
+        The enabled grippers and their params survive a teleop stop/start cycle
+        so the panel's sliders stay populated; they are only released by
+        shutdown() when the controller is disconnected.
         """
         self._stop_event.set()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=2.0)
         self._thread = None
+
+    def shutdown(self) -> None:
+        """Stop the thread and release all gripper/command state (on disconnect)."""
+        self.stop()
         self._grippers.clear()
         self._gripper_params.clear()
         self._command_params.clear()
         self._last_do.clear()
         self._last_gripper_target.clear()
-
-    # Tearing down on teleop Stop is the same full teardown as the panel's Stop.
-    shutdown = stop
 
     def _run(self) -> None:  # pragma: no cover - hardware specific
         period = 1.0 / self.POLL_HZ
@@ -267,15 +253,15 @@ class EndEffectorController:
 
         gripper = self._grippers.get(index)
         if gripper is None:
-            # start() did not enable this gripper (setup
-            # failed or Init was not run); nothing to command.
-            raise RuntimeError(
-                f"Gripper for pair {index} is not enabled; setup may have failed"
-            )
+            # The gripper was never initialized (Init not run, or setup failed),
+            # so there is nothing to command. Skip it silently -- the panel shows
+            # a "not initialized" warning -- so the rest of the mirror loop and
+            # teleop keep running.
+            return
         params = self._gripper_params[index]
         width = params.min_width if target == "close" else params.max_width
-        # Use the panel-set velocity/force (shared with manual control), falling
-        # back to the controller defaults until the panel sets them.
+        # Use the panel slider's velocity/force, falling back to the gripper's
+        # own params-derived defaults until a slider sets them.
         velocity, force = self._move_params_for(index)
         gripper.Move(width, velocity, force)
         self._last_gripper_target[index] = target
@@ -296,8 +282,8 @@ class EndEffectorController:
     ) -> tuple[float, float]:
         """Store the (velocity, force) the panel set for this side's gripper.
 
-        Applied to both manual open/close and the engaged mirror loop. Clamped
-        into the gripper's range when known. Returns the stored values.
+        Used by the mirror loop's Move() calls. Clamped into the gripper's range
+        when known. Returns the stored values.
         """
         index = self._index_for_side(side)
         params = self._gripper_params.get(index)
@@ -321,17 +307,14 @@ class EndEffectorController:
         except Exception:  # pragma: no cover - hardware specific
             return False
 
-    def _setup_gripper(
-        self, index: int, cfg: EndEffectorSideConfig, trigger_init: bool
-    ) -> None:
-        # Enable the gripper as a device and, when the follower is IDLE, switch
-        # its tool so the gripper's mass is accounted for in gravity
-        # compensation/TCP. Tool.Switch() is IDLE-only, so it is skipped when
-        # teleop is already running (a switch then would trip a control-mode
-        # mismatch and stop the teleop loop). Gripper.Init() is triggered only
-        # when ``trigger_init`` is set. Idempotent: a re-Start keeps the
-        # already-enabled gripper (Enable() would otherwise raise) and just
-        # refreshes the switch/init/params.
+    def _setup_gripper(self, index: int, cfg: EndEffectorSideConfig) -> None:
+        # Enable the gripper as a device, switch its tool so the gripper's mass
+        # is accounted for in gravity compensation/TCP, trigger Gripper.Init(),
+        # and read its params. Tool.Switch() is IDLE-only; Init runs while teleop
+        # is not started (the panel gates the button), so the follower is IDLE.
+        # The IDLE check guards against a stray call when the mode can't be
+        # confirmed. Idempotent: a re-Init keeps the already-enabled gripper
+        # (Enable() would otherwise raise) and refreshes the switch/init/params.
         if Gripper is None:
             raise RuntimeError("flexivrdk is not available; cannot control gripper")
         _, follower = self._controller.instances(index)
@@ -341,16 +324,15 @@ class EndEffectorController:
             self._grippers[index] = gripper
         if Tool is not None and self._follower_is_idle(follower):
             Tool(follower).Switch(cfg.gripper_model)
-        if trigger_init:
-            self._grippers[index].Init()
+        self._grippers[index].Init()
         self._gripper_params[index] = self._grippers[index].params()
 
     def gripper_snapshot(self) -> dict[str, Any]:
         """Per-side gripper parameters/state, for sides with an enabled gripper.
 
-        Keyed by arm side; present only once start() has enabled it
-        (i.e. while teleop is running), so the UI can read the valid ranges and
-        defaults straight from the hardware.
+        Keyed by arm side; present only once initialize_grippers() has enabled
+        it, so the UI can read the valid ranges and defaults straight from the
+        hardware. Persists across teleop start/stop until disconnect.
         """
         snapshot: dict[str, Any] = {}
         for index, cfg in enumerate(self._configs):
@@ -377,40 +359,3 @@ class EndEffectorController:
                 pass
             snapshot[self._sides[index]] = entry
         return snapshot
-
-    def command_gripper(
-        self, side: str, action: str, velocity: float, force: float
-    ) -> None:
-        """Manually open/close one side's gripper (used while NOT engaged).
-
-        ``velocity``/``force`` are clamped into the gripper's reported ranges as
-        a safety net; the UI also constrains them. ``action`` is "open"/"close".
-        """
-        if action not in {"open", "close"}:
-            raise ValueError(f"Unsupported gripper action: {action}")
-        index = self._index_for_side(side)
-        gripper = self._grippers.get(index)
-        params = self._gripper_params.get(index)
-        if gripper is None or params is None:
-            raise RuntimeError(f"Gripper for side {side} is not enabled")
-        # Persist the requested velocity/force so the mirror loop reuses them too.
-        velocity, force = self.set_command_params(side, velocity, force)
-        width = params.max_width if action == "open" else params.min_width
-        gripper.Move(width, velocity, force)
-        # Keep the mirror's edge-detection consistent with the manual command.
-        self._last_gripper_target[index] = action
-
-    def command_digital_output(self, side: str, high: bool) -> None:
-        """Manually drive one side's configured digital output port high/low.
-
-        Writes the side's configured ``follower_channel`` (used while the mirror
-        thread is not driving the side). Keeps the mirror's edge-detection state
-        consistent so the next mirror tick re-issues only on an actual change.
-        """
-        index = self._index_for_side(side)
-        cfg = self._configs[index]
-        if cfg is None or cfg.follower != "digital_output":
-            raise RuntimeError(f"Side {side} has no digital output configured")
-        _, follower = self._controller.instances(index)
-        follower.SetDigitalOutputs({cfg.follower_channel: high})
-        self._last_do[index] = high

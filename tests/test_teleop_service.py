@@ -320,7 +320,7 @@ class FakeEngageController(FakeTeleopController):
         return (object(), self.follower)
 
 
-def test_end_effectors_lifecycle_independent_of_engage(tmp_path) -> None:
+def test_mirror_thread_tied_to_teleop_start_stop(tmp_path) -> None:
     from flexivtrainer.config import EndEffectorSideConfig
 
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
@@ -341,52 +341,41 @@ def test_end_effectors_lifecycle_independent_of_engage(tmp_path) -> None:
     service._controller = FakeEngageController()
     service._initialized = True
 
-    # The mirror thread is owned by the End Effector panel's Start/Stop, not by
-    # engage. Starting the teleop loop alone does not run it.
+    # Teleop Start runs the mirror thread; it is independent of engage.
     service.start()
     assert service._end_effectors is not None
-    assert service._end_effectors.is_running() is False
-
-    # Engage/disengage no longer touch the mirror thread.
-    service.set_engaged(True)
-    assert service._end_effectors.is_running() is False
-    service.set_engaged(False)
-    assert service._end_effectors.is_running() is False
-
-    # The panel's Start runs the thread; it keeps running across engage cycles.
-    start_result = service.start_end_effectors()
-    assert start_result["ok"] is True
     assert service._end_effectors.is_running() is True
+
     service.set_engaged(True)
     assert service._end_effectors.is_running() is True
     service.set_engaged(False)
     assert service._end_effectors.is_running() is True
 
-    # The panel's Stop tears the thread down; the controller and teleop persist.
-    service.stop_end_effectors()
+    # Teleop Stop stops the thread but keeps the controller (params cached).
+    service.stop()
     assert service._end_effectors is not None
     assert service._end_effectors.is_running() is False
 
-    # A full teleop Stop tears the controller down entirely.
-    service.start_end_effectors()
-    service.stop()
+    # A re-Start runs the thread again on the same controller.
+    service.start()
+    assert service._end_effectors.is_running() is True
+
+    # Disconnect fully tears the end effectors down.
+    service.shutdown()
     assert service._end_effectors is None
 
 
-def test_command_gripper_blocked_until_started_and_unmirrored(
-    tmp_path, monkeypatch
-) -> None:
+def test_init_grippers_gated_and_cached(tmp_path, monkeypatch) -> None:
     import flexivtrainer.teleop.end_effector as ee
     from flexivtrainer.config import EndEffectorSideConfig
 
-    # Use lightweight fakes so gripper setup doesn't reach real RDK hardware.
+    # Lightweight fakes so gripper setup doesn't reach real RDK hardware.
     monkeypatch.setattr(ee, "Gripper", _FakeGripper)
     monkeypatch.setattr(ee, "Tool", _FakeTool)
     monkeypatch.setattr(ee, "Mode", None)  # skip the IDLE-only tool switch
 
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
-    # Gripper with a leader trigger -> mirrored while end-effector control runs.
     configs = {
         "single_arm": EndEffectorSideConfig(
             leader="digital_input", follower="gripper"
@@ -401,48 +390,23 @@ def test_command_gripper_blocked_until_started_and_unmirrored(
     service._controller = FakeEngageController()
     service._initialized = True
 
-    # End effectors not started yet: manual control rejected.
-    result = service.command_gripper("single_arm", "open", 0.1, 1.0)
-    assert result["ok"] is False
-    assert "Start" in result["error"]
-
-    # Once started, the mirror thread owns this (triggered) side: manual blocked.
-    service.start_end_effectors()
-    result = service.command_gripper("single_arm", "open", 0.1, 1.0)
-    assert result["ok"] is False
-    assert "Stop end effector control" in result["error"]
-
-    service.stop_end_effectors()
-
-
-def test_command_gripper_allowed_for_untriggered_side_while_running(
-    tmp_path, monkeypatch
-) -> None:
-    import flexivtrainer.teleop.end_effector as ee
-    from flexivtrainer.config import EndEffectorSideConfig
-
-    monkeypatch.setattr(ee, "Gripper", _FakeGripper)
-    monkeypatch.setattr(ee, "Tool", _FakeTool)
-    monkeypatch.setattr(ee, "Mode", None)
-
-    settings = AppSettings(storage=StorageConfig(root=tmp_path))
-    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
-    # Gripper WITHOUT a leader trigger -> never mirrored, stays manual even while
-    # end-effector control runs (e.g. another side is mirrored).
-    configs = {"single_arm": EndEffectorSideConfig(follower="gripper")}
-    service = TeleopService(
-        settings,
-        get_robot_pairs=lambda: pairs,
-        get_active_sides=lambda: ["single_arm"],
-        get_end_effector_config=lambda: configs,
-    )
-    service._controller = FakeEngageController()
-    service._initialized = True
-
-    service.start_end_effectors()
-    result = service.command_gripper("single_arm", "open", 0.1, 1.0)
+    # Init enables the gripper and exposes its params.
+    result = service.init_grippers()
     assert result["ok"] is True
-    service.stop_end_effectors()
+    assert "single_arm" in service.gripper_snapshot()
+
+    # Params stay cached across a teleop start/stop cycle.
+    service.start()
+    assert service._end_effectors.is_running() is True
+    service.stop()
+    assert "single_arm" in service.gripper_snapshot()
+
+    # Init is rejected while teleop is started (Tool.Switch is IDLE-only).
+    service.start()
+    blocked = service.init_grippers()
+    assert blocked["ok"] is False
+    assert "Stop teleoperation" in blocked["error"]
+    service.stop()
 
 
 def test_engage_requires_started_control_loop(tmp_path) -> None:

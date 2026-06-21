@@ -43,22 +43,12 @@ class StartTeleopRequest(BaseModel):
     zero_ft_sensor: bool = True
 
 
-class GripperCommandRequest(BaseModel):
-    # Position-control parameters for a manual open/close. Both must be positive;
-    # they are additionally clamped into the gripper's reported range server-side.
+class GripperParamsRequest(BaseModel):
+    # Per-side grasping velocity/force from the panel sliders. Both must be
+    # positive; they are additionally clamped into the gripper's reported range
+    # server-side.
     velocity: float = Field(gt=0)
     force: float = Field(gt=0)
-
-
-class StartEndEffectorsRequest(BaseModel):
-    # When True, call Gripper.Init() during start (for grippers that do not
-    # auto-initialize on power-on, e.g. 48V Grav grippers).
-    trigger_init: bool = False
-
-
-class DigitalOutputRequest(BaseModel):
-    # Target level for a manual digital-output write.
-    high: bool
 
 
 class StartRecordingRequest(BaseModel):
@@ -144,7 +134,6 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
         "teleop": runtime.teleop.snapshot().__dict__,
         "robot_data": runtime.teleop.robot_data_snapshot(),
         "gripper": runtime.teleop.gripper_snapshot(),
-        "end_effectors_running": runtime.teleop.end_effectors_running(),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
@@ -242,86 +231,37 @@ def disengage_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> 
     return result
 
 
-@router.post("/end_effector/start")
-def start_end_effectors(
-    request: StartEndEffectorsRequest = StartEndEffectorsRequest(),
-    runtime: RuntimeManager = Depends(get_runtime_manager),
-) -> dict:
-    result = runtime.teleop.start_end_effectors(trigger_init=request.trigger_init)
+@router.post("/gripper/init")
+def init_grippers(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.init_grippers()
     if not result.get("ok"):
         raise HTTPException(
             status_code=409,
-            detail=str(result.get("error") or "End effector start failed"),
+            detail=str(result.get("error") or "Gripper initialization failed"),
         )
     if result.get("errors"):
         warn(
-            "Some grippers failed to start",
+            "Some grippers failed to initialize",
             "; ".join(f"{side}={msg}" for side, msg in result["errors"].items()),
         )
     else:
-        ok("End effector control started")
-    return result
-
-
-@router.post("/end_effector/stop")
-def stop_end_effectors(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    result = runtime.teleop.stop_end_effectors()
-    info("End effector control stopped")
-    return result
-
-
-@router.post("/end_effector/{side}/digital_output")
-def command_digital_output(
-    side: str,
-    request: DigitalOutputRequest,
-    runtime: RuntimeManager = Depends(get_runtime_manager),
-) -> dict:
-    result = runtime.teleop.command_digital_output(side, request.high)
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=409,
-            detail=str(result.get("error") or "Digital output command failed"),
-        )
-    info(f"Digital output {'high' if request.high else 'low'}", f"side={side}")
+        ok("Grippers initialized")
     return result
 
 
 @router.post("/gripper/{side}/params")
 def set_gripper_params(
     side: str,
-    request: GripperCommandRequest,
+    request: GripperParamsRequest,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
-    # Declared before /gripper/{side}/{action} so "params" isn't matched as an
-    # action. Records the panel's velocity/force for manual + mirror control.
+    # Records this side's slider velocity/force for the mirror loop's Move()s.
     result = runtime.teleop.set_gripper_params(side, request.velocity, request.force)
     if not result.get("ok"):
         raise HTTPException(
             status_code=409,
             detail=str(result.get("error") or "Failed to set gripper parameters"),
         )
-    return result
-
-
-@router.post("/gripper/{side}/{action}")
-def command_gripper(
-    side: str,
-    action: str,
-    request: GripperCommandRequest,
-    runtime: RuntimeManager = Depends(get_runtime_manager),
-) -> dict:
-    if action not in {"open", "close"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
-    result = runtime.teleop.command_gripper(
-        side, action, request.velocity, request.force
-    )
-    if not result.get("ok"):
-        # 409: the gripper can't be commanded in the current state (engaged, or
-        # teleop not started). The message guides the user.
-        raise HTTPException(
-            status_code=409, detail=str(result.get("error") or "Gripper command failed")
-        )
-    info(f"Gripper {action}", f"side={side}")
     return result
 
 
