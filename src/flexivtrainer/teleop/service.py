@@ -19,7 +19,7 @@ from typing import Any
 from typing import Callable
 
 from flexivtrainer.config import AppSettings, EndEffectorSideConfig, TeleopRobotPair
-from flexivtrainer.observability import describe_exception
+from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.teleop.end_effector import EndEffectorController
 
 try:
@@ -240,10 +240,41 @@ class TeleopService:
                 self._started = False
                 self._engaged = False
                 self._error = None
+                # On a successful connection, send the enable signal to every
+                # connected robot. This is fire-and-forget: no operational/ready
+                # check and no wait, just the enabling request for all robots.
+                self._enable_all_robots()
             except Exception as exc:  # pragma: no cover - hardware specific
                 self._error = describe_exception(exc)
                 self._controller = None
         return self.snapshot()
+
+    def _enable_all_robots(self) -> None:
+        # Enable both robots of every configured pair via the underlying
+        # rdk::Robot handles from instances(idx). Best-effort per robot so one
+        # failed Enable() does not abort the rest or the connection.
+        if self._controller is None:
+            return
+        instances_reader = getattr(self._controller, "instances", None)
+        if not callable(instances_reader):
+            return
+        for idx in range(self._engageable_pair_count()):
+            try:
+                robots = instances_reader(idx)
+            except Exception as exc:  # pragma: no cover - hardware specific
+                warn(
+                    f"Failed to read robot instances for pair {idx}",
+                    describe_exception(exc),
+                )
+                continue
+            for robot in robots if isinstance(robots, (tuple, list)) else (robots,):
+                enable = getattr(robot, "Enable", None)
+                if not callable(enable):
+                    continue
+                try:
+                    enable()
+                except Exception as exc:  # pragma: no cover - hardware specific
+                    warn("Failed to enable robot", describe_exception(exc))
 
     def _engageable_pair_count(self) -> int:
         return sum(
