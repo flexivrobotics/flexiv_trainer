@@ -151,8 +151,12 @@ class RobotSerialConfig(BaseModel):
         return ["left_arm", "right_arm"]
 
     def _normalize_serials(self, values: list[str]) -> list[str]:
+        # Cache every provided serial (trimmed) rather than truncating to the
+        # active arm count, so a serial entered for an arm that is inactive in
+        # the current mode survives a single -> dual -> single round trip.
+        # Always keep at least `count` slots so active sides have a slot to fill.
         count = self.active_arm_count()
-        serials = [str(value).strip() for value in values[:count]]
+        serials = [str(value).strip() for value in values]
         serials.extend([""] * (count - len(serials)))
         return serials
 
