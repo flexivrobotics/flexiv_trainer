@@ -1108,7 +1108,7 @@ button:disabled {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    font-size: 0.82rem;
+    font-size: 0.9rem;
     line-height: 1.3;
     cursor: pointer;
     user-select: none;
@@ -1132,7 +1132,7 @@ button:disabled {
 }
 
 .recording-option-group-title {
-    font-size: 0.74rem;
+    font-size: 0.9rem;
     font-weight: 600;
     letter-spacing: 0.02em;
     color: var(--muted);
@@ -1165,7 +1165,7 @@ button:disabled {
 }
 
 .recording-option__label {
-    font-size: 0.79rem;
+    font-size: 0.9rem;
     line-height: 1.32;
     word-break: break-word;
 }
@@ -1226,7 +1226,7 @@ button:disabled {
 .recording-status__text {
     display: block;
     font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     line-height: 1.28;
 }
 
@@ -1395,7 +1395,7 @@ button:disabled {
 }
 
 .teleop-system-card {
-    padding: 0.72rem 0.8rem;
+    padding: 0.5rem 0.8rem;
     border-radius: 18px;
     min-height: 0;
     box-shadow: none;
@@ -1407,6 +1407,9 @@ button:disabled {
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
+    /* Reserve the reset button's height so cards without a button (e.g. Robot
+       Data Service) match the height of those with one. */
+    min-height: 1.9rem;
 }
 
 .teleop-system-card__title {
@@ -1419,6 +1422,12 @@ button:disabled {
 .teleop-system-card__label {
     margin: 0;
     color: var(--ink);
+    /* Tighter tracking than the default eyebrow (and never wrap) so the longest
+       label that shares a row with the reset button ("Teleop Service") stays on
+       one line. Size matches the gripper-panel labels. */
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
 }
 
 .teleop-system-card__dot {
@@ -1447,10 +1456,10 @@ button:disabled {
 }
 
 .teleop-system-card__reset {
-    width: 2.15rem;
-    min-width: 2.15rem;
-    height: 2.15rem;
-    flex: 0 0 2.15rem;
+    width: 1.9rem;
+    min-width: 1.9rem;
+    height: 1.9rem;
+    flex: 0 0 1.9rem;
     aspect-ratio: 1 / 1;
     padding: 0;
     border-radius: 999px;
