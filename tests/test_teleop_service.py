@@ -264,6 +264,151 @@ def test_engage_then_disengage_toggles_every_pair(tmp_path) -> None:
     assert disengaged.engaged is False
 
 
+class _FakeGripper:
+    def __init__(self, robot: object) -> None:
+        self.robot = robot
+        self.moves: list[tuple[float, float, float]] = []
+
+    def Enable(self, name: str) -> None:
+        self.enabled_name = name
+
+    def Init(self) -> None:
+        pass
+
+    def params(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            name="fake",
+            min_width=0.0,
+            max_width=0.1,
+            min_vel=0.01,
+            max_vel=0.5,
+            min_force=1.0,
+            max_force=50.0,
+        )
+
+    def Move(self, width: float, velocity: float, force_limit: float) -> None:
+        self.moves.append((width, velocity, force_limit))
+
+
+class _FakeTool:
+    def __init__(self, robot: object) -> None:
+        self.robot = robot
+
+    def Switch(self, name: str) -> None:
+        pass
+
+
+class FakeEngageController(FakeTeleopController):
+    """Adds the DI/instance surface the end effector controller polls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.follower = FakeRobot()
+        self.follower.digital_outputs = {}
+
+        def _set_outputs(outputs: dict) -> None:
+            self.follower.digital_outputs.update(outputs)
+
+        self.follower.SetDigitalOutputs = _set_outputs  # type: ignore[attr-defined]
+
+    def digital_inputs(self, idx: int):
+        return ([False] * 18, [False] * 18)
+
+    def instances(self, idx: int):
+        return (object(), self.follower)
+
+
+def test_mirror_thread_tied_to_teleop_start_stop(tmp_path) -> None:
+    from flexivtrainer.config import EndEffectorSideConfig
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
+    configs = {
+        "left_arm": EndEffectorSideConfig(
+            leader="digital_input",
+            follower="digital_output",
+            follower_channel=2,
+        )
+    }
+    service = TeleopService(
+        settings,
+        get_robot_pairs=lambda: pairs,
+        get_active_sides=lambda: ["left_arm"],
+        get_end_effector_config=lambda: configs,
+    )
+    service._controller = FakeEngageController()
+    service._initialized = True
+
+    # Teleop Start runs the mirror thread; it is independent of engage.
+    service.start()
+    assert service._end_effectors is not None
+    assert service._end_effectors.is_running() is True
+
+    service.set_engaged(True)
+    assert service._end_effectors.is_running() is True
+    service.set_engaged(False)
+    assert service._end_effectors.is_running() is True
+
+    # Teleop Stop stops the thread but keeps the controller (params cached).
+    service.stop()
+    assert service._end_effectors is not None
+    assert service._end_effectors.is_running() is False
+
+    # A re-Start runs the thread again on the same controller.
+    service.start()
+    assert service._end_effectors.is_running() is True
+
+    # Disconnect fully tears the end effectors down.
+    service.shutdown()
+    assert service._end_effectors is None
+
+
+def test_init_grippers_gated_and_cached(tmp_path, monkeypatch) -> None:
+    import flexivtrainer.teleop.end_effector as ee
+    from flexivtrainer.config import EndEffectorSideConfig
+
+    # Lightweight fakes so gripper setup doesn't reach real RDK hardware.
+    monkeypatch.setattr(ee, "Gripper", _FakeGripper)
+    monkeypatch.setattr(ee, "Tool", _FakeTool)
+    monkeypatch.setattr(ee, "Mode", None)  # skip the IDLE-only tool switch
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
+    configs = {
+        "single_arm": EndEffectorSideConfig(
+            leader="digital_input", follower="gripper"
+        )
+    }
+    service = TeleopService(
+        settings,
+        get_robot_pairs=lambda: pairs,
+        get_active_sides=lambda: ["single_arm"],
+        get_end_effector_config=lambda: configs,
+    )
+    service._controller = FakeEngageController()
+    service._initialized = True
+
+    # Init enables the gripper and exposes its params.
+    result = service.init_grippers()
+    assert result["ok"] is True
+    assert "single_arm" in service.gripper_snapshot()
+
+    # Params stay cached across a teleop start/stop cycle.
+    service.start()
+    assert service._end_effectors.is_running() is True
+    service.stop()
+    assert "single_arm" in service.gripper_snapshot()
+
+    # Init is rejected while teleop is started (Tool.Switch is IDLE-only).
+    service.start()
+    blocked = service.init_grippers()
+    assert blocked["ok"] is False
+    assert "Stop teleoperation" in blocked["error"]
+    service.stop()
+
+
 def test_engage_requires_started_control_loop(tmp_path) -> None:
     service = _configured_service(tmp_path)
     controller = service._controller
@@ -350,6 +495,58 @@ def test_robot_data_snapshot_uses_instance_states_and_actions(tmp_path) -> None:
     assert first["connected"] is True
     assert first["states"]["tcp_pose"] == [0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0]
     assert first["actions"]["tcp_pose_d"] == [10.0, 11.0, 12.0, 1.0, 0.0, 0.0, 0.0]
+
+
+def test_robot_data_snapshot_folds_in_gripper_states(tmp_path) -> None:
+    # A follower configured as a gripper contributes its measured width/force to
+    # the snapshot, keyed by pair index, for recording into state and action.
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [
+        TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A"),
+        TeleopRobotPair(leader_serial="LEADER_B", follower_serial="FOLLOWER_B"),
+    ]
+    service = TeleopService(settings, get_robot_pairs=lambda: pairs)
+    service._controller = FakeController((FakeRobot(), FakeRobot()))
+    service._end_effectors = SimpleNamespace(
+        gripper_states_by_index=lambda: {0: {"width": 0.03, "force": -2.0}}
+    )
+
+    snapshot = service.robot_data_snapshot()
+
+    # Index 0 (FOLLOWER_A) gets gripper telemetry; index 1 does not.
+    assert snapshot["robots"]["FOLLOWER_A"]["gripper"] == {
+        "width": 0.03,
+        "force": -2.0,
+    }
+    assert "gripper" not in snapshot["robots"]["FOLLOWER_B"]
+
+
+def test_robot_data_snapshot_skips_gripper_read_without_states_or_actions(
+    tmp_path,
+) -> None:
+    # A bare snapshot (neither states nor actions requested) must not touch the
+    # gripper layer, which on real hardware would issue a gripper.states() read.
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
+    service = TeleopService(settings, get_robot_pairs=lambda: pairs)
+    service._controller = FakeController((FakeRobot(),))
+
+    calls = {"count": 0}
+
+    def _gripper_states():
+        calls["count"] += 1
+        return {0: {"width": 0.03, "force": -2.0}}
+
+    service._end_effectors = SimpleNamespace(
+        gripper_states_by_index=_gripper_states
+    )
+
+    snapshot = service.robot_data_snapshot(
+        include_states=False, include_actions=False
+    )
+
+    assert calls["count"] == 0
+    assert "gripper" not in snapshot["robots"]["FOLLOWER_A"]
 
 
 def test_robot_data_snapshot_reads_struct_states_without_dict(tmp_path) -> None:

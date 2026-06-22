@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from typing import Any
 from typing import Callable
 
-from flexivtrainer.config import AppSettings, TeleopRobotPair
-from flexivtrainer.observability import describe_exception
+from flexivtrainer.config import AppSettings, EndEffectorSideConfig, TeleopRobotPair
+from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.teleop.end_effector import EndEffectorController
 
 try:
     import flexivtdk
@@ -76,9 +77,20 @@ class TeleopService:
         self,
         settings: AppSettings,
         get_robot_pairs: Callable[[], list[TeleopRobotPair]] | None = None,
+        get_active_sides: Callable[[], list[str]] | None = None,
+        get_end_effector_config: (
+            Callable[[], dict[str, EndEffectorSideConfig]] | None
+        ) = None,
     ) -> None:
         self._settings = settings
         self._get_robot_pairs = get_robot_pairs or (lambda: settings.teleop_robot_pairs)
+        # Active arm sides (in pair-index order) and the per-side end effector
+        # config drive the optional end effector controller; defaults keep the
+        # service usable without that wiring.
+        self._get_active_sides = get_active_sides or (
+            lambda: ["left_arm", "right_arm"]
+        )
+        self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._controller: Any | None = None
         self._error: str | None = None
         self._initialized = False
@@ -88,6 +100,10 @@ class TeleopService:
         # stopping the loop.
         self._started = False
         self._engaged = False
+        # Background mirror of leader digital inputs onto follower end effectors;
+        # runs with the teleop control loop (started/stopped by Start/Stop), not
+        # gated by engage -- it keeps mirroring across engage/disengage cycles.
+        self._end_effectors: EndEffectorController | None = None
 
     def _configured_remote_serials(self) -> list[str]:
         serials: list[str] = []
@@ -151,6 +167,18 @@ class TeleopService:
         snapshot_robots: dict[str, Any] = {}
         errors: dict[str, str] = {}
 
+        # Live width/force for any follower configured as a gripper, keyed by the
+        # same pair index used below. Folded into the follower payload so that
+        # recording can append it to both observation.state and action. Read once
+        # up front; absent for sides without an enabled gripper. Skip the read
+        # entirely when neither states nor actions are requested so a bare
+        # snapshot never touches the (hardware) gripper layer.
+        gripper_states = (
+            self._gripper_states_by_index()
+            if (include_states or include_actions)
+            else {}
+        )
+
         for index, serial in enumerate(configured_serials):
             base_name = serial or f"robot_{index}"
             robot_name = base_name
@@ -187,6 +215,14 @@ class TeleopService:
                                 actions[field] = vector
                         if actions:
                             payload["actions"] = actions
+
+                # A follower gripper's measured width/force feeds both the
+                # observation and the action, so attach it whenever either is
+                # requested; the recorder appends it to the matching vector(s).
+                if include_states or include_actions:
+                    gripper = gripper_states.get(index)
+                    if gripper is not None:
+                        payload["gripper"] = dict(gripper)
             except Exception as exc:  # pragma: no cover - hardware specific
                 payload["connected"] = False
                 payload["error"] = describe_exception(exc)
@@ -195,6 +231,17 @@ class TeleopService:
             snapshot_robots[robot_name] = payload
 
         return {"robots": snapshot_robots, "errors": errors}
+
+    def _gripper_states_by_index(self) -> dict[int, dict[str, float]]:
+        # Live gripper width/force keyed by pair index, mirroring the index used
+        # by instances(idx). Empty when no end effector controller exists or no
+        # gripper is enabled, so the snapshot simply omits gripper telemetry.
+        if self._end_effectors is None:
+            return {}
+        try:
+            return self._end_effectors.gripper_states_by_index()
+        except Exception:  # pragma: no cover - hardware specific
+            return {}
 
     def initialize(self) -> TeleopSnapshot:
         robot_pairs_config = self._get_robot_pairs()
@@ -225,10 +272,41 @@ class TeleopService:
                 self._started = False
                 self._engaged = False
                 self._error = None
+                # On a successful connection, send the enable signal to every
+                # connected robot. This is fire-and-forget: no operational/ready
+                # check and no wait, just the enabling request for all robots.
+                self._enable_all_robots()
             except Exception as exc:  # pragma: no cover - hardware specific
                 self._error = describe_exception(exc)
                 self._controller = None
         return self.snapshot()
+
+    def _enable_all_robots(self) -> None:
+        # Enable both robots of every configured pair via the underlying
+        # rdk::Robot handles from instances(idx). Best-effort per robot so one
+        # failed Enable() does not abort the rest or the connection.
+        if self._controller is None:
+            return
+        instances_reader = getattr(self._controller, "instances", None)
+        if not callable(instances_reader):
+            return
+        for idx in range(self._engageable_pair_count()):
+            try:
+                robots = instances_reader(idx)
+            except Exception as exc:  # pragma: no cover - hardware specific
+                warn(
+                    f"Failed to read robot instances for pair {idx}",
+                    describe_exception(exc),
+                )
+                continue
+            for robot in robots if isinstance(robots, (tuple, list)) else (robots,):
+                enable = getattr(robot, "Enable", None)
+                if not callable(enable):
+                    continue
+                try:
+                    enable()
+                except Exception as exc:  # pragma: no cover - hardware specific
+                    warn("Failed to enable robot", describe_exception(exc))
 
     def _engageable_pair_count(self) -> int:
         return sum(
@@ -267,16 +345,72 @@ class TeleopService:
             self._started = True
             self._engaged = False
             self._error = None
+            # The end effector mirror thread runs while the teleop loop runs.
+            # Reuse any controller built by the panel's Init button (with its
+            # enabled grippers), or build a fresh one for digital-output-only
+            # mirroring; then start the mirror thread. Gripper sides that were
+            # not initialized are skipped per-tick (the panel shows a warning).
+            self._ensure_end_effectors()
+            if self._end_effectors is not None:
+                self._end_effectors.start()
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
 
+    def _ensure_end_effectors(self) -> None:
+        # Construct the end effector controller for the current config if one is
+        # not already present. Does not enable grippers -- that is the gripper
+        # panel's Init button's job (init_grippers). Safe to call repeatedly.
+        if self._end_effectors is not None or self._controller is None:
+            return
+        try:
+            self._end_effectors = EndEffectorController(
+                self._controller,
+                self._get_active_sides(),
+                dict(self._get_end_effector_config() or {}),
+            )
+        except Exception:  # pragma: no cover - hardware specific
+            self._end_effectors = None
+
+    def init_grippers(self) -> dict[str, Any]:
+        # Enable + tool-switch + Init + read params for every configured gripper.
+        # Run from the panel's Init button after connect but before Start, while
+        # the follower is IDLE (Tool.Switch() is IDLE-only). The enabled grippers
+        # and their params persist across teleop start/stop until disconnect.
+        if self._controller is None:
+            return {
+                "ok": False,
+                "error": "Connect teleoperation before initializing grippers",
+            }
+        if self._started:
+            return {
+                "ok": False,
+                "error": "Stop teleoperation before initializing grippers",
+            }
+        self._ensure_end_effectors()
+        if self._end_effectors is None or not self._end_effectors.has_grippers():
+            return {"ok": False, "error": "No grippers configured"}
+        errors = self._end_effectors.initialize_grippers()
+        snapshot = self._end_effectors.gripper_snapshot()
+        if errors and not snapshot:
+            return {"ok": False, "error": "; ".join(errors.values())}
+        return {"ok": True, "gripper": snapshot, "errors": errors}
+
+    def _teardown_end_effectors(self) -> None:
+        if self._end_effectors is not None:
+            self._end_effectors.shutdown()
+            self._end_effectors = None
+
     def stop(self) -> TeleopSnapshot:
         # The Stop button stops the teleop control loop. Engagement is cleared
-        # because Engage requires a running loop.
+        # because Engage requires a running loop. The mirror thread is stopped
+        # too, but the enabled grippers / params stay cached so the panel's
+        # sliders survive a stop/start cycle (released only on disconnect).
         if self._controller is None:
             return self.snapshot()
         try:
+            if self._end_effectors is not None:
+                self._end_effectors.stop()
             self._controller.Stop()
             self._started = False
             self._engaged = False
@@ -301,16 +435,45 @@ class TeleopService:
                 self._controller.Engage(idx, engaged)
             self._engaged = engaged
             self._error = None
+            # The mirror thread is tied to teleop Start/Stop, not engage, so it
+            # keeps running across engage cycles -- nothing to do here.
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
+
+    def gripper_snapshot(self) -> dict[str, Any]:
+        # Empty until the panel's Init enables grippers; persists until disconnect.
+        if self._end_effectors is None:
+            return {}
+        return self._end_effectors.gripper_snapshot()
+
+    def set_gripper_params(
+        self, side: str, velocity: float, force: float
+    ) -> dict[str, Any]:
+        # Store this side's slider velocity/force; used by the mirror loop's
+        # Move() calls. Allowed any time after init (including while the loop is
+        # running, to tune it live) -- it only records values, it does not move
+        # the gripper.
+        if self._end_effectors is None:
+            return {
+                "ok": False,
+                "error": "Initialize the gripper before setting its parameters",
+            }
+        try:
+            velocity, force = self._end_effectors.set_command_params(
+                side, velocity, force
+            )
+            return {"ok": True, "velocity": velocity, "force": force}
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
 
     def shutdown(self) -> None:
         if self._controller is None:
             return
 
-        # Disconnect / service reset is the only path that fully stops the
-        # teleop control loop (Stop()); the Stop button merely disengages.
+        # Disconnect / service reset fully releases the end effectors (enabled
+        # grippers + cached params), which a teleop Stop deliberately keeps.
+        self._teardown_end_effectors()
         try:
             if self._started:
                 self._controller.Stop()

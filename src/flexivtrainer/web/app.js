@@ -15,6 +15,10 @@
 const state = {
     activeView: "home",
     summary: null,
+    // Per-side manual gripper control inputs (velocity/force), keyed by arm
+    // side. Seeded from the gripper params once teleop is running; kept in
+    // memory so user edits survive re-renders within a session.
+    gripperControl: {},
     teleopStatus: null,
     cameraConfig: null,
     trainingPolicies: null,
@@ -109,6 +113,13 @@ const state = {
         // frames between status polls. Reset whenever a recording (re)starts.
         recordingFps: 0,
         recordingFpsSample: null,
+        // Signature of the currently-built Gripper Control panel; the panel is
+        // only rebuilt when the set of gripper sides or their params change, so
+        // velocity/force inputs aren't clobbered on every status poll.
+        gripperPanelSignature: null,
+        // True while the Gripper Control Init request (and its post-Init wait)
+        // is in flight.
+        gripperInitBusy: false,
         serviceResetBusy: {
             teleop_service: false,
             cameras: false,
@@ -124,6 +135,11 @@ const state = {
     },
     cameraFeeds: {},
     recordingEntries: [],
+    // Entry ids the checklist has already offered. Used to distinguish "newly
+    // offered" entries (auto-selected default-on, e.g. a gripper just enabled)
+    // from ones the user explicitly deselected (must stay off). null until the
+    // first reconcile seeds it.
+    recordingOfferedEntries: null,
     datasetPlotScope: {},
     notifications: {
         items: [],
@@ -151,9 +167,9 @@ const WRIST_CAMERA_BY_SIDE = {
     single_arm: "wrist",
 };
 const ARM_SIDE_LABELS = {
-    left_arm: { serial: "LEFT", feed: "Left Wrist", wrench: "LEFT" },
-    right_arm: { serial: "RIGHT", feed: "Right Wrist", wrench: "RIGHT" },
-    single_arm: { serial: "ARM", feed: "Wrist", wrench: "ARM" },
+    left_arm: { serial: "Serial Number - Left", feed: "Left Wrist", wrench: "LEFT" },
+    right_arm: { serial: "Serial Number - Right", feed: "Right Wrist", wrench: "RIGHT" },
+    single_arm: { serial: "Serial Number", feed: "Wrist", wrench: "ARM" },
 };
 
 function getActiveSides() {
@@ -170,10 +186,21 @@ const RECORDING_METRICS = [
     { metric: "tcp_wrench", stateField: "ext_wrench_in_world", actionField: "ext_wrench_d" },
 ];
 
+// True when a side's follower end effector is configured as a gripper, so its
+// measured width/force is available to record. Reads the cached end effector
+// config without seeding defaults (getEndEffectorConfig mutates state).
+function sideHasGripper(side) {
+    const eec = state.summary?.robot_config?.end_effector_config || {};
+    return eec[side]?.follower === "gripper";
+}
+
 // The checklist offers one toggle per (side, metric); selected metrics from
 // every arm are concatenated into the single `observation.state` / `action`
 // feature. Each row's label is the feature name-prefix it contributes (e.g.
-// `left_arm.tcp_pose`), matching the per-axis names in those features.
+// `left_arm.tcp_pose`), matching the per-axis names in those features. A side
+// whose follower is a gripper also gets a `gripper` toggle (width + force);
+// the same measured gripper states feed both its state and action entries, so
+// both verify against the follower's `gripper` payload section.
 function buildArmMetricRecordingOptions(sides) {
     const options = [];
     sides.forEach((side, index) => {
@@ -188,6 +215,17 @@ function buildArmMetricRecordingOptions(sides) {
                 verifyField: stateField,
             });
         }
+        if (sideHasGripper(side)) {
+            options.push({
+                id: `observation.state.${side}.gripper`,
+                label: `${side}.gripper`,
+                group: "observation.state",
+                bucket: "observation",
+                payload: "gripper",
+                side: index,
+                verifyField: "width",
+            });
+        }
     });
     sides.forEach((side, index) => {
         for (const { metric, actionField } of RECORDING_METRICS) {
@@ -199,6 +237,17 @@ function buildArmMetricRecordingOptions(sides) {
                 payload: "actions",
                 side: index,
                 verifyField: actionField,
+            });
+        }
+        if (sideHasGripper(side)) {
+            options.push({
+                id: `action.${side}.gripper`,
+                label: `${side}.gripper`,
+                group: "action",
+                bucket: "action",
+                payload: "gripper",
+                side: index,
+                verifyField: "width",
             });
         }
     });
@@ -435,8 +484,9 @@ const DATASET_METRIC_META = {
     tcp_pose: { title: "TCP Pose" },
     tcp_twist: { title: "TCP Twist" },
     tcp_wrench: { title: "TCP Wrench" },
+    gripper: { title: "Gripper" },
 };
-const DATASET_METRIC_ORDER = { tcp_pose: 0, tcp_twist: 1, tcp_wrench: 2 };
+const DATASET_METRIC_ORDER = { tcp_pose: 0, tcp_twist: 1, tcp_wrench: 2, gripper: 3 };
 const DATASET_STATE_COLORS = ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff", "#ffe08a"];
 const DATASET_ACTION_COLORS = ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db", "#dbc24d"];
 
@@ -451,7 +501,7 @@ function buildDatasetPlotGroups(numericKeys) {
     const groups = new Map();
     const sideOrder = [];
     (numericKeys || []).forEach((key) => {
-        const match = key.match(/^(observation\.state|action)\.([a-z0-9_]+)\.(tcp_pose|tcp_twist|tcp_wrench)\.(.+)$/);
+        const match = key.match(/^(observation\.state|action)\.([a-z0-9_]+)\.(tcp_pose|tcp_twist|tcp_wrench|gripper)\.(.+)$/);
         if (!match) return;
         const [, section, side, metric, axis] = match;
         if (!(metric in DATASET_METRIC_META)) return;
@@ -1732,7 +1782,7 @@ function renderArmConfig() {
     const modeContainer = byId("home-arm-mode");
     modeContainer.innerHTML = `
         <label class="robot-input-group">
-            <span>Arm Pair</span>
+            <span>Arm Pairs</span>
             <select id="arm-mode-select">
                 <option value="dual"${armMode === "dual" ? " selected" : ""}>Dual</option>
                 <option value="single"${armMode === "single" ? " selected" : ""}>Single</option>
@@ -1745,14 +1795,38 @@ function renderArmConfig() {
     };
 }
 
+// Reconcile the recording checklist against the now-valid entries: drop any
+// that are no longer offered, and add any newly-offered default entries (e.g. a
+// follower just switched to "gripper", exposing its width/force) while keeping
+// the user's existing selections. Order follows the canonical default order.
+function reconcileRecordingEntries() {
+    const defaults = defaultRecordingEntryIds();
+    const valid = new Set(defaults);
+    const selected = new Set(
+        state.recordingEntries.filter((entry) => valid.has(entry))
+    );
+    // An entry that has never been offered before is auto-selected (entries are
+    // default-on); one that was offered and is absent from the selection was
+    // explicitly deselected, so it stays off. `recordingOfferedEntries` tracks
+    // what's been offered so a re-render of an unchanged checklist doesn't undo
+    // a deselection. On first run nothing has been offered, so the full default
+    // set is selected.
+    const offered = state.recordingOfferedEntries;
+    defaults.forEach((entry) => {
+        if (offered === null || !offered.has(entry)) selected.add(entry);
+    });
+    state.recordingOfferedEntries = valid;
+    state.recordingEntries = defaults.filter((entry) => selected.has(entry));
+}
+
 // The arm count/side changed: re-derive the recording checklist to the now-valid
 // entries, persist, and re-render the affected home controls.
 function onArmConfigChanged() {
-    const valid = new Set(defaultRecordingEntryIds());
-    state.recordingEntries = state.recordingEntries.filter((entry) => valid.has(entry));
+    reconcileRecordingEntries();
     renderArmConfig();
     renderHomeRobotConfigInputs();
     renderHomeStatus();
+    renderHomeEndEffectors();
     queueRobotConfigSave();
 }
 
@@ -1779,7 +1853,7 @@ function renderHomeRobotConfigInputs() {
             field.className = "robot-input-group";
             field.innerHTML = `
                 <span>${sideLabels[index] || `Robot ${index + 1}`}</span>
-                <input type="text" value="${serial}" placeholder="Enter robot serial number" />
+                <input type="text" value="${serial}" placeholder="Rizon4s-xxxxxx" />
             `;
             const input = field.querySelector("input");
             input.oninput = () => {
@@ -1824,6 +1898,176 @@ function renderHomeStatus() {
     });
 }
 
+// Tile titles per arm side. Dual mode shows one tile per side; single mode
+// shows a single side-free tile.
+const END_EFFECTOR_TILE_LABELS = {
+    left_arm: "End Effector Configuration - Left",
+    right_arm: "End Effector Configuration - Right",
+    single_arm: "End Effector Configuration",
+};
+
+const GRIPPER_MODELS = ["Flexiv-GN01", "Robotiq-2F-85", "Robotiq-Hand-E"];
+
+function defaultEndEffectorConfig() {
+    return {
+        leader: "none", // "none" | "digital_input"
+        leader_channel: 0, // DI[0]..DI[15]
+        leader_activating_state: "high", // "high" | "low" (digital input)
+        follower: "none", // "none" | "digital_output" | "gripper"
+        follower_channel: 0, // DO[0]..DO[15]
+        follower_activated_state: "high", // "high" | "low" (digital output)
+        gripper_model: GRIPPER_MODELS[0],
+        gripper_activated_state: "close", // "close" | "open" (gripper)
+    };
+}
+
+// Selections live inside robot_config.end_effector_config so they ride the same
+// PUT /system/robot-config save path as the serial numbers and are cached in
+// robot_serials.json across reloads. Lazily seed defaults per side.
+function getEndEffectorConfig(side) {
+    const robotConfig = state.summary.robot_config || (state.summary.robot_config = {});
+    if (!robotConfig.end_effector_config) {
+        robotConfig.end_effector_config = {};
+    }
+    if (!robotConfig.end_effector_config[side]) {
+        robotConfig.end_effector_config[side] = defaultEndEffectorConfig();
+    }
+    return robotConfig.end_effector_config[side];
+}
+
+// Build the 16 DI/DO channel <option>s, marking the current selection.
+function channelOptionsHtml(prefix, selected) {
+    let html = "";
+    for (let i = 0; i < 16; i += 1) {
+        html += `<option value="${i}"${i === selected ? " selected" : ""}>${prefix}[${i}]</option>`;
+    }
+    return html;
+}
+
+// Build a labelled state dropdown (e.g. Activating/Activated state). `options`
+// is a list of [value, label] pairs; `selected` marks the current value.
+function stateSelectHtml(title, field, options, selected) {
+    const optionsHtml = options
+        .map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`)
+        .join("");
+    return `<label class="robot-input-group">
+                    <span>${title}</span>
+                    <select data-field="${field}">${optionsHtml}</select>
+                </label>`;
+}
+
+function renderHomeEndEffectors() {
+    if (!state.summary) {
+        return;
+    }
+    const container = byId("home-end-effectors");
+    if (!container) {
+        return;
+    }
+    container.innerHTML = "";
+    getActiveSides().forEach((side) => {
+        const cfg = getEndEffectorConfig(side);
+
+        // The leader's secondary dropdowns only appear for a digital input device.
+        const leaderExtra =
+            cfg.leader === "digital_input"
+                ? `<label class="robot-input-group">
+                    <span>Digital input channel</span>
+                    <select data-field="leader_channel">${channelOptionsHtml("DI", cfg.leader_channel)}</select>
+                </label>${stateSelectHtml(
+                    "Activating state",
+                    "leader_activating_state",
+                    [["high", "Port high"], ["low", "Port low"]],
+                    cfg.leader_activating_state,
+                )}`
+                : "";
+
+        // The follower's secondary dropdowns depend on the device kind.
+        let followerExtra = "";
+        if (cfg.follower === "digital_output") {
+            followerExtra = `<label class="robot-input-group">
+                    <span>Digital output channel</span>
+                    <select data-field="follower_channel">${channelOptionsHtml("DO", cfg.follower_channel)}</select>
+                </label>${stateSelectHtml(
+                "Activated state",
+                "follower_activated_state",
+                [["high", "Port high"], ["low", "Port low"]],
+                cfg.follower_activated_state,
+            )}`;
+        } else if (cfg.follower === "gripper") {
+            const options = GRIPPER_MODELS.map(
+                (model) =>
+                    `<option value="${model}"${model === cfg.gripper_model ? " selected" : ""}>${model}</option>`,
+            ).join("");
+            followerExtra = `<label class="robot-input-group">
+                    <span>Gripper model</span>
+                    <select data-field="gripper_model">${options}</select>
+                </label>${stateSelectHtml(
+                "Activated state",
+                "gripper_activated_state",
+                [["close", "Close"], ["open", "Open"]],
+                cfg.gripper_activated_state,
+            )}`;
+        }
+
+        const tile = document.createElement("section");
+        tile.className = "panel end-effector-tile";
+        tile.innerHTML = `
+            <div class="panel-header">
+                <h2>${END_EFFECTOR_TILE_LABELS[side] || "End Effector Configuration"}</h2>
+            </div>
+            <div class="end-effector-row">
+                <label class="robot-input-group">
+                    <span>Leader end effector</span>
+                    <select data-field="leader">
+                        <option value="none"${cfg.leader === "none" ? " selected" : ""}>None</option>
+                        <option value="digital_input"${cfg.leader === "digital_input" ? " selected" : ""}>Digital input device</option>
+                    </select>
+                </label>
+                ${leaderExtra}
+            </div>
+            <div class="end-effector-row">
+                <label class="robot-input-group">
+                    <span>Follower end effector</span>
+                    <select data-field="follower">
+                        <option value="none"${cfg.follower === "none" ? " selected" : ""}>None</option>
+                        <option value="digital_output"${cfg.follower === "digital_output" ? " selected" : ""}>Digital output device</option>
+                        <option value="gripper"${cfg.follower === "gripper" ? " selected" : ""}>Gripper</option>
+                    </select>
+                </label>
+                ${followerExtra}
+            </div>
+        `;
+
+        tile.querySelectorAll("select[data-field]").forEach((select) => {
+            select.onchange = () => {
+                const field = select.dataset.field;
+                // Look the config up fresh: a completed save replaces
+                // state.summary.robot_config, orphaning the `cfg` captured above,
+                // so mutating that stale reference would silently no-op.
+                const current = getEndEffectorConfig(side);
+                current[field] =
+                    field === "leader_channel" || field === "follower_channel"
+                        ? Number(select.value)
+                        : select.value;
+                // A follower gripper exposes width/force recording entries (and
+                // dropping the gripper retires them); renderRecordingOptions
+                // reconciles the checklist itself, so refresh it now rather than
+                // waiting for the next poll tick.
+                if (field === "follower") {
+                    renderRecordingOptions(state.teleopStatus?.recording || {});
+                }
+                // Re-render so the dependent secondary dropdowns appear/hide,
+                // then persist alongside the serial numbers.
+                renderHomeEndEffectors();
+                queueRobotConfigSave();
+            };
+        });
+
+        container.appendChild(tile);
+    });
+}
+
 function renderHome() {
     if (!state.summary) {
         return;
@@ -1831,6 +2075,7 @@ function renderHome() {
     renderArmConfig();
     renderHomeRobotConfigInputs();
     renderHomeStatus();
+    renderHomeEndEffectors();
     renderHomeStorage();
 }
 
@@ -2405,20 +2650,21 @@ function renderRecordingOptions(recording = {}) {
     }
 
     const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
+    // Reconcile first so a gripper enabled after page load (or restored from a
+    // saved config) adds its width/force entries to the default-on selection,
+    // and a removed gripper retires them, before the checklist is derived.
+    reconcileRecordingEntries();
     const options = recordingEntryOptions();
     const defaultIds = options.map((option) => option.id);
-    // Drop any selection left over from a different arm mode so the checklist
-    // and the started recording only ever reference active-side entries.
-    const validIds = new Set(defaultIds);
-    state.recordingEntries = state.recordingEntries.filter((entry) => validIds.has(entry));
     const selected = new Set(state.recordingEntries);
     const allSelected = defaultIds.every((entryId) => selected.has(entryId));
 
     // renderTeleop runs on every poll tick (~10x/sec). Rebuilding these
     // controls unconditionally made the Select All button and checkboxes flash
     // and swallowed clicks landing mid-rerender. Only rebuild when something
-    // that affects the rendered output actually changed.
-    const renderKey = `${locked ? 1 : 0}|${getActiveSides().join("+")}|${state.recordingEntries.join(",")}`;
+    // that affects the rendered output actually changed -- including the set of
+    // offered options, which grows/shrinks with the configured gripper sides.
+    const renderKey = `${locked ? 1 : 0}|${getActiveSides().join("+")}|${defaultIds.join(",")}|${state.recordingEntries.join(",")}`;
     if (container.dataset.renderKey === renderKey) {
         return;
     }
@@ -2811,6 +3057,260 @@ function updateTeleopControlButtons(teleopStatus) {
     );
 }
 
+// The Gripper Control panel appears when any active arm has a gripper selected
+// as its follower end effector (sides with other follower types get no panel).
+// An Init button at the top enables every gripper, switches its tool, and
+// triggers Gripper.Init() -- runnable only while teleop is NOT started, since
+// Tool.Switch() requires the follower to be IDLE. Once initialized, each gripper
+// side gets a grasping-velocity and grasping-force slider (read from that
+// gripper's reported range, cached until disconnect). The leader-mirror thread
+// runs with the teleop control loop (Start/Stop); a configured-but-uninitialized
+// gripper is skipped by the thread and flagged with a warning here.
+const GRIPPER_SIDE_LABELS = {
+    left_arm: "Left",
+    right_arm: "Right",
+    single_arm: "",
+};
+
+// After Init triggers gripper.Init() on the backend, wait this long for the
+// gripper hardware to finish initializing before unblocking the panel.
+const GRIPPER_INIT_WAIT_MS = 10000;
+
+function gripperConfiguredSides() {
+    const eec = state.summary?.robot_config?.end_effector_config || {};
+    return getActiveSides().filter((side) => eec[side]?.follower === "gripper");
+}
+
+function roundForInput(value, decimals) {
+    const factor = 10 ** decimals;
+    return Math.round(value * factor) / factor;
+}
+
+function clampNumber(value, min, max) {
+    if (Number.isNaN(value)) return min;
+    return Math.min(max, Math.max(min, value));
+}
+
+function renderGripperControl(teleopStatus) {
+    const panel = byId("teleop-gripper-panel");
+    const content = byId("teleop-gripper-content");
+    if (!panel || !content) {
+        return;
+    }
+    const sides = gripperConfiguredSides();
+    panel.classList.toggle("hidden", sides.length === 0);
+    if (sides.length === 0) {
+        state.ui.gripperPanelSignature = null;
+        return;
+    }
+
+    const grippers = teleopStatus?.gripper || {};
+    // Rebuild the panel structure (and re-seed the sliders) only when the set of
+    // sides or their params availability changes, so dragging a slider isn't
+    // clobbered by the ~10Hz status poll.
+    const signature = sides
+        .map((side) => `${side}:${grippers[side] ? "params" : "none"}`)
+        .join(",");
+    if (state.ui.gripperPanelSignature !== signature) {
+        state.ui.gripperPanelSignature = signature;
+        buildGripperControlPanel(content, sides, grippers);
+    }
+
+    const teleop = teleopStatus?.teleop || {};
+    updateGripperInitButton(teleop);
+    sides.forEach((side) =>
+        updateGripperControlBlock(side, grippers[side], teleop),
+    );
+}
+
+function buildGripperControlPanel(content, sides, grippers) {
+    content.innerHTML = "";
+
+    // Panel-level Init button: enables/switches/inits/reads-params for all
+    // grippers. Only valid while teleop is not started (Tool.Switch is IDLE-only).
+    const initButton = document.createElement("button");
+    initButton.type = "button";
+    initButton.className = "secondary-button gripper-init";
+    initButton.textContent = "Init";
+    initButton.onclick = () => initGrippers();
+    content.appendChild(initButton);
+
+    const multiple = sides.length > 1;
+    sides.forEach((side) => {
+        const params = grippers[side];
+        const label = GRIPPER_SIDE_LABELS[side] ?? "";
+        const block = document.createElement("div");
+        block.className = "gripper-control-block";
+        block.dataset.side = side;
+        block.innerHTML = `
+            ${multiple && label ? `<div class="gripper-control-title">${label}</div>` : ""}
+            <label class="gripper-input-group">
+                <span>Grasping velocity: <strong class="gripper-velocity-value"></strong> m/s</span>
+                <input type="range" class="gripper-velocity" step="0.001" />
+                <small class="gripper-input-note"></small>
+            </label>
+            <label class="gripper-input-group">
+                <span>Grasping force: <strong class="gripper-force-value"></strong> N</span>
+                <input type="range" class="gripper-force" step="0.1" />
+                <small class="gripper-input-note"></small>
+            </label>
+            <p class="gripper-control-hint"></p>
+        `;
+        content.appendChild(block);
+
+        const velInput = block.querySelector(".gripper-velocity");
+        const forceInput = block.querySelector(".gripper-force");
+
+        if (params) {
+            const store = (state.gripperControl[side] ||= {});
+            // Defaults: velocity = max_vel, grasping force = 1/4 of max_force.
+            if (store.velocity == null) store.velocity = params.max_vel;
+            if (store.force == null) store.force = params.max_force / 4;
+            // Clamp any carried-over value into the (possibly new) range.
+            store.velocity = clampNumber(store.velocity, params.min_vel, params.max_vel);
+            store.force = clampNumber(store.force, params.min_force, params.max_force);
+
+            bindGripperSlider(block, velInput, side, "velocity", params.min_vel, params.max_vel, 3);
+            bindGripperSlider(block, forceInput, side, "force", params.min_force, params.max_force, 1);
+        } else {
+            // Params (and thus the valid range) are obtained on Init; leave the
+            // sliders disabled until then.
+            velInput.disabled = true;
+            forceInput.disabled = true;
+        }
+    });
+}
+
+// Configure a range slider for one gripper field: set its bounds, reflect the
+// stored value, live-update the readout while dragging, and push to the backend
+// when released (change). ``decimals`` controls the displayed precision.
+function bindGripperSlider(block, input, side, field, min, max, decimals) {
+    const valueEl = block.querySelector(`.gripper-${field}-value`);
+    const note = input.nextElementSibling;
+    const store = (state.gripperControl[side] ||= {});
+    input.min = min;
+    input.max = max;
+    input.value = store[field];
+    const render = () => {
+        if (valueEl) valueEl.textContent = roundForInput(store[field], decimals);
+    };
+    render();
+    note.textContent = `Range: ${roundForInput(min, decimals)}–${roundForInput(max, decimals)}`;
+
+    input.oninput = () => {
+        const value = clampNumber(parseFloat(input.value), min, max);
+        store[field] = value;
+        render();
+    };
+    input.onchange = () => {
+        store[field] = clampNumber(parseFloat(input.value), min, max);
+        render();
+        // Push to the backend so the mirror loop's Move() uses the new value.
+        sendGripperParams(side);
+    };
+}
+
+// Persist this side's velocity/force on the backend (used by the mirror loop's
+// Move() calls). Best-effort; surfaced on failure.
+async function sendGripperParams(side) {
+    const store = state.gripperControl[side] || {};
+    if (store.velocity == null || store.force == null) {
+        return;
+    }
+    try {
+        await api(`/teleop/gripper/${side}/params`, {
+            method: "POST",
+            body: JSON.stringify({ velocity: store.velocity, force: store.force }),
+        });
+    } catch (error) {
+        showToast(error.message, true);
+    }
+}
+
+function updateGripperControlBlock(side, params, teleop) {
+    const block = byId("teleop-gripper-content")?.querySelector(
+        `.gripper-control-block[data-side="${side}"]`,
+    );
+    if (!block) {
+        return;
+    }
+    const hint = block.querySelector(".gripper-control-hint");
+    const started = !!teleop.started;
+    const initializing = !!state.ui.gripperInitBusy;
+
+    let message = "";
+    let warn = false;
+    if (initializing) {
+        message = "Initializing gripper …";
+    } else if (!params && started) {
+        // Configured but not initialized while teleop runs: the mirror thread
+        // skips it. Surface a warning -- Init requires stopping teleop first.
+        message =
+            "Gripper not initialized — it cannot be controlled. Stop teleop, then click Init.";
+        warn = true;
+    } else if (!params) {
+        message = "Click Init to enable this gripper.";
+    }
+    hint.textContent = message;
+    hint.classList.toggle("hidden", message === "");
+    hint.classList.toggle("gripper-control-warning", warn);
+}
+
+function updateGripperInitButton(teleop) {
+    const button = byId("teleop-gripper-content")?.querySelector(".gripper-init");
+    if (!button) {
+        return;
+    }
+    const initialized = !!teleop.initialized;
+    const started = !!teleop.started;
+    const busy = !!state.ui.gripperInitBusy;
+
+    // Init must run after Connect but before Start (Tool.Switch is IDLE-only).
+    button.disabled = !initialized || started || busy;
+    button.classList.toggle("button--busy", busy);
+    setMarkupIfChanged(
+        button,
+        `gripper-init:${busy ? "busy" : "idle"}`,
+        busy
+            ? '<span class="button-spinner" aria-hidden="true"></span><span>Initializing …</span>'
+            : "Init",
+    );
+    button.title = !initialized
+        ? "Connect teleoperation first"
+        : started
+          ? "Stop teleoperation before initializing grippers"
+          : "";
+}
+
+async function initGrippers() {
+    if (state.ui.gripperInitBusy) {
+        return;
+    }
+    state.ui.gripperInitBusy = true;
+    renderTeleop();
+    try {
+        await api("/teleop/gripper/init", { method: "POST" });
+        // refreshTeleopStatus() rebuilds the panel and seeds the default
+        // velocity/force; push those so the mirror loop uses them even before
+        // the user touches a slider.
+        await refreshTeleopStatus();
+        await Promise.all(
+            gripperConfiguredSides().map((side) => sendGripperParams(side)),
+        );
+        // The backend triggered gripper.Init(); wait for it to physically finish
+        // before unblocking the panel (busy stays true, so the Init button keeps
+        // spinning throughout).
+        await new Promise((resolve) =>
+            window.setTimeout(resolve, GRIPPER_INIT_WAIT_MS),
+        );
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.ui.gripperInitBusy = false;
+        renderTeleop();
+    }
+}
+
 function renderForcePanel(side, robotEntry, telemetry, history, wrenchLabel) {
     const panel = byId(`${side}-force-panel`);
     if (!panel) {
@@ -3136,6 +3636,7 @@ function renderTeleop() {
     renderRecordingStatusPanel(teleopStatus);
     renderRecordingActionButtons(teleopStatus.recording || {});
     updateTeleopControlButtons(teleopStatus);
+    renderGripperControl(teleopStatus);
 
     const showRecordingSaveButtons = !!teleopStatus.recording.awaiting_save || !!state.ui.recordingSaveBusy || !!teleopStatus.recording.save_in_progress;
     byId("record-save").classList.toggle("hidden", !showRecordingSaveButtons);

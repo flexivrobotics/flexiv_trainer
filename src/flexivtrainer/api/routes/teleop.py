@@ -43,6 +43,14 @@ class StartTeleopRequest(BaseModel):
     zero_ft_sensor: bool = True
 
 
+class GripperParamsRequest(BaseModel):
+    # Per-side grasping velocity/force from the panel sliders. Both must be
+    # positive; they are additionally clamped into the gripper's reported range
+    # server-side.
+    velocity: float = Field(gt=0)
+    force: float = Field(gt=0)
+
+
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
@@ -125,6 +133,7 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return {
         "teleop": runtime.teleop.snapshot().__dict__,
         "robot_data": runtime.teleop.robot_data_snapshot(),
+        "gripper": runtime.teleop.gripper_snapshot(),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
@@ -219,6 +228,40 @@ def disengage_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> 
         error("Teleoperation disengage failed", str(result.get("error")))
     else:
         info("Teleoperation disengaged")
+    return result
+
+
+@router.post("/gripper/init")
+def init_grippers(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.init_grippers()
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str(result.get("error") or "Gripper initialization failed"),
+        )
+    if result.get("errors"):
+        warn(
+            "Some grippers failed to initialize",
+            "; ".join(f"{side}={msg}" for side, msg in result["errors"].items()),
+        )
+    else:
+        ok("Grippers initialized")
+    return result
+
+
+@router.post("/gripper/{side}/params")
+def set_gripper_params(
+    side: str,
+    request: GripperParamsRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    # Records this side's slider velocity/force for the mirror loop's Move()s.
+    result = runtime.teleop.set_gripper_params(side, request.velocity, request.force)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str(result.get("error") or "Failed to set gripper parameters"),
+        )
     return result
 
 

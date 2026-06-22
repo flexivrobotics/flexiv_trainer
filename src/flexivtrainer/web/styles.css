@@ -132,7 +132,7 @@ button:disabled {
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
-    padding: 1rem 1.4rem;
+    padding: 0.7rem 1.4rem;
     border-bottom: 1px solid var(--line);
     background: rgba(247, 241, 231, 0.86);
     backdrop-filter: blur(18px);
@@ -166,7 +166,7 @@ button:disabled {
 
 .nav-link {
     font-size: 1.07rem;
-    padding: 0.74rem 1.28rem;
+    padding: 0.6rem 1.28rem;
 }
 
 .brand {
@@ -216,7 +216,9 @@ button:disabled {
 
 .home-config-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* The Arm Configuration tile holds a single dropdown, so give it less width
+       and let the robot-serial tiles grow enough to show the full placeholder. */
+    grid-template-columns: minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 1rem;
 }
 
@@ -277,8 +279,121 @@ button:disabled {
     box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
 }
 
+.end-effector-grid {
+    display: grid;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.end-effector-grid+.panel-grid {
+    margin-top: 1rem;
+}
+
+.end-effector-tile {
+    padding: 1.1rem 1.2rem;
+}
+
+.end-effector-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+}
+
+.end-effector-row+.end-effector-row {
+    margin-top: 0.8rem;
+}
+
+/* Keep each dropdown at a constant one-third width (accounting for the two
+   0.8rem gaps) so the primary Leader/Follower menus stay the same length
+   whether or not the secondary dropdowns are shown. */
+.end-effector-row .robot-input-group {
+    flex: 0 0 calc((100% - 1.6rem) / 3);
+    min-width: 0;
+}
+
 .camera-control-stack {
     gap: 0.85rem;
+}
+
+.gripper-control-stack {
+    gap: 0.85rem;
+}
+
+.gripper-init {
+    width: 100%;
+}
+
+.gripper-init.button--busy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+}
+
+.gripper-control-block {
+    display: grid;
+    gap: 0.6rem;
+    padding-top: 0.85rem;
+    border-top: 2px solid rgba(72, 103, 125, 0.2);
+}
+
+.gripper-control-title {
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.gripper-input-group {
+    display: grid;
+    gap: 0.3rem;
+}
+
+.gripper-input-group span {
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.gripper-input-group span strong {
+    color: var(--ink);
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.gripper-input-group input[type="range"] {
+    width: 100%;
+    accent-color: rgba(105, 185, 232, 0.9);
+    cursor: pointer;
+}
+
+.gripper-input-group input:focus {
+    outline: none;
+}
+
+.gripper-input-group input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.gripper-input-note {
+    color: var(--muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+}
+
+.gripper-control-hint {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1.3;
+}
+
+.gripper-control-hint.gripper-control-warning {
+    color: #b4541a;
+    font-weight: 600;
 }
 
 .camera-input-group {
@@ -993,7 +1108,7 @@ button:disabled {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    font-size: 0.82rem;
+    font-size: 0.9rem;
     line-height: 1.3;
     cursor: pointer;
     user-select: none;
@@ -1017,7 +1132,7 @@ button:disabled {
 }
 
 .recording-option-group-title {
-    font-size: 0.74rem;
+    font-size: 0.9rem;
     font-weight: 600;
     letter-spacing: 0.02em;
     color: var(--muted);
@@ -1050,7 +1165,7 @@ button:disabled {
 }
 
 .recording-option__label {
-    font-size: 0.79rem;
+    font-size: 0.9rem;
     line-height: 1.32;
     word-break: break-word;
 }
@@ -1111,7 +1226,7 @@ button:disabled {
 .recording-status__text {
     display: block;
     font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     line-height: 1.28;
 }
 
@@ -1280,7 +1395,7 @@ button:disabled {
 }
 
 .teleop-system-card {
-    padding: 0.72rem 0.8rem;
+    padding: 0.5rem 0.8rem;
     border-radius: 18px;
     min-height: 0;
     box-shadow: none;
@@ -1292,6 +1407,9 @@ button:disabled {
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
+    /* Reserve the reset button's height so cards without a button (e.g. Robot
+       Data Service) match the height of those with one. */
+    min-height: 1.9rem;
 }
 
 .teleop-system-card__title {
@@ -1304,6 +1422,12 @@ button:disabled {
 .teleop-system-card__label {
     margin: 0;
     color: var(--ink);
+    /* Tighter tracking than the default eyebrow (and never wrap) so the longest
+       label that shares a row with the reset button ("Teleop Service") stays on
+       one line. Size matches the gripper-panel labels. */
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
 }
 
 .teleop-system-card__dot {
@@ -1332,10 +1456,10 @@ button:disabled {
 }
 
 .teleop-system-card__reset {
-    width: 2.15rem;
-    min-width: 2.15rem;
-    height: 2.15rem;
-    flex: 0 0 2.15rem;
+    width: 1.9rem;
+    min-width: 1.9rem;
+    height: 1.9rem;
+    flex: 0 0 1.9rem;
     aspect-ratio: 1 / 1;
     padding: 0;
     border-radius: 999px;

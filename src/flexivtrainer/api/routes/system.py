@@ -19,7 +19,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from flexivtrainer.config import RobotSerialConfig
+from flexivtrainer.config import EndEffectorSideConfig, RobotSerialConfig
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -29,6 +29,7 @@ class RobotConfigRequest(BaseModel):
     arm_mode: Literal["single", "dual"] = "dual"
     leader_robot_serials: list[str] = Field(default_factory=list)
     follower_robot_serials: list[str] = Field(default_factory=list)
+    end_effector_config: dict[str, EndEffectorSideConfig] = Field(default_factory=dict)
 
 
 @router.get("/summary")

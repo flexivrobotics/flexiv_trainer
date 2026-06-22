@@ -7,27 +7,53 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The CI job only checks out the repo and runs tests; read-only contents access
+# is all the GITHUB_TOKEN needs.
+permissions:
+  contents: read
+
 jobs:
-  ubuntu-24:
-    runs-on: ubuntu-24.04
+  ci:
+    name: CI @ ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04, macos-26, windows-2025]
+    defaults:
+      run:
+        # Use bash everywhere (it ships on the Windows runners too) so the
+        # multi-line install steps with `\` continuations parse on every OS;
+        # the default Windows shell is PowerShell, which rejects `\`.
+        shell: bash
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-      - name: Run tests
-        uses: ./.github/actions/run-tests
 
-  ubuntu-22:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Run tests
-        uses: ./.github/actions/run-tests
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
 
-  macos-26:
-    runs-on: macos-26
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Run tests
-        uses: ./.github/actions/run-tests
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install package without vendor dependencies
+        run: python -m pip install -e . --no-deps
+
+      - name: Install open-source test dependencies
+        run: |
+          python -m pip install \
+            "fastapi>=0.136,<1.0" \
+            "uvicorn>=0.48,<1.0" \
+            "pydantic-settings>=2.14,<3.0" \
+            "typer>=0.25,<1.0" \
+            "rich>=13.9,<14.0" \
+            "numpy>=1.26" \
+            "pytest>=8.4,<9.0" \
+            "httpx>=0.28,<1.0" \
+            "lerobot==0.5.1"
+
+      - name: Run test suite
+        run: pytest
