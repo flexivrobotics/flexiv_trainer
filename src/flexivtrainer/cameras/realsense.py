@@ -414,10 +414,21 @@ class RealSenseService:
                 now = time.monotonic()
                 with self._lock:
                     if runtime.last_frame_time is not None:
-                        delta = max(now - runtime.last_frame_time, 1e-6)
-                        alpha = 0.3
-                        runtime.fps = alpha * (1.0 / delta) + (1 - alpha) * runtime.fps
-                    runtime.last_frame_time = now
+                        delta = now - runtime.last_frame_time
+                        # time.monotonic() can have coarse resolution (~16 ms on
+                        # Windows), so two frames can land in the same tick with
+                        # delta == 0 (or near it). Dividing by a tiny epsilon then
+                        # yields an absurd instantaneous FPS (e.g. 1e6) that the
+                        # EMA can't recover from. Skip the FPS update for such
+                        # sub-millisecond deltas and measure on the next frame.
+                        if delta >= 1e-3:
+                            alpha = 0.3
+                            runtime.fps = (
+                                alpha * (1.0 / delta) + (1 - alpha) * runtime.fps
+                            )
+                            runtime.last_frame_time = now
+                    else:
+                        runtime.last_frame_time = now
                     runtime.frame_count += 1
                     self._last_frames[name] = {
                         "image": image,
