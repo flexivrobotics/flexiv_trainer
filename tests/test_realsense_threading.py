@@ -97,9 +97,11 @@ def test_fps_uses_exponential_moving_average(tmp_path, monkeypatch) -> None:
 
     # FPS should be positive and reasonable (not jumping wildly)
     assert runtime.fps > 0
-    # With 5ms sleep per frame, theoretical max is ~200fps
-    # EMA should produce a stable value
-    assert runtime.fps < 300
+    # The instantaneous reading is clamped to 3x the configured rate before the
+    # EMA, so burst-delivered frames (or coarse-timer ticks on Windows) can never
+    # push the displayed FPS past the ceiling. With a 30 fps config that's 90.
+    ceiling = runtime.config.fps * 3.0
+    assert runtime.fps <= ceiling
 
     # Consumers read the latest cached frame without touching the pipeline.
     frames = service.read_frames(block=True, timeout_ms=100, camera_names=["ego"])

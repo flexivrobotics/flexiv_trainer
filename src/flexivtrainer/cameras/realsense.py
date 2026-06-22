@@ -417,14 +417,24 @@ class RealSenseService:
                         delta = now - runtime.last_frame_time
                         # time.monotonic() can have coarse resolution (~16 ms on
                         # Windows), so two frames can land in the same tick with
-                        # delta == 0 (or near it). Dividing by a tiny epsilon then
-                        # yields an absurd instantaneous FPS (e.g. 1e6) that the
-                        # EMA can't recover from. Skip the FPS update for such
-                        # sub-millisecond deltas and measure on the next frame.
+                        # delta == 0 (or near it). Skip the FPS update for such
+                        # sub-millisecond deltas and measure on the next frame
+                        # rather than dividing by a tiny number.
                         if delta >= 1e-3:
+                            instantaneous = 1.0 / delta
+                            # Clamp the instantaneous reading to a physical ceiling
+                            # before feeding the EMA. When the acquisition thread is
+                            # briefly starved (e.g. while recording start builds the
+                            # dataset/encoder), the RealSense SDK buffers frames and
+                            # then delivers them in a burst with tiny inter-arrival
+                            # deltas. Those bursts don't mean the camera sped up, so
+                            # cap them at a small multiple of the configured rate to
+                            # stop the displayed FPS spiking to hundreds/thousands.
+                            ceiling = max(runtime.config.fps, 1) * 3.0
+                            instantaneous = min(instantaneous, ceiling)
                             alpha = 0.3
                             runtime.fps = (
-                                alpha * (1.0 / delta) + (1 - alpha) * runtime.fps
+                                alpha * instantaneous + (1 - alpha) * runtime.fps
                             )
                             runtime.last_frame_time = now
                     else:
