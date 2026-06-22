@@ -21,7 +21,7 @@ limitations under the License.
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260619-20" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260622-03" />
 </head>
 
 <body>
@@ -329,6 +329,25 @@ limitations under the License.
         </div>
     </div>
 
+    <div class="fault-center hidden" id="fault-center">
+        <button class="fault-toggle" id="fault-toggle" type="button" aria-label="Robot fault"
+            aria-expanded="false" title="Robot fault">
+            <svg class="fault-toggle__icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3 22 20H2Z" fill="none" stroke="currentColor" stroke-linecap="round"
+                    stroke-linejoin="round" stroke-width="1.8"></path>
+                <path d="M12 9v5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+                <circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="currentColor" stroke-width="1.2"></circle>
+            </svg>
+        </button>
+        <section class="fault-panel hidden" id="fault-panel" aria-label="Robot fault">
+            <div class="fault-panel__header">
+                <h3>Robot Fault</h3>
+            </div>
+            <p class="fault-panel__message" id="fault-message"></p>
+            <div class="fault-panel__actions" id="fault-actions"></div>
+        </section>
+    </div>
+
     <div class="notification-center" id="notification-center">
         <button class="notification-toggle" id="notification-toggle" type="button" aria-label="Open notifications"
             aria-expanded="false" title="Open notifications">
@@ -350,7 +369,7 @@ limitations under the License.
         </section>
     </div>
 
-    <script type="module" src="/static/app.js?v=20260619-20"></script>
+    <script type="module" src="/static/app.js?v=20260622-02"></script>
 </body>
 
 </html>

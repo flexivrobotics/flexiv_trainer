@@ -148,6 +148,16 @@ const state = {
         nextId: 1,
         lastTeleopIssueSignature: "",
     },
+    // Floating fault widget shown above the notification center while any robot
+    // reports a fault. `open` expands the message + Clear Fault control; `busy`
+    // keeps the spinner while ClearFault() blocks; `cleared` swaps the panel to
+    // the "fault cleared" confirmation with an OK button.
+    fault: {
+        open: false,
+        busy: false,
+        cleared: false,
+        message: "",
+    },
 };
 
 const TELEMETRY_HISTORY_LIMIT = 90;
@@ -1288,6 +1298,130 @@ function toggleNotificationCenter(forceOpen) {
         state.notifications.unreadCount = 0;
     }
     renderNotificationCenter();
+}
+
+// Drive the floating fault widget from the latest teleop status. The widget is
+// hidden when no fault is present (and not mid-clear), shown as a pulsing red
+// caution icon otherwise. Clicking the icon expands the message + Clear Fault
+// button; while ClearFault() runs the button spins; once the fault clears the
+// panel swaps to a confirmation with an OK button.
+function syncFaultCenter(teleopStatus) {
+    const fault = state.fault;
+    const message = teleopStatus?.teleop?.fault;
+    const faulted = !!message;
+
+    if (faulted) {
+        fault.message = String(message);
+        // A fresh fault after a prior clear should reset the confirmation state
+        // so the panel shows the actionable message again.
+        if (fault.cleared) {
+            fault.cleared = false;
+        }
+    } else if (!fault.busy && !fault.cleared) {
+        // No fault and nothing in-flight: fully reset and hide.
+        fault.open = false;
+        fault.message = "";
+    }
+
+    renderFaultCenter(faulted);
+}
+
+function renderFaultCenter(faulted) {
+    const center = byId("fault-center");
+    const toggle = byId("fault-toggle");
+    const panel = byId("fault-panel");
+    const messageEl = byId("fault-message");
+    const actions = byId("fault-actions");
+    if (!center || !toggle || !panel || !messageEl || !actions) {
+        return;
+    }
+
+    const fault = state.fault;
+    // Keep the widget mounted while clearing or showing the cleared confirmation
+    // even though any_fault() already reads false.
+    const visible = faulted || fault.busy || fault.cleared;
+    center.classList.toggle("hidden", !visible);
+    if (!visible) {
+        fault.open = false;
+    }
+
+    toggle.setAttribute("aria-expanded", fault.open ? "true" : "false");
+    panel.classList.toggle("hidden", !fault.open);
+    if (!fault.open) {
+        return;
+    }
+
+    const message = fault.cleared
+        ? "Fault cleared. The robot is ready."
+        : (fault.message || "Robot fault detected.");
+    if (messageEl.textContent !== message) {
+        messageEl.textContent = message;
+    }
+
+    // renderFaultCenter runs on every teleop poll tick (~10x/sec). Rewriting the
+    // action button's innerHTML unconditionally detaches the node mid-click and
+    // drops the click (the bug seen on the Data Collection page). Only rebuild
+    // when the action state actually changes, keyed below.
+    const actionState = fault.cleared ? "ok" : (fault.busy ? "busy" : "clear");
+    if (actions.dataset.faultActionState !== actionState) {
+        actions.dataset.faultActionState = actionState;
+        if (actionState === "ok") {
+            actions.innerHTML = `<button class="fault-action-button fault-ok-button" id="fault-ok" type="button">OK</button>`;
+        } else if (actionState === "busy") {
+            actions.innerHTML = `<button class="fault-action-button fault-clear-button" id="fault-clear" type="button" disabled><span class="button-spinner" aria-hidden="true"></span><span>Clearing…</span></button>`;
+        } else {
+            actions.innerHTML = `<button class="fault-action-button fault-clear-button" id="fault-clear" type="button"><span>Clear Fault</span></button>`;
+        }
+
+        const okButton = byId("fault-ok");
+        if (okButton) {
+            okButton.onclick = () => {
+                state.fault.cleared = false;
+                state.fault.open = false;
+                state.fault.message = "";
+                renderFaultCenter(false);
+            };
+        }
+        const clearButton = byId("fault-clear");
+        if (clearButton && !fault.busy) {
+            clearButton.onclick = handleClearFault;
+        }
+    }
+}
+
+async function handleClearFault() {
+    if (state.fault.busy) {
+        return;
+    }
+    state.fault.busy = true;
+    renderFaultCenter(true);
+    try {
+        // ClearFault() blocks server-side until the fault clears or times out
+        // (up to 30s), so allow a generous client timeout to match.
+        const result = await api("/teleop/clear-fault", { method: "POST" }, {
+            timeoutMs: 35000,
+            timeoutMessage: "Clear fault timed out",
+        });
+        if (result?.cleared) {
+            state.fault.cleared = true;
+        } else {
+            showToast(result?.error || "Failed to clear robot fault", true);
+        }
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.fault.busy = false;
+        // Re-poll immediately so the widget reflects any_fault()'s real state;
+        // syncFaultCenter on the next tick keeps it honest if the fault returns.
+        refreshTeleopStatus().catch(() => { });
+        renderFaultCenter(!state.fault.cleared && !!state.teleopStatus?.teleop?.fault);
+    }
+}
+
+function toggleFaultCenter(forceOpen) {
+    const nextOpen = typeof forceOpen === "boolean" ? forceOpen : !state.fault.open;
+    state.fault.open = nextOpen;
+    renderFaultCenter(!!state.teleopStatus?.teleop?.fault);
 }
 
 function pushNotification(message, level = "info") {
@@ -3002,7 +3136,11 @@ function renderRecordingActionButtons(recording = {}) {
 
 function updateTeleopControlButtons(teleopStatus) {
     const teleop = teleopStatus?.teleop || {};
-    const teleopReady = !!teleop.initialized && !teleop.started && !teleop.error && !teleop.fault;
+    // A fault (incl. soft fault where any_fault() is true) does NOT block Start:
+    // Init() clears any clearable fault as part of bringing the loop up, so the
+    // operator must be able to click Start to recover. Faults still gate Home
+    // and Engage below, which run against an already-initialized robot.
+    const teleopReady = !!teleop.initialized && !teleop.started && !teleop.error;
     const teleopResetBusy = !!state.ui.serviceResetBusy.teleop_service;
     const canStart = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
     const canStop = !!teleop.started || state.ui.teleopHomeBusy;
@@ -3653,6 +3791,9 @@ function renderTeleop() {
         pushNotification(issueSignature, "error");
     }
     state.notifications.lastTeleopIssueSignature = issueSignature;
+
+    // Drive the floating fault widget off the same status snapshot.
+    syncFaultCenter(teleopStatus);
 
     const message = byId("teleop-message");
     if (message) {
@@ -4973,9 +5114,27 @@ function bindGlobalEvents() {
     if (notificationCenter) {
         notificationCenter.onclick = (event) => event.stopPropagation();
     }
+
+    const faultCenter = byId("fault-center");
+    const faultToggle = byId("fault-toggle");
+    if (faultToggle) {
+        faultToggle.onclick = (event) => {
+            event.stopPropagation();
+            toggleFaultCenter();
+        };
+    }
+    if (faultCenter) {
+        faultCenter.onclick = (event) => event.stopPropagation();
+    }
+
     document.addEventListener("click", () => {
         if (state.notifications.open) {
             toggleNotificationCenter(false);
+        }
+        // Don't collapse mid-clear or while showing the cleared confirmation;
+        // the user dismisses those via the spinner finishing / the OK button.
+        if (state.fault.open && !state.fault.busy && !state.fault.cleared) {
+            toggleFaultCenter(false);
         }
     });
 
