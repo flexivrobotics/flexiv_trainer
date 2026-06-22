@@ -94,6 +94,9 @@ const state = {
         teleop: null,
         training: null,
         recordingSave: null,
+        // View-independent robot-fault watcher (1s); the floating fault widget
+        // must surface a fault no matter which page the user is on.
+        fault: null,
     },
     timers: {
         robotConfigSave: null,
@@ -165,6 +168,9 @@ const TELEMETRY_HISTORY_LIMIT = 90;
 // refresh rate (e.g. 100ms ≈ 10 FPS); refreshTeleopStatus() self-throttles via
 // a queue, so requests never pile up if the backend is briefly slower.
 const TELEOP_POLL_INTERVAL_MS = 100;
+// How often the view-independent fault watcher polls /teleop/status (1s) so the
+// floating fault widget surfaces a robot fault on any page, not just teleop.
+const FAULT_POLL_INTERVAL_MS = 1000;
 // Active arm sides in capture order, mirroring RobotSerialConfig.active_sides()
 // on the backend. Single mode exposes only the chosen side; the index in this
 // list is the arm's capture order (and its follower-serial index).
@@ -1626,6 +1632,36 @@ function startTeleopPolling() {
             showToast(error.message, true);
         });
     }, TELEOP_POLL_INTERVAL_MS);
+}
+
+// View-independent fault watcher: poll /teleop/status once a second so the
+// floating fault widget appears on any page. On the teleoperation view the
+// 100ms poller above already drives syncFaultCenter (and the full telemetry
+// render), so skip there to avoid redundant fetches. Runs for the app's
+// lifetime -- never stopped -- so it must stay lightweight: it only updates the
+// fault widget, not the heavy teleop panels.
+let faultPollInFlight = false;
+function startFaultPolling() {
+    if (state.intervals.fault !== null) {
+        return;
+    }
+
+    state.intervals.fault = window.setInterval(async () => {
+        if (state.activeView === "teleoperation" || faultPollInFlight) {
+            return;
+        }
+        faultPollInFlight = true;
+        try {
+            const status = await api("/teleop/status");
+            state.teleopStatus = status;
+            syncFaultCenter(status);
+        } catch (error) {
+            // Network blips shouldn't spam toasts from a background poller;
+            // leave the widget in its last known state and retry next tick.
+        } finally {
+            faultPollInFlight = false;
+        }
+    }, FAULT_POLL_INTERVAL_MS);
 }
 
 function normalizePercent(value) {
@@ -5325,6 +5361,8 @@ async function init() {
     renderTeleop();
     renderTraining();
     setActiveView("home");
+    // Watch for robot faults on every page, independent of the active view.
+    startFaultPolling();
 }
 
 init().catch((error) => showToast(error.message, true));
