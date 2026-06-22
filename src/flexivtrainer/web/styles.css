@@ -132,7 +132,7 @@ button:disabled {
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
-    padding: 1rem 1.4rem;
+    padding: 0.7rem 1.4rem;
     border-bottom: 1px solid var(--line);
     background: rgba(247, 241, 231, 0.86);
     backdrop-filter: blur(18px);
@@ -166,7 +166,7 @@ button:disabled {
 
 .nav-link {
     font-size: 1.07rem;
-    padding: 0.74rem 1.28rem;
+    padding: 0.6rem 1.28rem;
 }
 
 .brand {
