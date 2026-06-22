@@ -472,6 +472,13 @@ state.recordingEntries = [...defaultRecordingEntryIds()];
 
 let teleopStatusRefreshPromise = null;
 let teleopStatusRefreshQueued = false;
+// Monotonic token guarding against stale /teleop/status responses. The 100ms
+// poller can have a request already in flight when the user clicks
+// Engage/Disengage; that older request captured the pre-click backend state and
+// its response can land *after* the click's refresh, reverting the button while
+// teleop is still engaged. Each status read claims the next sequence number;
+// only the newest claimed read is allowed to write state.teleopStatus.
+let teleopStatusSeq = 0;
 
 const TELEMETRY_SERIES = {
     force: {
@@ -3705,7 +3712,15 @@ function renderTrendGraph(side, kind, history, currentVector, label) {
 }
 
 async function fetchAndRenderTeleopStatus() {
-    state.teleopStatus = await api("/teleop/status");
+    const seq = ++teleopStatusSeq;
+    const status = await api("/teleop/status");
+    // A newer status read (e.g. one issued right after an Engage/Disengage
+    // click) has superseded this one while it was in flight -- drop its stale
+    // snapshot so it can't revert the UI to the pre-click state.
+    if (seq !== teleopStatusSeq) {
+        return;
+    }
+    state.teleopStatus = status;
     if (state.summary) {
         state.summary.services = state.teleopStatus.services || state.summary.services;
         renderHomeStatus();
@@ -5220,7 +5235,17 @@ function bindGlobalEvents() {
         const engaged = !!state.teleopStatus?.teleop?.engaged;
         const endpoint = engaged ? "/teleop/disengage" : "/teleop/engage";
         try {
-            await api(endpoint, { method: "POST" });
+            // The engage/disengage POST returns the authoritative post-action
+            // teleop snapshot. Apply it directly (claiming a fresh sequence
+            // number) so the button reflects the new state immediately and any
+            // poll already in flight is invalidated -- otherwise its older,
+            // pre-click snapshot could land afterward and revert the button.
+            const teleop = await api(endpoint, { method: "POST" });
+            const seq = ++teleopStatusSeq;
+            if (seq === teleopStatusSeq && state.teleopStatus) {
+                state.teleopStatus = { ...state.teleopStatus, teleop };
+                renderTeleop();
+            }
             await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);
