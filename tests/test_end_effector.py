@@ -60,6 +60,9 @@ class FakeGripper:
     def Move(self, width: float, velocity: float, force_limit: float) -> None:
         self.moves.append((width, velocity, force_limit))
 
+    def states(self) -> SimpleNamespace:
+        return SimpleNamespace(width=0.042, force=-3.5, is_moving=False)
+
 
 class FakeTool:
     def __init__(self, robot: object) -> None:
@@ -331,6 +334,30 @@ def test_gripper_snapshot_exposes_params_after_prepare(monkeypatch) -> None:
     assert entry["max_vel"] == 0.5
     assert entry["max_force"] == 50.0
     assert entry["max_width"] == 0.1
+
+
+def test_gripper_states_by_index_reports_width_and_force(monkeypatch) -> None:
+    # Recording reads each enabled gripper's measured width/force keyed by pair
+    # index; a side with no gripper (or no Init) is simply absent.
+    import flexivtrainer.teleop.end_effector as ee
+
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+
+    follower = FakeFollower()
+    tdk = FakeTDK(follower, [False] * 18)
+    cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
+    ctl = EndEffectorController(
+        tdk, ["left_arm", "right_arm"], {"left_arm": cfg}
+    )
+
+    # Nothing before the gripper is enabled.
+    assert ctl.gripper_states_by_index() == {}
+
+    ctl._setup_gripper(0, ctl._configs[0])
+    states = ctl.gripper_states_by_index()
+    # Only the configured/enabled left side (index 0) reports; right side absent.
+    assert states == {0: {"width": 0.042, "force": -3.5}}
 
 
 def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:

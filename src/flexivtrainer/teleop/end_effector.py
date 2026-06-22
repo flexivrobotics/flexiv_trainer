@@ -327,6 +327,32 @@ class EndEffectorController:
         self._grippers[index].Init()
         self._gripper_params[index] = self._grippers[index].params()
 
+    def gripper_states_by_index(self) -> dict[int, dict[str, float]]:
+        """Measured width/force for every enabled gripper, keyed by pair index.
+
+        Used by recording to fold a gripper's live state into the follower's
+        per-arm telemetry. Only sides whose follower is a gripper and whose
+        gripper has been enabled (initialize_grippers) and reports states are
+        included; a side without a working gripper is simply absent so the
+        recorder skips it.
+        """
+        states_by_index: dict[int, dict[str, float]] = {}
+        for index, cfg in enumerate(self._configs):
+            if cfg is None or cfg.follower != "gripper":
+                continue
+            gripper = self._grippers.get(index)
+            if gripper is None:
+                continue
+            try:  # pragma: no cover - hardware specific
+                states = gripper.states()
+                states_by_index[index] = {
+                    "width": float(states.width),
+                    "force": float(states.force),
+                }
+            except Exception:  # pragma: no cover - hardware specific
+                continue
+        return states_by_index
+
     def gripper_snapshot(self) -> dict[str, Any]:
         """Per-side gripper parameters/state, for sides with an enabled gripper.
 

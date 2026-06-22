@@ -166,6 +166,12 @@ class TeleopService:
         snapshot_robots: dict[str, Any] = {}
         errors: dict[str, str] = {}
 
+        # Live width/force for any follower configured as a gripper, keyed by the
+        # same pair index used below. Folded into the follower payload so that
+        # recording can append it to both observation.state and action. Read once
+        # up front; absent for sides without an enabled gripper.
+        gripper_states = self._gripper_states_by_index()
+
         for index, serial in enumerate(configured_serials):
             base_name = serial or f"robot_{index}"
             robot_name = base_name
@@ -202,6 +208,14 @@ class TeleopService:
                                 actions[field] = vector
                         if actions:
                             payload["actions"] = actions
+
+                # A follower gripper's measured width/force feeds both the
+                # observation and the action, so attach it whenever either is
+                # requested; the recorder appends it to the matching vector(s).
+                if include_states or include_actions:
+                    gripper = gripper_states.get(index)
+                    if gripper is not None:
+                        payload["gripper"] = dict(gripper)
             except Exception as exc:  # pragma: no cover - hardware specific
                 payload["connected"] = False
                 payload["error"] = describe_exception(exc)
@@ -210,6 +224,17 @@ class TeleopService:
             snapshot_robots[robot_name] = payload
 
         return {"robots": snapshot_robots, "errors": errors}
+
+    def _gripper_states_by_index(self) -> dict[int, dict[str, float]]:
+        # Live gripper width/force keyed by pair index, mirroring the index used
+        # by instances(idx). Empty when no end effector controller exists or no
+        # gripper is enabled, so the snapshot simply omits gripper telemetry.
+        if self._end_effectors is None:
+            return {}
+        try:
+            return self._end_effectors.gripper_states_by_index()
+        except Exception:  # pragma: no cover - hardware specific
+            return {}
 
     def initialize(self) -> TeleopSnapshot:
         robot_pairs_config = self._get_robot_pairs()

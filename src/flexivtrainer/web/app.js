@@ -135,6 +135,11 @@ const state = {
     },
     cameraFeeds: {},
     recordingEntries: [],
+    // Entry ids the checklist has already offered. Used to distinguish "newly
+    // offered" entries (auto-selected default-on, e.g. a gripper just enabled)
+    // from ones the user explicitly deselected (must stay off). null until the
+    // first reconcile seeds it.
+    recordingOfferedEntries: null,
     datasetPlotScope: {},
     notifications: {
         items: [],
@@ -181,10 +186,21 @@ const RECORDING_METRICS = [
     { metric: "tcp_wrench", stateField: "ext_wrench_in_world", actionField: "ext_wrench_d" },
 ];
 
+// True when a side's follower end effector is configured as a gripper, so its
+// measured width/force is available to record. Reads the cached end effector
+// config without seeding defaults (getEndEffectorConfig mutates state).
+function sideHasGripper(side) {
+    const eec = state.summary?.robot_config?.end_effector_config || {};
+    return eec[side]?.follower === "gripper";
+}
+
 // The checklist offers one toggle per (side, metric); selected metrics from
 // every arm are concatenated into the single `observation.state` / `action`
 // feature. Each row's label is the feature name-prefix it contributes (e.g.
-// `left_arm.tcp_pose`), matching the per-axis names in those features.
+// `left_arm.tcp_pose`), matching the per-axis names in those features. A side
+// whose follower is a gripper also gets a `gripper` toggle (width + force);
+// the same measured gripper states feed both its state and action entries, so
+// both verify against the follower's `gripper` payload section.
 function buildArmMetricRecordingOptions(sides) {
     const options = [];
     sides.forEach((side, index) => {
@@ -199,6 +215,17 @@ function buildArmMetricRecordingOptions(sides) {
                 verifyField: stateField,
             });
         }
+        if (sideHasGripper(side)) {
+            options.push({
+                id: `observation.state.${side}.gripper`,
+                label: `${side}.gripper`,
+                group: "observation.state",
+                bucket: "observation",
+                payload: "gripper",
+                side: index,
+                verifyField: "width",
+            });
+        }
     });
     sides.forEach((side, index) => {
         for (const { metric, actionField } of RECORDING_METRICS) {
@@ -210,6 +237,17 @@ function buildArmMetricRecordingOptions(sides) {
                 payload: "actions",
                 side: index,
                 verifyField: actionField,
+            });
+        }
+        if (sideHasGripper(side)) {
+            options.push({
+                id: `action.${side}.gripper`,
+                label: `${side}.gripper`,
+                group: "action",
+                bucket: "action",
+                payload: "gripper",
+                side: index,
+                verifyField: "width",
             });
         }
     });
@@ -446,8 +484,9 @@ const DATASET_METRIC_META = {
     tcp_pose: { title: "TCP Pose" },
     tcp_twist: { title: "TCP Twist" },
     tcp_wrench: { title: "TCP Wrench" },
+    gripper: { title: "Gripper" },
 };
-const DATASET_METRIC_ORDER = { tcp_pose: 0, tcp_twist: 1, tcp_wrench: 2 };
+const DATASET_METRIC_ORDER = { tcp_pose: 0, tcp_twist: 1, tcp_wrench: 2, gripper: 3 };
 const DATASET_STATE_COLORS = ["#8de0ff", "#86e4a8", "#ffbf7a", "#c78dff", "#ff8da8", "#a8d8ff", "#ffe08a"];
 const DATASET_ACTION_COLORS = ["#4db8db", "#4dba72", "#db9a4d", "#9a4ddb", "#db4d6a", "#6aa8db", "#dbc24d"];
 
@@ -462,7 +501,7 @@ function buildDatasetPlotGroups(numericKeys) {
     const groups = new Map();
     const sideOrder = [];
     (numericKeys || []).forEach((key) => {
-        const match = key.match(/^(observation\.state|action)\.([a-z0-9_]+)\.(tcp_pose|tcp_twist|tcp_wrench)\.(.+)$/);
+        const match = key.match(/^(observation\.state|action)\.([a-z0-9_]+)\.(tcp_pose|tcp_twist|tcp_wrench|gripper)\.(.+)$/);
         if (!match) return;
         const [, section, side, metric, axis] = match;
         if (!(metric in DATASET_METRIC_META)) return;
@@ -1756,11 +1795,34 @@ function renderArmConfig() {
     };
 }
 
+// Reconcile the recording checklist against the now-valid entries: drop any
+// that are no longer offered, and add any newly-offered default entries (e.g. a
+// follower just switched to "gripper", exposing its width/force) while keeping
+// the user's existing selections. Order follows the canonical default order.
+function reconcileRecordingEntries() {
+    const defaults = defaultRecordingEntryIds();
+    const valid = new Set(defaults);
+    const selected = new Set(
+        state.recordingEntries.filter((entry) => valid.has(entry))
+    );
+    // An entry that has never been offered before is auto-selected (entries are
+    // default-on); one that was offered and is absent from the selection was
+    // explicitly deselected, so it stays off. `recordingOfferedEntries` tracks
+    // what's been offered so a re-render of an unchanged checklist doesn't undo
+    // a deselection. On first run nothing has been offered, so the full default
+    // set is selected.
+    const offered = state.recordingOfferedEntries;
+    defaults.forEach((entry) => {
+        if (offered === null || !offered.has(entry)) selected.add(entry);
+    });
+    state.recordingOfferedEntries = valid;
+    state.recordingEntries = defaults.filter((entry) => selected.has(entry));
+}
+
 // The arm count/side changed: re-derive the recording checklist to the now-valid
 // entries, persist, and re-render the affected home controls.
 function onArmConfigChanged() {
-    const valid = new Set(defaultRecordingEntryIds());
-    state.recordingEntries = state.recordingEntries.filter((entry) => valid.has(entry));
+    reconcileRecordingEntries();
     renderArmConfig();
     renderHomeRobotConfigInputs();
     renderHomeStatus();
@@ -1988,6 +2050,13 @@ function renderHomeEndEffectors() {
                     field === "leader_channel" || field === "follower_channel"
                         ? Number(select.value)
                         : select.value;
+                // A follower gripper exposes width/force recording entries (and
+                // dropping the gripper retires them); renderRecordingOptions
+                // reconciles the checklist itself, so refresh it now rather than
+                // waiting for the next poll tick.
+                if (field === "follower") {
+                    renderRecordingOptions(state.teleopStatus?.recording || {});
+                }
                 // Re-render so the dependent secondary dropdowns appear/hide,
                 // then persist alongside the serial numbers.
                 renderHomeEndEffectors();
@@ -2581,20 +2650,21 @@ function renderRecordingOptions(recording = {}) {
     }
 
     const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
+    // Reconcile first so a gripper enabled after page load (or restored from a
+    // saved config) adds its width/force entries to the default-on selection,
+    // and a removed gripper retires them, before the checklist is derived.
+    reconcileRecordingEntries();
     const options = recordingEntryOptions();
     const defaultIds = options.map((option) => option.id);
-    // Drop any selection left over from a different arm mode so the checklist
-    // and the started recording only ever reference active-side entries.
-    const validIds = new Set(defaultIds);
-    state.recordingEntries = state.recordingEntries.filter((entry) => validIds.has(entry));
     const selected = new Set(state.recordingEntries);
     const allSelected = defaultIds.every((entryId) => selected.has(entryId));
 
     // renderTeleop runs on every poll tick (~10x/sec). Rebuilding these
     // controls unconditionally made the Select All button and checkboxes flash
     // and swallowed clicks landing mid-rerender. Only rebuild when something
-    // that affects the rendered output actually changed.
-    const renderKey = `${locked ? 1 : 0}|${getActiveSides().join("+")}|${state.recordingEntries.join(",")}`;
+    // that affects the rendered output actually changed -- including the set of
+    // offered options, which grows/shrinks with the configured gripper sides.
+    const renderKey = `${locked ? 1 : 0}|${getActiveSides().join("+")}|${defaultIds.join(",")}|${state.recordingEntries.join(",")}`;
     if (container.dataset.renderKey === renderKey) {
         return;
     }

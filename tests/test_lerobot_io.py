@@ -178,6 +178,87 @@ def test_extract_recording_frame_values_concatenates_both_arms() -> None:
     ]
 
 
+def test_gripper_width_force_folds_into_state_and_action() -> None:
+    # A follower gripper's measured width/force is appended to BOTH the
+    # observation.state and action vectors, from the same gripper states, and
+    # trails the arm's robot-state/action metrics.
+    snapshot = {
+        "robots": {
+            "FOLLOWER_A": {
+                **_arm_payload(0),
+                "gripper": {"width": 0.03, "force": -2.0},
+            }
+        }
+    }
+    values = extract_recording_frame_values(
+        snapshot,
+        [
+            "observation.state.left_arm.tcp_pose",
+            "observation.state.left_arm.gripper",
+            "action.left_arm.tcp_pose",
+            "action.left_arm.gripper",
+        ],
+    )
+
+    # Pose (7) then gripper (width, force) in each vector; action uses the same
+    # gripper width/force values as state.
+    assert values["observation.state"] == list(range(0, 7)) + [0.03, -2.0]
+    assert values["action"] == list(range(30, 37)) + [0.03, -2.0]
+
+
+def test_gripper_entry_is_in_defaults_and_features_named() -> None:
+    from flexivtrainer.data.lerobot_io import default_recording_entry_keys
+
+    defaults = default_recording_entry_keys(["left_arm"])
+    assert "observation.state.left_arm.gripper" in defaults
+    assert "action.left_arm.gripper" in defaults
+
+    snapshot = {
+        "robots": {
+            "FOLLOWER_A": {
+                **_arm_payload(0),
+                "gripper": {"width": 0.03, "force": -2.0},
+            }
+        }
+    }
+    features, state_keys, action_keys = build_features_from_sample(
+        snapshot,
+        make_images(),
+        [
+            "observation.state.left_arm.tcp_pose",
+            "observation.state.left_arm.gripper",
+            "action.left_arm.gripper",
+        ],
+        ["left_arm"],
+    )
+
+    state_feature = features["observation.state"]
+    assert state_feature["shape"] == (9,)  # pose 7 + gripper 2
+    assert state_feature["names"][-2:] == [
+        "left_arm.gripper.width",
+        "left_arm.gripper.force",
+    ]
+    action_feature = features["action"]
+    assert action_feature["shape"] == (2,)
+    assert action_feature["names"] == [
+        "left_arm.gripper.width",
+        "left_arm.gripper.force",
+    ]
+
+
+def test_gripper_entry_omitted_when_no_gripper_telemetry() -> None:
+    # The gripper entry is selected but the snapshot has no gripper section
+    # (no gripper configured/enabled) -> no gripper axes are emitted.
+    values = extract_recording_frame_values(
+        make_snapshot(),
+        [
+            "observation.state.left_arm.tcp_pose",
+            "observation.state.left_arm.gripper",
+        ],
+    )
+    assert values["observation.state"] == list(range(0, 7))
+
+
 def test_resolve_recording_image_names_filters_selected_cameras() -> None:
     assert resolve_recording_image_names(
         [
