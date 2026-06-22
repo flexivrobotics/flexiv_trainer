@@ -14,9 +14,8 @@
 
 from types import SimpleNamespace
 
-from flexivtrainer.config import EndEffectorSideConfig
 import flexivtrainer.teleop.end_effector as ee
-from flexivtrainer.teleop.end_effector import EndEffectorController
+from flexivtrainer.config import EndEffectorSideConfig
 
 
 class FakeMode:
@@ -106,20 +105,20 @@ def test_has_work_only_when_leader_and_follower_configured() -> None:
     tdk = FakeTDK(follower, [False] * 18)
 
     # Leader none -> nothing to read from.
-    none_leader = EndEffectorController(
+    none_leader = ee.EndEffectorController(
         tdk, ["left_arm"], {"left_arm": EndEffectorSideConfig(follower="gripper")}
     )
     assert none_leader.has_work() is False
 
     # Follower none -> nothing to drive.
-    none_follower = EndEffectorController(
+    none_follower = ee.EndEffectorController(
         tdk,
         ["left_arm"],
         {"left_arm": EndEffectorSideConfig(leader="digital_input")},
     )
     assert none_follower.has_work() is False
 
-    configured = EndEffectorController(tdk, ["left_arm"], {"left_arm": _di_config()})
+    configured = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": _di_config()})
     assert configured.has_work() is True
 
 
@@ -127,7 +126,7 @@ def test_digital_output_mirrors_leader_high_activating() -> None:
     follower = FakeFollower()
     tdk = FakeTDK(follower, [False] * 18)
     config = {"left_arm": _di_config(leader_channel=2, follower_channel=5)}
-    ctl = EndEffectorController(tdk, ["left_arm"], config)
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], config)
     cfg = ctl._configs[0]
 
     # Not triggered -> port driven low (activated state is high).
@@ -149,7 +148,7 @@ def test_digital_output_respects_low_activating_and_activated_states() -> None:
         follower_channel=3,
         follower_activated_state="low",
     )
-    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
 
     # DI low + activating "low" => triggered; activated state "low" => port low.
     tdk._leader_ports[0] = False
@@ -165,7 +164,7 @@ def test_digital_output_respects_low_activating_and_activated_states() -> None:
 def test_digital_output_only_writes_on_change() -> None:
     follower = FakeFollower()
     tdk = FakeTDK(follower, [False] * 18)
-    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": _di_config()})
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": _di_config()})
 
     writes: list[dict[int, bool]] = []
     follower.SetDigitalOutputs = lambda d: writes.append(dict(d))  # type: ignore[assignment]
@@ -194,7 +193,7 @@ def test_setup_enables_switches_and_inits_gripper_when_idle(monkeypatch) -> None
     cfg = EndEffectorSideConfig(
         leader="digital_input", follower="gripper", gripper_model="Flexiv-GN01"
     )
-    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
 
     ctl._setup_gripper(0, ctl._configs[0])
     assert ctl._grippers[0].enabled_name == "Flexiv-GN01"
@@ -223,7 +222,7 @@ def test_setup_skips_tool_switch_when_not_idle(monkeypatch) -> None:
     cfg = EndEffectorSideConfig(
         leader="digital_input", follower="gripper", gripper_model="Flexiv-GN01"
     )
-    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
 
     ctl._setup_gripper(0, ctl._configs[0])
     assert ctl._grippers[0].enabled_name == "Flexiv-GN01"
@@ -241,7 +240,7 @@ def test_uninitialized_gripper_is_skipped_not_errored(monkeypatch) -> None:
     cfg = EndEffectorSideConfig(
         leader="digital_input", follower="gripper", gripper_activated_state="close"
     )
-    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
 
     # Should not raise, and no gripper was enabled to command.
     ctl._tick(0, ctl._configs[0])
@@ -259,7 +258,7 @@ def test_gripper_enabled_without_params_is_skipped_not_errored(monkeypatch) -> N
     cfg = EndEffectorSideConfig(
         leader="digital_input", follower="gripper", gripper_activated_state="close"
     )
-    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
 
     # Simulate the partial state: a gripper object exists, but no params cached.
     ctl._grippers[0] = FakeGripper(object())
@@ -284,7 +283,7 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
         gripper_model="Flexiv-GN01",
         gripper_activated_state="close",
     )
-    ctl = EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["left_arm"], {"left_arm": cfg})
     ctl._setup_gripper(0, ctl._configs[0])
 
     # Idle: not triggered, activated state "close" -> open (max width).
@@ -300,7 +299,9 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
     # No panel value set yet -> defaults derived from the gripper's own params:
     # max velocity, and DEFAULT_FORCE_FRACTION of max force.
     assert gripper.moves[-1][1] == 0.5  # max_vel
-    assert gripper.moves[-1][2] == 50.0 * EndEffectorController.DEFAULT_FORCE_FRACTION
+    assert gripper.moves[-1][2] == (
+        50.0 * ee.EndEffectorController.DEFAULT_FORCE_FRACTION
+    )
 
     # No state change -> no extra move.
     moves_before = len(gripper.moves)
@@ -313,7 +314,7 @@ def test_side_index_maps_to_pair_index() -> None:
     follower = FakeFollower()
     tdk = FakeTDK(follower, [False] * 18)
     tdk._leader_ports[4] = True
-    ctl = EndEffectorController(
+    ctl = ee.EndEffectorController(
         tdk,
         ["left_arm", "right_arm"],
         {"right_arm": _di_config(leader_channel=4, follower_channel=7)},
@@ -333,7 +334,7 @@ def test_gripper_snapshot_exposes_params_after_prepare(monkeypatch) -> None:
     tdk = FakeTDK(follower, [False] * 18)
     # Gripper follower with NO leader trigger: still set up and reported.
     cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
-    ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
 
     # Nothing before prepare().
     assert ctl.gripper_snapshot() == {}
@@ -358,7 +359,7 @@ def test_gripper_states_by_index_reports_width_and_force(monkeypatch) -> None:
     follower = FakeFollower()
     tdk = FakeTDK(follower, [False] * 18)
     cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
-    ctl = EndEffectorController(
+    ctl = ee.EndEffectorController(
         tdk, ["left_arm", "right_arm"], {"left_arm": cfg}
     )
 
@@ -386,7 +387,7 @@ def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:
         follower="gripper",
         gripper_activated_state="close",
     )
-    ctl = EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
+    ctl = ee.EndEffectorController(tdk, ["single_arm"], {"single_arm": cfg})
     ctl._setup_gripper(0, ctl._configs[0])
     gripper = ctl._grippers[0]
 
@@ -405,7 +406,7 @@ def test_single_arm_uses_pair_index_zero() -> None:
     follower = FakeFollower()
     tdk = FakeTDK(follower, [False] * 18)
     tdk._leader_ports[1] = True
-    ctl = EndEffectorController(
+    ctl = ee.EndEffectorController(
         tdk,
         ["single_arm"],
         {"single_arm": _di_config(leader_channel=1, follower_channel=9)},
