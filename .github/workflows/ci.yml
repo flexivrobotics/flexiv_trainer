@@ -15,6 +15,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-22.04, macos-26, windows-2025]
+    defaults:
+      run:
+        # Use bash everywhere (it ships on the Windows runners too) so the
+        # multi-line install steps with `\` continuations parse on every OS;
+        # the default Windows shell is PowerShell, which rejects `\`.
+        shell: bash
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
