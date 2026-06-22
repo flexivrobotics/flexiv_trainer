@@ -7,6 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The CI job only checks out the repo and runs tests; read-only contents access
+# is all the GITHUB_TOKEN needs.
+permissions:
+  contents: read
+
 jobs:
   ci:
     name: CI @ ${{ matrix.os }}

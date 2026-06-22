@@ -521,6 +521,34 @@ def test_robot_data_snapshot_folds_in_gripper_states(tmp_path) -> None:
     assert "gripper" not in snapshot["robots"]["FOLLOWER_B"]
 
 
+def test_robot_data_snapshot_skips_gripper_read_without_states_or_actions(
+    tmp_path,
+) -> None:
+    # A bare snapshot (neither states nor actions requested) must not touch the
+    # gripper layer, which on real hardware would issue a gripper.states() read.
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
+    service = TeleopService(settings, get_robot_pairs=lambda: pairs)
+    service._controller = FakeController((FakeRobot(),))
+
+    calls = {"count": 0}
+
+    def _gripper_states():
+        calls["count"] += 1
+        return {0: {"width": 0.03, "force": -2.0}}
+
+    service._end_effectors = SimpleNamespace(
+        gripper_states_by_index=_gripper_states
+    )
+
+    snapshot = service.robot_data_snapshot(
+        include_states=False, include_actions=False
+    )
+
+    assert calls["count"] == 0
+    assert "gripper" not in snapshot["robots"]["FOLLOWER_A"]
+
+
 def test_robot_data_snapshot_reads_struct_states_without_dict(tmp_path) -> None:
     # RobotStates/RobotActions from flexivrdk are pybind11 structs with no
     # __dict__; the snapshot must read their fields by attribute.

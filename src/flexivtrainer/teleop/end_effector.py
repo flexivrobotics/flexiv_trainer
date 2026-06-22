@@ -16,10 +16,12 @@
 
 Each arm pair can configure a leader *digital input* device (a trigger such as a
 button wired to one of the leader robot's DI ports) and a follower end effector
-(a digital output device or a gripper). While the pairs are engaged, this
-controller polls every pair's leader DI and mirrors its state onto the follower:
-the follower output/gripper is driven to its configured "activated" state while
-the leader trigger is active, and to the opposite state otherwise.
+(a digital output device or a gripper). While the teleop control loop is running
+(this controller's mirror thread is started/stopped by teleop Start/Stop, not by
+engage -- it keeps running across engage/disengage cycles), it polls every pair's
+leader DI and mirrors its state onto the follower: the follower output/gripper is
+driven to its configured "activated" state while the leader trigger is active,
+and to the opposite state otherwise.
 
 The configuration is the per-side :class:`EndEffectorSideConfig` cached in
 ``robot_serials.json`` and keyed by arm side ("left_arm"/"right_arm"/
@@ -252,13 +254,14 @@ class EndEffectorController:
             return
 
         gripper = self._grippers.get(index)
-        if gripper is None:
-            # The gripper was never initialized (Init not run, or setup failed),
-            # so there is nothing to command. Skip it silently -- the panel shows
-            # a "not initialized" warning -- so the rest of the mirror loop and
-            # teleop keep running.
+        params = self._gripper_params.get(index)
+        if gripper is None or params is None:
+            # The gripper was never (fully) initialized -- Init not run, or setup
+            # raised after Enable() so the gripper object exists without params --
+            # so there is nothing to command. Skip it silently (the panel shows a
+            # "not initialized" warning) so the rest of the mirror loop and teleop
+            # keep running rather than raising on every tick.
             return
-        params = self._gripper_params[index]
         width = params.min_width if target == "close" else params.max_width
         # Use the panel slider's velocity/force, falling back to the gripper's
         # own params-derived defaults until a slider sets them.

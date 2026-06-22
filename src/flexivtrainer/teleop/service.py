@@ -101,7 +101,8 @@ class TeleopService:
         self._started = False
         self._engaged = False
         # Background mirror of leader digital inputs onto follower end effectors;
-        # runs only while the pairs are engaged.
+        # runs with the teleop control loop (started/stopped by Start/Stop), not
+        # gated by engage -- it keeps mirroring across engage/disengage cycles.
         self._end_effectors: EndEffectorController | None = None
 
     def _configured_remote_serials(self) -> list[str]:
@@ -169,8 +170,14 @@ class TeleopService:
         # Live width/force for any follower configured as a gripper, keyed by the
         # same pair index used below. Folded into the follower payload so that
         # recording can append it to both observation.state and action. Read once
-        # up front; absent for sides without an enabled gripper.
-        gripper_states = self._gripper_states_by_index()
+        # up front; absent for sides without an enabled gripper. Skip the read
+        # entirely when neither states nor actions are requested so a bare
+        # snapshot never touches the (hardware) gripper layer.
+        gripper_states = (
+            self._gripper_states_by_index()
+            if (include_states or include_actions)
+            else {}
+        )
 
         for index, serial in enumerate(configured_serials):
             base_name = serial or f"robot_{index}"
