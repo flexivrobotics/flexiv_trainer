@@ -1427,14 +1427,16 @@ async function handleClearFault() {
         // Re-poll immediately so the widget reflects any_fault()'s real state;
         // syncFaultCenter on the next tick keeps it honest if the fault returns.
         refreshTeleopStatus().catch(() => { });
-        renderFaultCenter(!state.fault.cleared && !!state.teleopStatus?.teleop?.fault);
+        // Drive visibility from the widget's own state, not state.teleopStatus,
+        // which the background poller no longer keeps current on non-teleop pages.
+        renderFaultCenter(!state.fault.cleared && !!state.fault.message);
     }
 }
 
 function toggleFaultCenter(forceOpen) {
     const nextOpen = typeof forceOpen === "boolean" ? forceOpen : !state.fault.open;
     state.fault.open = nextOpen;
-    renderFaultCenter(!!state.teleopStatus?.teleop?.fault);
+    renderFaultCenter(!!state.fault.message);
 }
 
 function pushNotification(message, level = "info") {
@@ -1660,7 +1662,11 @@ function startFaultPolling() {
         faultPollInFlight = true;
         try {
             const status = await api("/teleop/status");
-            state.teleopStatus = status;
+            // Drive only the fault widget from this lightweight poll. Don't
+            // write state.teleopStatus: it's the shared snapshot many flows
+            // read (engage handler, recording, telemetry), and this 1s, off-view
+            // poll would feed them stale, out-of-order data. syncFaultCenter
+            // keeps the widget's own state (state.fault) current on its own.
             syncFaultCenter(status);
         } catch (error) {
             // Network blips shouldn't spam toasts from a background poller;
@@ -5235,14 +5241,15 @@ function bindGlobalEvents() {
         const engaged = !!state.teleopStatus?.teleop?.engaged;
         const endpoint = engaged ? "/teleop/disengage" : "/teleop/engage";
         try {
-            // The engage/disengage POST returns the authoritative post-action
-            // teleop snapshot. Apply it directly (claiming a fresh sequence
-            // number) so the button reflects the new state immediately and any
-            // poll already in flight is invalidated -- otherwise its older,
-            // pre-click snapshot could land afterward and revert the button.
+            // The POST returns the authoritative post-action snapshot. Claim a
+            // fresh sequence number when it lands and apply it unconditionally:
+            // claiming the newest number invalidates every /teleop/status poll
+            // that started earlier (including ones in flight during the POST),
+            // so none of their older snapshots can write state.teleopStatus and
+            // revert the button afterward.
             const teleop = await api(endpoint, { method: "POST" });
-            const seq = ++teleopStatusSeq;
-            if (seq === teleopStatusSeq && state.teleopStatus) {
+            ++teleopStatusSeq;
+            if (state.teleopStatus) {
                 state.teleopStatus = { ...state.teleopStatus, teleop };
                 renderTeleop();
             }
