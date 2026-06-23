@@ -43,8 +43,8 @@ def _optional_dependency_error(feature: str, exc: ImportError) -> str:
 def _entry_created_time(path: Path) -> float:
     # Creation time for the browser to sort episodes by. ``st_ctime`` is the
     # inode-change time on POSIX (close to creation for a freshly recorded,
-    # never-modified episode) and the real creation time on Windows; fall back
-    # to mtime, then 0.0, if the stat call fails (e.g. a race on deletion).
+    # never-modified episode) and the real creation time on Windows. Fall back
+    # to 0.0 if the stat call fails (e.g. a race on deletion).
     try:
         return path.stat().st_ctime
     except OSError:

@@ -212,8 +212,34 @@ def test_save_files_episode_under_job_subfolder(tmp_path) -> None:
 
 
 def test_start_sanitizes_and_reports_job_name(tmp_path) -> None:
-    # start() resolves the job name eagerly so status() surfaces the sanitized
-    # value while recording; verify via the resolved internal state.
-    service = _awaiting_save_service(tmp_path, job_name="  My Job!! ")
-    # Re-run sanitization the same way start() would and confirm the contract.
-    assert sanitize_job_name(service._job_name) == "My_Job"
+    # start() resolves the job name eagerly and status() surfaces the sanitized
+    # value so the recording panel can confirm the active job. Record only
+    # state/action entries (no cameras) so no video encoder is needed.
+    pytest.importorskip("lerobot")
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    service = RecordingService(
+        settings,
+        teleop=_FakeTeleop(),
+        cameras=SimpleNamespace(),
+        get_active_sides=lambda: ["left_arm", "right_arm"],
+    )
+    entries = [
+        "observation.state.left_arm.tcp_pose",
+        "action.left_arm.tcp_pose",
+    ]
+
+    status = service.start(
+        task="job name test",
+        fps=30,
+        recording_entries=entries,
+        job_name="  My Job!! ",
+    )
+    try:
+        # The unsanitized name "  My Job!! " collapses to a single safe segment.
+        assert status["job_name"] == "My_Job"
+        # status() continues to report it while the recording is active.
+        assert service.status()["job_name"] == "My_Job"
+    finally:
+        service.stop()
