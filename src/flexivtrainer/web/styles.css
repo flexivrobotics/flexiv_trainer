@@ -363,10 +363,38 @@ button:disabled {
     letter-spacing: 0;
 }
 
+/* Slider and its number box share a row: slider stretches, number box fixed. */
+.gripper-input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
 .gripper-input-group input[type="range"] {
-    width: 100%;
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
     accent-color: rgba(105, 185, 232, 0.9);
     cursor: pointer;
+}
+
+.gripper-number-input {
+    flex: 0 0 auto;
+    width: 4.5rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.3rem 0.45rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+.gripper-number-input:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
 }
 
 .gripper-input-group input:focus {

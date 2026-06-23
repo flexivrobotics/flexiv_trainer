@@ -453,6 +453,37 @@ function saveCachedJobName(jobName) {
         // Persistence is best-effort; ignore storage failures.
     }
 }
+
+// localStorage key the last-used gripper velocity/force are cached under, keyed
+// by arm side, so the sliders/number boxes resume their values across reloads
+// instead of always reverting to the model defaults.
+const GRIPPER_PARAMS_STORAGE_KEY = "flexivtrainer.gripperParams";
+
+// Read the cached gripper params for one side as {velocity, force}, or {} when
+// none/unavailable. Wrapped in try/catch (localStorage can throw in sandboxed
+// or private-mode frames).
+function loadCachedGripperParams(side) {
+    try {
+        const raw = window.localStorage.getItem(GRIPPER_PARAMS_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        const entry = parsed && typeof parsed === "object" ? parsed[side] : null;
+        return entry && typeof entry === "object" ? entry : {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function saveCachedGripperParams(side, velocity, force) {
+    try {
+        const raw = window.localStorage.getItem(GRIPPER_PARAMS_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        const next = parsed && typeof parsed === "object" ? parsed : {};
+        next[side] = { velocity, force };
+        window.localStorage.setItem(GRIPPER_PARAMS_STORAGE_KEY, JSON.stringify(next));
+    } catch (error) {
+        // Persistence is best-effort; ignore storage failures.
+    }
+}
 const RECORD_START_MARKUP = `
     <span class="button-content">
         <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
@@ -3380,12 +3411,18 @@ function buildGripperControlPanel(content, sides, grippers) {
             ${multiple && label ? `<div class="gripper-control-title">${label}</div>` : ""}
             <label class="gripper-input-group">
                 <span>Grasping velocity: <strong class="gripper-velocity-value"></strong> m/s</span>
-                <input type="range" class="gripper-velocity" step="0.001" />
+                <div class="gripper-input-row">
+                    <input type="range" class="gripper-velocity" step="0.001" />
+                    <input type="number" class="gripper-number-input gripper-velocity-number" step="0.001" aria-label="Grasping velocity (m/s)" />
+                </div>
                 <small class="gripper-input-note"></small>
             </label>
             <label class="gripper-input-group">
                 <span>Grasping force: <strong class="gripper-force-value"></strong> N</span>
-                <input type="range" class="gripper-force" step="0.1" />
+                <div class="gripper-input-row">
+                    <input type="range" class="gripper-force" step="0.1" />
+                    <input type="number" class="gripper-number-input gripper-force-number" step="0.1" aria-label="Grasping force (N)" />
+                </div>
                 <small class="gripper-input-note"></small>
             </label>
             <p class="gripper-control-hint"></p>
@@ -3394,54 +3431,116 @@ function buildGripperControlPanel(content, sides, grippers) {
 
         const velInput = block.querySelector(".gripper-velocity");
         const forceInput = block.querySelector(".gripper-force");
+        const velNumber = block.querySelector(".gripper-velocity-number");
+        const forceNumber = block.querySelector(".gripper-force-number");
 
         if (params) {
             const store = (state.gripperControl[side] ||= {});
-            // Defaults: velocity = max_vel, grasping force = 1/4 of max_force.
-            if (store.velocity == null) store.velocity = params.max_vel;
-            if (store.force == null) store.force = params.max_force / 4;
+            const cached = loadCachedGripperParams(side);
+            // Seed from the cached last-used value, then the model default
+            // (velocity = max_vel; grasping force = 1/4 of max_force). The clamp
+            // below keeps a cached value valid if the gripper's range changed.
+            if (store.velocity == null) {
+                store.velocity = cached.velocity != null ? cached.velocity : params.max_vel;
+            }
+            if (store.force == null) {
+                store.force = cached.force != null ? cached.force : params.max_force / 4;
+            }
             // Clamp any carried-over value into the (possibly new) range.
             store.velocity = clampNumber(store.velocity, params.min_vel, params.max_vel);
             store.force = clampNumber(store.force, params.min_force, params.max_force);
 
-            bindGripperSlider(block, velInput, side, "velocity", params.min_vel, params.max_vel, 3);
-            bindGripperSlider(block, forceInput, side, "force", params.min_force, params.max_force, 1);
+            bindGripperControl(block, velInput, velNumber, side, "velocity", params.min_vel, params.max_vel, 3);
+            bindGripperControl(block, forceInput, forceNumber, side, "force", params.min_force, params.max_force, 1);
         } else {
             // Params (and thus the valid range) are obtained on Init; leave the
-            // sliders disabled until then.
+            // controls disabled until then.
             velInput.disabled = true;
             forceInput.disabled = true;
+            velNumber.disabled = true;
+            forceNumber.disabled = true;
         }
     });
 }
 
-// Configure a range slider for one gripper field: set its bounds, reflect the
-// stored value, live-update the readout while dragging, and push to the backend
-// when released (change). ``decimals`` controls the displayed precision.
-function bindGripperSlider(block, input, side, field, min, max, decimals) {
+// Configure a range slider plus its number box for one gripper field: set their
+// bounds, reflect the stored value, keep the two inputs in sync, live-update the
+// readout while editing, and push to the backend when committed (change).
+// ``decimals`` controls the displayed precision.
+function bindGripperControl(block, slider, number, side, field, min, max, decimals) {
     const valueEl = block.querySelector(`.gripper-${field}-value`);
-    const note = input.nextElementSibling;
+    const note = block.querySelector(`.gripper-${field}-number`).closest(".gripper-input-group").querySelector(".gripper-input-note");
     const store = (state.gripperControl[side] ||= {});
-    input.min = min;
-    input.max = max;
-    input.value = store[field];
-    const render = () => {
-        if (valueEl) valueEl.textContent = roundForInput(store[field], decimals);
-    };
-    render();
-    note.textContent = `Range: ${roundForInput(min, decimals)}–${roundForInput(max, decimals)}`;
+    const step = 1 / 10 ** decimals;
+    slider.min = min;
+    slider.max = max;
+    number.min = roundForInput(min, decimals);
+    number.max = roundForInput(max, decimals);
+    number.step = step;
 
-    input.oninput = () => {
-        const value = clampNumber(parseFloat(input.value), min, max);
-        store[field] = value;
-        render();
+    // Reflect the stored value across the readout, slider, and number box.
+    const render = () => {
+        const rounded = roundForInput(store[field], decimals);
+        if (valueEl) valueEl.textContent = rounded;
+        slider.value = store[field];
+        // Don't fight the field the user is typing in (e.g. a partial "0.").
+        if (document.activeElement !== number) {
+            number.value = rounded;
+        }
     };
-    input.onchange = () => {
-        store[field] = clampNumber(parseFloat(input.value), min, max);
+    store[field] = clampNumber(store[field], min, max);
+    render();
+    if (note) {
+        note.textContent = `Range: ${roundForInput(min, decimals)}–${roundForInput(max, decimals)}`;
+    }
+
+    // Live-update (no backend push) while dragging the slider / typing a number.
+    const onInput = (rawValue) => {
+        const value = clampNumber(parseFloat(rawValue), min, max);
+        store[field] = value;
+        const rounded = roundForInput(value, decimals);
+        if (valueEl) valueEl.textContent = rounded;
+        return value;
+    };
+    slider.oninput = () => {
+        const value = onInput(slider.value);
+        if (document.activeElement !== number) {
+            number.value = roundForInput(value, decimals);
+        }
+    };
+    number.oninput = () => {
+        // Allow intermediate, not-yet-parseable input without snapping it; only
+        // mirror to the slider once it parses to a number.
+        if (number.value.trim() === "" || Number.isNaN(parseFloat(number.value))) {
+            return;
+        }
+        const value = onInput(number.value);
+        slider.value = value;
+    };
+
+    // Commit: clamp, normalize the displayed value, persist, and push to backend.
+    // ``store[field]`` is kept current by the oninput handlers above; fall back
+    // to it when the number box holds an unparseable intermediate value.
+    const commit = () => {
+        const parsed = parseFloat(number.value);
+        const base = Number.isNaN(parsed) ? store[field] : parsed;
+        store[field] = clampNumber(base, min, max);
         render();
+        persistGripperParams(side);
         // Push to the backend so the mirror loop's Move() uses the new value.
         sendGripperParams(side);
     };
+    slider.onchange = commit;
+    number.onchange = commit;
+}
+
+// Cache this side's last-used velocity/force so they persist across reloads.
+function persistGripperParams(side) {
+    const store = state.gripperControl[side] || {};
+    if (store.velocity == null || store.force == null) {
+        return;
+    }
+    saveCachedGripperParams(side, store.velocity, store.force);
 }
 
 // Persist this side's velocity/force on the backend (used by the mirror loop's
