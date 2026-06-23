@@ -107,6 +107,10 @@ class FakeTeleopController:
         self.stop_calls = 0
         self.engage_calls: list[tuple[int, bool]] = []
         self.init_zero_ft_sensor: object = None
+        self.clear_fault_calls: list[int] = []
+        # When True, ClearFault() succeeds at clearing the fault; when False it
+        # runs but leaves the controller faulted (the "fault persists" branch).
+        self.clear_fault_succeeds = True
 
     def Init(self, zero_ft_sensor: object = None) -> None:
         self.init_calls += 1
@@ -129,6 +133,18 @@ class FakeTeleopController:
 
     def any_fault(self) -> bool:
         return self._faulted
+
+    def ClearFault(self, timeout_sec: int = 30) -> None:
+        self.clear_fault_calls.append(timeout_sec)
+        if self.clear_fault_succeeds:
+            self._faulted = False
+
+
+class FakeControllerWithoutClearFault:
+    """Older controller surface that does not expose ClearFault()."""
+
+    def any_fault(self) -> bool:
+        return True
 
 
 def test_snapshot_reports_not_started_after_initialize_only(tmp_path) -> None:
@@ -163,6 +179,56 @@ def test_snapshot_reports_fault_when_any_fault_is_true(tmp_path) -> None:
     service._initialized = True
 
     assert service.snapshot().fault is not None
+
+
+def test_clear_fault_clears_when_controller_recovers(tmp_path) -> None:
+    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    controller = FakeTeleopController()
+    controller._faulted = True
+    service._controller = controller
+
+    result = service.clear_fault()
+
+    assert controller.clear_fault_calls == [30]
+    assert result == {"ok": True, "cleared": True, "error": None}
+    # Re-derived from any_fault(), which now reports clear.
+    assert service.snapshot().fault is None
+
+
+def test_clear_fault_reports_fault_persists_when_still_faulted(tmp_path) -> None:
+    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    controller = FakeTeleopController()
+    controller._faulted = True
+    controller.clear_fault_succeeds = False
+    service._controller = controller
+
+    result = service.clear_fault()
+
+    assert controller.clear_fault_calls == [30]
+    assert result["ok"] is False
+    assert result["cleared"] is False
+    assert result["error"] == "Fault persists after ClearFault"
+
+
+def test_clear_fault_errors_when_controller_unsupported(tmp_path) -> None:
+    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    service._controller = FakeControllerWithoutClearFault()
+
+    result = service.clear_fault()
+
+    assert result["ok"] is False
+    assert result["cleared"] is False
+    assert result["error"] == "Controller does not support ClearFault"
+
+
+def test_clear_fault_errors_when_not_connected(tmp_path) -> None:
+    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
+
+    result = service.clear_fault()
+
+    assert result["ok"] is False
+    assert result["cleared"] is False
+    assert result["error"] == "Teleoperation not connected"
 
 
 def test_start_then_stop_tracks_started_flag(tmp_path) -> None:

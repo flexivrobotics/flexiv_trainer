@@ -231,6 +231,19 @@ def disengage_teleop(runtime: RuntimeManager = Depends(get_runtime_manager)) -> 
     return result
 
 
+@router.post("/clear-fault")
+def clear_fault(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    # ClearFault() blocks (up to 30s) until the fault clears or times out, so
+    # this request stays open for the duration -- the floating fault widget
+    # keeps its spinner until the response lands.
+    result = runtime.teleop.clear_fault()
+    if result.get("cleared"):
+        ok("Robot fault cleared")
+    else:
+        error("Failed to clear robot fault", str(result.get("error") or ""))
+    return result
+
+
 @router.post("/gripper/init")
 def init_grippers(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     result = runtime.teleop.init_grippers()

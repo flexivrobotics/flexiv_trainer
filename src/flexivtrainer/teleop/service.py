@@ -357,6 +357,37 @@ class TeleopService:
             self._error = describe_exception(exc)
         return self.snapshot()
 
+    def clear_fault(self, timeout_sec: int = 30) -> dict[str, Any]:
+        # Try to clear minor/critical faults via the controller's ClearFault(),
+        # which blocks until the fault clears or the timeout elapses. Returns a
+        # status dict the route surfaces to the floating fault widget; the
+        # ``cleared`` flag is re-derived from any_fault() so the UI does not have
+        # to trust the per-robot return vector alone.
+        if self._controller is None:
+            return {"ok": False, "cleared": False, "error": "Teleoperation not connected"}
+
+        clear_fault = getattr(self._controller, "ClearFault", None)
+        if not callable(clear_fault):
+            return {
+                "ok": False,
+                "cleared": False,
+                "error": "Controller does not support ClearFault",
+            }
+
+        try:
+            clear_fault(timeout_sec)
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "cleared": False, "error": describe_exception(exc)}
+
+        # _read_fault() returns a message while any robot is still faulted; a
+        # None result means any_fault() now reports clear.
+        cleared = self._read_fault() is None
+        return {
+            "ok": cleared,
+            "cleared": cleared,
+            "error": None if cleared else "Fault persists after ClearFault",
+        }
+
     def _ensure_end_effectors(self) -> None:
         # Construct the end effector controller for the current config if one is
         # not already present. Does not enable grippers -- that is the gripper
@@ -535,7 +566,43 @@ class TeleopService:
         except Exception:  # pragma: no cover - hardware specific
             return None
 
-        return "Teleoperation fault detected" if faulted else None
+        if not faulted:
+            return None
+
+        # any_fault() is a bare bool; name the offending robots via fault(idx)
+        # so the floating fault widget can show which arm tripped rather than a
+        # generic message. fault(idx) returns (leader_faulted, follower_faulted)
+        # for the pair at that index, matching the constructor's robot_pairs_sn
+        # order. Fall back to the generic message if the detail lookup fails.
+        try:
+            pairs = [
+                pair
+                for pair in self._get_robot_pairs()
+                if pair.leader_serial and pair.follower_serial
+            ]
+            fault_at = getattr(self._controller, "fault", None)
+            faulted_serials: list[str] = []
+            if callable(fault_at):
+                for idx, pair in enumerate(pairs):
+                    leader_fault, follower_fault = fault_at(idx)
+                    if leader_fault:
+                        faulted_serials.append(str(pair.leader_serial))
+                    if follower_fault:
+                        faulted_serials.append(str(pair.follower_serial))
+            if faulted_serials:
+                # "Fault occurred on robot [SN1]" / "... [SN1], [SN2], and [SN3]".
+                bracketed = [f"[{sn}]" for sn in faulted_serials]
+                if len(bracketed) == 1:
+                    joined = bracketed[0]
+                elif len(bracketed) == 2:
+                    joined = f"{bracketed[0]} and {bracketed[1]}"
+                else:
+                    joined = ", ".join(bracketed[:-1]) + f", and {bracketed[-1]}"
+                return f"Fault occurred on robot {joined}"
+        except Exception:  # pragma: no cover - hardware specific
+            pass
+
+        return "Teleoperation fault detected"
 
     def snapshot(self) -> TeleopSnapshot:
         robot_pairs = self._get_robot_pairs()

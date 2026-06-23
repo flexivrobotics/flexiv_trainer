@@ -94,6 +94,9 @@ const state = {
         teleop: null,
         training: null,
         recordingSave: null,
+        // View-independent robot-fault watcher (1s); the floating fault widget
+        // must surface a fault no matter which page the user is on.
+        fault: null,
     },
     timers: {
         robotConfigSave: null,
@@ -148,6 +151,16 @@ const state = {
         nextId: 1,
         lastTeleopIssueSignature: "",
     },
+    // Floating fault widget shown above the notification center while any robot
+    // reports a fault. `open` expands the message + Clear Fault control; `busy`
+    // keeps the spinner while ClearFault() blocks; `cleared` swaps the panel to
+    // the "fault cleared" confirmation with an OK button.
+    fault: {
+        open: false,
+        busy: false,
+        cleared: false,
+        message: "",
+    },
 };
 
 const TELEMETRY_HISTORY_LIMIT = 90;
@@ -155,6 +168,9 @@ const TELEMETRY_HISTORY_LIMIT = 90;
 // refresh rate (e.g. 100ms ≈ 10 FPS); refreshTeleopStatus() self-throttles via
 // a queue, so requests never pile up if the backend is briefly slower.
 const TELEOP_POLL_INTERVAL_MS = 100;
+// How often the view-independent fault watcher polls /teleop/status (1s) so the
+// floating fault widget surfaces a robot fault on any page, not just teleop.
+const FAULT_POLL_INTERVAL_MS = 1000;
 // Active arm sides in capture order, mirroring RobotSerialConfig.active_sides()
 // on the backend. Single mode exposes only the chosen side; the index in this
 // list is the arm's capture order (and its follower-serial index).
@@ -456,6 +472,13 @@ state.recordingEntries = [...defaultRecordingEntryIds()];
 
 let teleopStatusRefreshPromise = null;
 let teleopStatusRefreshQueued = false;
+// Monotonic token guarding against stale /teleop/status responses. The 100ms
+// poller can have a request already in flight when the user clicks
+// Engage/Disengage; that older request captured the pre-click backend state and
+// its response can land *after* the click's refresh, reverting the button while
+// teleop is still engaged. Each status read claims the next sequence number;
+// only the newest claimed read is allowed to write state.teleopStatus.
+let teleopStatusSeq = 0;
 
 const TELEMETRY_SERIES = {
     force: {
@@ -1290,6 +1313,132 @@ function toggleNotificationCenter(forceOpen) {
     renderNotificationCenter();
 }
 
+// Drive the floating fault widget from the latest teleop status. The widget is
+// hidden when no fault is present (and not mid-clear), shown as a pulsing red
+// caution icon otherwise. Clicking the icon expands the message + Clear Fault
+// button; while ClearFault() runs the button spins; once the fault clears the
+// panel swaps to a confirmation with an OK button.
+function syncFaultCenter(teleopStatus) {
+    const fault = state.fault;
+    const message = teleopStatus?.teleop?.fault;
+    const faulted = !!message;
+
+    if (faulted) {
+        fault.message = String(message);
+        // A fresh fault after a prior clear should reset the confirmation state
+        // so the panel shows the actionable message again.
+        if (fault.cleared) {
+            fault.cleared = false;
+        }
+    } else if (!fault.busy && !fault.cleared) {
+        // No fault and nothing in-flight: fully reset and hide.
+        fault.open = false;
+        fault.message = "";
+    }
+
+    renderFaultCenter(faulted);
+}
+
+function renderFaultCenter(faulted) {
+    const center = byId("fault-center");
+    const toggle = byId("fault-toggle");
+    const panel = byId("fault-panel");
+    const messageEl = byId("fault-message");
+    const actions = byId("fault-actions");
+    if (!center || !toggle || !panel || !messageEl || !actions) {
+        return;
+    }
+
+    const fault = state.fault;
+    // Keep the widget mounted while clearing or showing the cleared confirmation
+    // even though any_fault() already reads false.
+    const visible = faulted || fault.busy || fault.cleared;
+    center.classList.toggle("hidden", !visible);
+    if (!visible) {
+        fault.open = false;
+    }
+
+    toggle.setAttribute("aria-expanded", fault.open ? "true" : "false");
+    panel.classList.toggle("hidden", !fault.open);
+    if (!fault.open) {
+        return;
+    }
+
+    const message = fault.cleared
+        ? "Fault cleared. The robot is ready."
+        : (fault.message || "Robot fault detected.");
+    if (messageEl.textContent !== message) {
+        messageEl.textContent = message;
+    }
+
+    // renderFaultCenter runs on every teleop poll tick (~10x/sec). Rewriting the
+    // action button's innerHTML unconditionally detaches the node mid-click and
+    // drops the click (the bug seen on the Data Collection page). Only rebuild
+    // when the action state actually changes, keyed below.
+    const actionState = fault.cleared ? "ok" : (fault.busy ? "busy" : "clear");
+    if (actions.dataset.faultActionState !== actionState) {
+        actions.dataset.faultActionState = actionState;
+        if (actionState === "ok") {
+            actions.innerHTML = `<button class="fault-action-button fault-ok-button" id="fault-ok" type="button">OK</button>`;
+        } else if (actionState === "busy") {
+            actions.innerHTML = `<button class="fault-action-button fault-clear-button" id="fault-clear" type="button" disabled><span class="button-spinner" aria-hidden="true"></span><span>Clearing…</span></button>`;
+        } else {
+            actions.innerHTML = `<button class="fault-action-button fault-clear-button" id="fault-clear" type="button"><span>Clear Fault</span></button>`;
+        }
+
+        const okButton = byId("fault-ok");
+        if (okButton) {
+            okButton.onclick = () => {
+                state.fault.cleared = false;
+                state.fault.open = false;
+                state.fault.message = "";
+                renderFaultCenter(false);
+            };
+        }
+        const clearButton = byId("fault-clear");
+        if (clearButton && !fault.busy) {
+            clearButton.onclick = handleClearFault;
+        }
+    }
+}
+
+async function handleClearFault() {
+    if (state.fault.busy) {
+        return;
+    }
+    state.fault.busy = true;
+    renderFaultCenter(true);
+    try {
+        // ClearFault() blocks server-side until the fault clears or times out
+        // (up to 30s), so allow a generous client timeout to match.
+        const result = await api("/teleop/clear-fault", { method: "POST" }, {
+            timeoutMs: 35000,
+            timeoutMessage: "Clear fault timed out",
+        });
+        if (result?.cleared) {
+            state.fault.cleared = true;
+        } else {
+            showToast(result?.error || "Failed to clear robot fault", true);
+        }
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.fault.busy = false;
+        // Re-poll immediately so the widget reflects any_fault()'s real state;
+        // syncFaultCenter on the next tick keeps it honest if the fault returns.
+        refreshTeleopStatus().catch(() => { });
+        // Drive visibility from the widget's own state, not state.teleopStatus,
+        // which the background poller no longer keeps current on non-teleop pages.
+        renderFaultCenter(!state.fault.cleared && !!state.fault.message);
+    }
+}
+
+function toggleFaultCenter(forceOpen) {
+    const nextOpen = typeof forceOpen === "boolean" ? forceOpen : !state.fault.open;
+    state.fault.open = nextOpen;
+    renderFaultCenter(!!state.fault.message);
+}
+
 function pushNotification(message, level = "info") {
     const normalizedMessage = String(message || "").trim();
     if (!normalizedMessage) {
@@ -1492,6 +1641,40 @@ function startTeleopPolling() {
             showToast(error.message, true);
         });
     }, TELEOP_POLL_INTERVAL_MS);
+}
+
+// View-independent fault watcher: poll /teleop/status once a second so the
+// floating fault widget appears on any page. On the teleoperation view the
+// 100ms poller above already drives syncFaultCenter (and the full telemetry
+// render), so skip there to avoid redundant fetches. Runs for the app's
+// lifetime -- never stopped -- so it must stay lightweight: it only updates the
+// fault widget, not the heavy teleop panels.
+let faultPollInFlight = false;
+function startFaultPolling() {
+    if (state.intervals.fault !== null) {
+        return;
+    }
+
+    state.intervals.fault = window.setInterval(async () => {
+        if (state.activeView === "teleoperation" || faultPollInFlight) {
+            return;
+        }
+        faultPollInFlight = true;
+        try {
+            const status = await api("/teleop/status");
+            // Drive only the fault widget from this lightweight poll. Don't
+            // write state.teleopStatus: it's the shared snapshot many flows
+            // read (engage handler, recording, telemetry), and this 1s, off-view
+            // poll would feed them stale, out-of-order data. syncFaultCenter
+            // keeps the widget's own state (state.fault) current on its own.
+            syncFaultCenter(status);
+        } catch (error) {
+            // Network blips shouldn't spam toasts from a background poller;
+            // leave the widget in its last known state and retry next tick.
+        } finally {
+            faultPollInFlight = false;
+        }
+    }, FAULT_POLL_INTERVAL_MS);
 }
 
 function normalizePercent(value) {
@@ -3002,7 +3185,11 @@ function renderRecordingActionButtons(recording = {}) {
 
 function updateTeleopControlButtons(teleopStatus) {
     const teleop = teleopStatus?.teleop || {};
-    const teleopReady = !!teleop.initialized && !teleop.started && !teleop.error && !teleop.fault;
+    // A fault (incl. soft fault where any_fault() is true) does NOT block Start:
+    // Init() clears any clearable fault as part of bringing the loop up, so the
+    // operator must be able to click Start to recover. Faults still gate Home
+    // and Engage below, which run against an already-initialized robot.
+    const teleopReady = !!teleop.initialized && !teleop.started && !teleop.error;
     const teleopResetBusy = !!state.ui.serviceResetBusy.teleop_service;
     const canStart = teleopReady && !state.ui.teleopHomeBusy && !teleopResetBusy;
     const canStop = !!teleop.started || state.ui.teleopHomeBusy;
@@ -3531,7 +3718,15 @@ function renderTrendGraph(side, kind, history, currentVector, label) {
 }
 
 async function fetchAndRenderTeleopStatus() {
-    state.teleopStatus = await api("/teleop/status");
+    const seq = ++teleopStatusSeq;
+    const status = await api("/teleop/status");
+    // A newer status read (e.g. one issued right after an Engage/Disengage
+    // click) has superseded this one while it was in flight -- drop its stale
+    // snapshot so it can't revert the UI to the pre-click state.
+    if (seq !== teleopStatusSeq) {
+        return;
+    }
+    state.teleopStatus = status;
     if (state.summary) {
         state.summary.services = state.teleopStatus.services || state.summary.services;
         renderHomeStatus();
@@ -3653,6 +3848,9 @@ function renderTeleop() {
         pushNotification(issueSignature, "error");
     }
     state.notifications.lastTeleopIssueSignature = issueSignature;
+
+    // Drive the floating fault widget off the same status snapshot.
+    syncFaultCenter(teleopStatus);
 
     const message = byId("teleop-message");
     if (message) {
@@ -4973,9 +5171,27 @@ function bindGlobalEvents() {
     if (notificationCenter) {
         notificationCenter.onclick = (event) => event.stopPropagation();
     }
+
+    const faultCenter = byId("fault-center");
+    const faultToggle = byId("fault-toggle");
+    if (faultToggle) {
+        faultToggle.onclick = (event) => {
+            event.stopPropagation();
+            toggleFaultCenter();
+        };
+    }
+    if (faultCenter) {
+        faultCenter.onclick = (event) => event.stopPropagation();
+    }
+
     document.addEventListener("click", () => {
         if (state.notifications.open) {
             toggleNotificationCenter(false);
+        }
+        // Don't collapse mid-clear or while showing the cleared confirmation;
+        // the user dismisses those via the spinner finishing / the OK button.
+        if (state.fault.open && !state.fault.busy && !state.fault.cleared) {
+            toggleFaultCenter(false);
         }
     });
 
@@ -5025,7 +5241,18 @@ function bindGlobalEvents() {
         const engaged = !!state.teleopStatus?.teleop?.engaged;
         const endpoint = engaged ? "/teleop/disengage" : "/teleop/engage";
         try {
-            await api(endpoint, { method: "POST" });
+            // The POST returns the authoritative post-action snapshot. Claim a
+            // fresh sequence number when it lands and apply it unconditionally:
+            // claiming the newest number invalidates every /teleop/status poll
+            // that started earlier (including ones in flight during the POST),
+            // so none of their older snapshots can write state.teleopStatus and
+            // revert the button afterward.
+            const teleop = await api(endpoint, { method: "POST" });
+            ++teleopStatusSeq;
+            if (state.teleopStatus) {
+                state.teleopStatus = { ...state.teleopStatus, teleop };
+                renderTeleop();
+            }
             await refreshTeleopStatus();
         } catch (error) {
             showToast(error.message, true);
@@ -5166,6 +5393,8 @@ async function init() {
     renderTeleop();
     renderTraining();
     setActiveView("home");
+    // Watch for robot faults on every page, independent of the active view.
+    startFaultPolling();
 }
 
 init().catch((error) => showToast(error.message, true));
