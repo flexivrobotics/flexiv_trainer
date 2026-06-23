@@ -36,6 +36,7 @@ from flexivtrainer.observability import (
     print_command,
     section,
     stream,
+    warn,
 )
 
 POLICY_CATALOG = {
@@ -217,6 +218,13 @@ class TrainingService:
         self._settings = settings
         self._job: TrainingJob | None = None
         self._lock = threading.Lock()
+        # Availability of cuda/mps/cpu is fixed for the process lifetime, but
+        # probing it the first time pays a one-off ``import torch`` plus CUDA
+        # context init that can take tens of seconds on a cold start. Cache the
+        # probe so the first UI request doesn't hang, and let startup warm it up
+        # in the background (see ``warm_up_devices``).
+        self._device_probe: list[dict[str, Any]] | None = None
+        self._device_probe_lock = threading.Lock()
 
     def list_policies(self) -> dict[str, Any]:
         return {
@@ -225,9 +233,15 @@ class TrainingService:
             "device": self._settings.training.default_device,
         }
 
-    def evaluate_devices(self) -> dict[str, Any]:
+    def _probe_devices(self) -> list[dict[str, Any]]:
+        """Probe cuda/mps/cpu availability (the slow, ``import torch`` part).
+
+        This is the expensive half of device evaluation: the first ``import
+        torch`` plus CUDA initialization. The result is cached by
+        :meth:`_get_device_probe` because availability cannot change during the
+        process lifetime.
+        """
         results: list[dict[str, Any]] = []
-        resolved_auto = resolve_training_device(self._settings.training.default_device)
 
         try:
             import torch
@@ -239,14 +253,7 @@ class TrainingService:
 
         for device in TRAINING_DEVICE_ORDER:
             if device == "auto":
-                results.append(
-                    {
-                        "name": "auto",
-                        "available": True,
-                        "resolved": resolved_auto,
-                        "detail": f"Resolves to {resolved_auto}",
-                    }
-                )
+                # Resolved against current settings in evaluate_devices().
                 continue
 
             available = False
@@ -286,10 +293,47 @@ class TrainingService:
                 }
             )
 
+        return results
+
+    def _get_device_probe(self, *, force: bool = False) -> list[dict[str, Any]]:
+        with self._device_probe_lock:
+            if self._device_probe is None or force:
+                self._device_probe = self._probe_devices()
+            return self._device_probe
+
+    def warm_up_devices(self) -> None:
+        """Pre-compute the device probe so the first UI request is instant.
+
+        Intended to run in a background thread at server startup. The heavy
+        ``import torch`` and CUDA init happen here instead of inside the first
+        ``GET /training/devices`` request, which previously left the device list
+        empty for tens of seconds.
+        """
+        try:
+            self._get_device_probe()
+        except Exception as exc:  # never let warmup crash startup
+            warn(
+                "Training device warmup failed",
+                str(exc).strip() or type(exc).__name__,
+            )
+
+    def evaluate_devices(self, *, force: bool = False) -> dict[str, Any]:
+        probe = self._get_device_probe(force=force)
+        # Resolve "auto" after the probe so torch/CUDA are already warm.
+        resolved_auto = resolve_training_device(self._settings.training.default_device)
+        devices = [
+            {
+                "name": "auto",
+                "available": True,
+                "resolved": resolved_auto,
+                "detail": f"Resolves to {resolved_auto}",
+            },
+            *probe,
+        ]
         return {
             "configured": self._settings.training.default_device,
-            "resolved": resolve_training_device(self._settings.training.default_device),
-            "devices": results,
+            "resolved": resolved_auto,
+            "devices": devices,
         }
 
     def set_default_device(self, device: str) -> dict[str, Any]:

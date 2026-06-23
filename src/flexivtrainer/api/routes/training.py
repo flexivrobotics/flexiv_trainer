@@ -49,8 +49,13 @@ def policies(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
 
 
 @router.get("/devices")
-def training_devices(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
-    return runtime.training.evaluate_devices()
+def training_devices(
+    force: bool = False,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    # ``force`` re-runs the probe for the manual "Evaluate devices" button;
+    # normal page loads reuse the cached (warmed-up) result.
+    return runtime.training.evaluate_devices(force=force)
 
 
 @router.put("/devices")
