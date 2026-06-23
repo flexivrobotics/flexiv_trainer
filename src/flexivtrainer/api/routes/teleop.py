@@ -57,6 +57,10 @@ class StartRecordingRequest(BaseModel):
     recording_entries: list[str] = Field(
         default_factory=lambda: list(DEFAULT_RECORDING_ENTRY_KEYS)
     )
+    # Training job name; episodes sharing it are saved under the same
+    # episodes/<job_name>/ subfolder. Sanitized server-side into one path
+    # segment, falling back to the default when blank.
+    job_name: str | None = None
 
 
 def _bootstrap_issue_detail(result: dict) -> str | None:
@@ -310,6 +314,7 @@ def start_recording(
             task=request.task,
             fps=request.fps,
             recording_entries=recording_entries,
+            job_name=request.job_name,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -318,6 +323,7 @@ def start_recording(
         " ".join(
             [
                 f"episode={result.get('episode_name', 'unknown')}",
+                f"job={result.get('job_name', 'unknown')}",
                 f"fps={result.get('fps', 'unknown')}",
                 f"task={request.task}",
                 f"entries={len(recording_entries)}",

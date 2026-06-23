@@ -1328,6 +1328,33 @@ button:disabled {
     padding: 0.58rem 0.9rem;
 }
 
+.control-stack .field-label {
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: -0.2rem;
+}
+.control-stack .text-input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.78rem 0.9rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.95rem;
+}
+.control-stack .text-input:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
+}
+.control-stack .text-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 .record-save-button--progress {
     position: relative;
     overflow: hidden;
@@ -1945,6 +1972,22 @@ button:active {
     white-space: nowrap;
 }
 
+/* Small pill showing which training job an episode belongs to. */
+.episode-entry-card__job,
+.episode-row__job {
+    flex: 0 0 auto;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(105, 185, 232, 0.16);
+    color: var(--accent-strong);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+.episode-row__job {
+    margin-left: auto;
+}
+
 .round-icon-button {
     width: 2.7rem;
     height: 2.7rem;
@@ -2037,6 +2080,19 @@ button:active {
     flex: 0 0 auto;
     color: var(--muted);
     font-size: 0.8rem;
+}
+
+/* Job group header in the episode picker; episodes under it are indented. */
+.browser-item__job-heading {
+    margin: 0.5rem 0 0.1rem;
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.browser-item--in-job {
+    margin-left: 0.9rem;
 }
 
 .episode-row--selectable {

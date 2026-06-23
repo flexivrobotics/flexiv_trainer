@@ -112,3 +112,58 @@ def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) 
     result = manager.bootstrap_teleop_module()
 
     assert result["ready"] is False
+
+
+def _bare_manager(tmp_path) -> RuntimeManager:
+    manager = RuntimeManager.__new__(RuntimeManager)
+    manager.settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    manager.settings.ensure_storage()
+    return manager
+
+
+def _make_episode(directory) -> None:
+    # Minimal LeRobot-style dataset marker the listing/browser use to validate.
+    (directory / "meta").mkdir(parents=True)
+    (directory / "meta" / "info.json").write_text("{}", encoding="utf-8")
+
+
+def test_list_episode_datasets_groups_by_job(tmp_path) -> None:
+    manager = _bare_manager(tmp_path)
+    episodes_root = manager.settings.storage.episodes_root
+    _make_episode(episodes_root / "job_0" / "ep_a")
+    _make_episode(episodes_root / "job_0" / "ep_b")
+    _make_episode(episodes_root / "pick_place" / "ep_c")
+    # A flat, ungrouped episode directly under episodes/ (older layout).
+    _make_episode(episodes_root / "legacy_ep")
+
+    episodes = manager.list_episode_datasets()
+    by_name = {ep["name"]: ep for ep in episodes}
+
+    assert by_name["ep_a"]["job"] == "job_0"
+    assert by_name["ep_b"]["job"] == "job_0"
+    assert by_name["ep_c"]["job"] == "pick_place"
+    assert by_name["legacy_ep"]["job"] is None
+
+
+def test_browse_path_expands_job_folders_into_episodes(tmp_path) -> None:
+    manager = _bare_manager(tmp_path)
+    episodes_root = manager.settings.storage.episodes_root
+    _make_episode(episodes_root / "job_0" / "ep_a")
+    _make_episode(episodes_root / "legacy_ep")
+
+    result = manager.browse_path(
+        path=episodes_root,
+        directories_only=True,
+        root_path=episodes_root,
+        annotate_episode_dirs=True,
+    )
+    items = {item["name"]: item for item in result["items"]}
+
+    # The job folder is flattened into its episode, tagged with the job name.
+    assert items["ep_a"]["job"] == "job_0"
+    assert items["ep_a"]["is_valid_episode"] is True
+    # The flat legacy episode is listed directly, with no job.
+    assert items["legacy_ep"]["job"] is None
+    assert items["legacy_ep"]["is_valid_episode"] is True
+    # No raw "job_0" folder leaks into the listing.
+    assert "job_0" not in items

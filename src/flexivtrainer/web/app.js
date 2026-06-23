@@ -425,6 +425,9 @@ const TELEOP_DISENGAGE_MARKUP = `
         <span>Disengage</span>
     </span>
 `;
+// Default training job name prefilled in the Episode Recording panel's Job name
+// box; mirrors the server-side DEFAULT_JOB_NAME used when none is supplied.
+const DEFAULT_JOB_NAME = "job_0";
 const RECORD_START_MARKUP = `
     <span class="button-content">
         <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
@@ -3111,7 +3114,26 @@ function renderRecordingStatusPanel(teleopStatus) {
         `,
     );
 
+    updateRecordingJobNameField(model);
     updateRecordingToggleButton(model);
+}
+
+// The Job name box names the training job the next episode is filed under
+// (episodes/<job_name>/). It is locked while an episode is actively recording
+// or awaiting save/discard so the job cannot change mid-session, and re-enabled
+// once the recorder is idle.
+function updateRecordingJobNameField(model) {
+    const field = byId("record-job-name");
+    if (!field) {
+        return;
+    }
+    // "recording" => active capture; "stopped" => awaiting save/discard.
+    const locked =
+        model.canStop ||
+        model.kind === "recording" ||
+        model.kind === "stopped" ||
+        !!state.ui.recordingStartBusy;
+    field.disabled = locked;
 }
 
 function updateRecordingToggleButton(model) {
@@ -3936,11 +3958,15 @@ function renderProcessing() {
             state.episodes.forEach((episode, index) => {
                 const row = document.createElement("div");
                 row.className = "episode-entry-row";
+                const jobBadge = episode.job
+                    ? `<span class="episode-entry-card__job">${escapeHtml(episode.job)}</span>`
+                    : "";
                 row.innerHTML = `
                     <div class="episode-entry-card">
                         <strong class="episode-entry-card__index">${index + 1}</strong>
                         <span class="episode-entry-card__divider" aria-hidden="true"></span>
                         <span class="episode-entry-card__name">${escapeHtml(episode.name)}</span>
+                        ${jobBadge}
                     </div>
                     <button class="round-icon-button round-icon-button--remove" data-remove-episode="${escapeHtml(episode.path)}" type="button" aria-label="Remove ${escapeHtml(episode.name)}" title="Remove ${escapeHtml(episode.name)}">
                         <span aria-hidden="true">&minus;</span>
@@ -3992,10 +4018,14 @@ function renderProcessing() {
         state.episodes.forEach((episode, index) => {
             const row = document.createElement("div");
             row.className = `episode-row episode-row--selectable ${previewPath === episode.path ? "episode-row--selected" : ""}`.trim();
+            const jobBadge = episode.job
+                ? `<span class="episode-row__job">${escapeHtml(episode.job)}</span>`
+                : "";
             row.innerHTML = `
         <div class="episode-row__main">
           <input data-toggle-episode="${episode.path}" type="checkbox" ${state.selectedEpisodes.includes(episode.path) ? "checked" : ""} />
           <span>${escapeHtml(episode.name)}</span>
+          ${jobBadge}
         </div>
       `;
             row.onclick = async () => {
@@ -4916,11 +4946,25 @@ async function refreshBrowser(path) {
         return;
     }
 
+    // Job heading currently rendered, so consecutive episodes sharing a job get
+    // one header. Episodes are listed grouped by job (see _expand_job_episodes).
+    let currentJobHeading = null;
     state.pathBrowser.items.forEach((item) => {
         if (isEpisodeBrowserMode()) {
             const selectable = !!item.is_valid_episode;
+            // Insert a job group header whenever the job changes.
+            const job = item.job || null;
+            if (selectable && job && job !== currentJobHeading) {
+                currentJobHeading = job;
+                const heading = document.createElement("div");
+                heading.className = "browser-item__job-heading";
+                heading.textContent = job;
+                list.appendChild(heading);
+            } else if (!job) {
+                currentJobHeading = null;
+            }
             const row = document.createElement("label");
-            row.className = `browser-item browser-item--episode ${selectable ? "" : "browser-item--invalid"}`.trim();
+            row.className = `browser-item browser-item--episode ${selectable ? "" : "browser-item--invalid"} ${job ? "browser-item--in-job" : ""}`.trim();
             row.dataset.browserPath = item.path;
             row.innerHTML = `
                 <span class="browser-item__main">
@@ -5024,12 +5068,15 @@ function openEpisodeBrowser() {
         confirmLabel: "Load",
         pathNote: "Episodes directory",
         onConfirm: (paths) => {
-            const orderedPaths = (state.pathBrowser.items || [])
-                .map((item) => item.path)
-                .filter((itemPath) => paths.includes(itemPath));
-            orderedPaths.forEach((path) => {
-                if (!state.episodes.some((item) => item.path === path)) {
-                    state.episodes.push({ name: path.split("/").pop(), path });
+            const orderedItems = (state.pathBrowser.items || [])
+                .filter((item) => paths.includes(item.path));
+            orderedItems.forEach((item) => {
+                if (!state.episodes.some((existing) => existing.path === item.path)) {
+                    state.episodes.push({
+                        name: item.path.split("/").pop(),
+                        path: item.path,
+                        job: item.job || null,
+                    });
                 }
             });
             closeBrowser();
@@ -5280,6 +5327,12 @@ function bindGlobalEvents() {
             setTeleopHomeBusy(false);
         }
     };
+    const jobNameField = byId("record-job-name");
+    if (jobNameField && !jobNameField.value) {
+        // Prefill the default job name so the very first episode is grouped even
+        // if the operator never touches the box.
+        jobNameField.value = DEFAULT_JOB_NAME;
+    }
     byId("record-toggle").onclick = async () => {
         // The single toggle button stops an in-progress recording and otherwise
         // starts a new one, mirroring the teleop power control.
@@ -5299,11 +5352,16 @@ function bindGlobalEvents() {
                 return;
             }
             setRecordingStartBusy(true);
+            // The job name groups episodes on disk under episodes/<job_name>/.
+            // Fall back to the default when the box is blank; the server
+            // sanitizes it into a single safe path segment.
+            const jobName = (byId("record-job-name")?.value || "").trim() || DEFAULT_JOB_NAME;
             await api("/teleop/recording/start", {
                 method: "POST",
                 body: JSON.stringify({
                     task: "Dual-arm Flexiv teleoperation demonstration",
                     recording_entries: state.recordingEntries,
+                    job_name: jobName,
                 }),
             });
         } catch (error) {

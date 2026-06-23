@@ -471,32 +471,83 @@ class RuntimeManager:
         for child in sorted(target.iterdir()):
             if directories_only and not child.is_dir():
                 continue
-            item = {
-                "name": child.name,
-                "path": str(child),
-                "is_dir": child.is_dir(),
-            }
             if annotate_episode_dirs and child.is_dir():
                 # Recordings and merged datasets are both standard LeRobot
                 # datasets, identified by their meta/info.json.
-                item["is_valid_episode"] = (child / "meta" / "info.json").exists()
-            items.append(item)
+                is_episode = (child / "meta" / "info.json").exists()
+                if not is_episode:
+                    # Not an episode itself: treat it as a per-job folder and
+                    # expand its episodes inline, tagged with the job name, so
+                    # the episode picker shows a single grouped list rather than
+                    # requiring the user to drill into each job folder.
+                    job_episodes = self._expand_job_episodes(child)
+                    if job_episodes:
+                        items.extend(job_episodes)
+                        continue
+                items.append(
+                    {
+                        "name": child.name,
+                        "path": str(child),
+                        "is_dir": True,
+                        "is_valid_episode": is_episode,
+                        "job": None,
+                    }
+                )
+                continue
+            items.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "is_dir": child.is_dir(),
+                }
+            )
         return {
             "path": str(target),
             "root_path": str(restricted_root),
             "items": items,
         }
 
-    def list_episode_datasets(self) -> list[dict[str, Any]]:
-        episodes = []
-        for root in sorted(self.settings.storage.episodes_root.iterdir()):
-            if (root / "meta" / "info.json").exists():
+    def _expand_job_episodes(self, job_dir: Path) -> list[dict[str, Any]]:
+        # List the valid episodes inside a per-job folder, each tagged with the
+        # job name so the picker can group them. Returns [] when the folder holds
+        # no episodes (so the caller can fall back to showing it as-is).
+        episodes: list[dict[str, Any]] = []
+        for child in sorted(job_dir.iterdir()):
+            if child.is_dir() and (child / "meta" / "info.json").exists():
                 episodes.append(
                     {
-                        "name": root.name,
-                        "path": str(root),
+                        "name": child.name,
+                        "path": str(child),
+                        "is_dir": True,
+                        "is_valid_episode": True,
+                        "job": job_dir.name,
                     }
                 )
+        return episodes
+
+    def list_episode_datasets(self) -> list[dict[str, Any]]:
+        # Episodes are filed under a per-job subfolder
+        # (episodes/<job_name>/<episode>), so recurse one level into each job
+        # folder. Any dataset still sitting directly under episodes/ (older flat
+        # layout) is reported with no job so it stays visible.
+        episodes_root = self.settings.storage.episodes_root
+        if not episodes_root.exists():
+            return []
+
+        episodes: list[dict[str, Any]] = []
+        for entry in sorted(episodes_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if (entry / "meta" / "info.json").exists():
+                # Flat, ungrouped episode directly under episodes/.
+                episodes.append({"name": entry.name, "path": str(entry), "job": None})
+                continue
+            # Otherwise treat ``entry`` as a job folder and list its episodes.
+            for child in sorted(entry.iterdir()):
+                if child.is_dir() and (child / "meta" / "info.json").exists():
+                    episodes.append(
+                        {"name": child.name, "path": str(child), "job": entry.name}
+                    )
         return episodes
 
     def merge_episodes(

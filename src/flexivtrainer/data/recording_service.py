@@ -39,6 +39,23 @@ from flexivtrainer.data.lerobot_io import (
 )
 
 
+# Default training job name shown in the recording panel's Job name box and
+# used when a recording is started without an explicit name.
+DEFAULT_JOB_NAME = "job_0"
+
+
+def sanitize_job_name(job_name: str | None) -> str:
+    """Reduce a user-supplied job name to a safe single path segment.
+
+    The job name becomes a directory under ``episodes/`` so it must not contain
+    path separators or traversal; everything outside ``[A-Za-z0-9._-]`` is
+    collapsed to underscores, and an empty result falls back to the default.
+    """
+    candidate = (job_name or "").strip()
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "_", candidate).strip("._-")
+    return candidate or DEFAULT_JOB_NAME
+
+
 class RecordingService:
     def __init__(
         self,
@@ -59,6 +76,9 @@ class RecordingService:
         self._episode_name: str | None = None
         self._fps: int | None = None
         self._task: str | None = None
+        # Training job this episode belongs to; episodes sharing a job name are
+        # saved under the same ``episodes/<job_name>/`` subfolder.
+        self._job_name: str | None = None
         self._recording_entries: list[str] | None = None
         self._recording_sides: list[str] | None = None
         self._staging_path: Path | None = None
@@ -84,6 +104,7 @@ class RecordingService:
                 "awaiting_save": self._awaiting_save,
                 "frames_captured": self._frames_captured,
                 "episode_name": self._episode_name,
+                "job_name": self._job_name,
                 "fps": self._fps,
                 "error": self._error,
                 "save_in_progress": self._save_in_progress,
@@ -96,6 +117,7 @@ class RecordingService:
         task: str = "Dual-arm Flexiv teleoperation demonstration",
         fps: int | None = None,
         recording_entries: list[str] | None = None,
+        job_name: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._active:
@@ -111,6 +133,7 @@ class RecordingService:
         includes_action_values = any(entry in ACTION_ENTRY_KEYS for entry in entries)
         requires_robot_values = includes_observation_values or includes_action_values
         target_fps = fps or 30
+        resolved_job_name = sanitize_job_name(job_name)
         episode_name, staging_path = self._create_staging_path()
 
         try:
@@ -164,6 +187,7 @@ class RecordingService:
             self._awaiting_save = False
             self._frames_captured = 0
             self._episode_name = episode_name
+            self._job_name = resolved_job_name
             self._fps = target_fps
             self._task = task
             self._recording_entries = entries
@@ -215,6 +239,7 @@ class RecordingService:
             staging_path = self._staging_path
             dataset = self._dataset
             frames_captured = self._frames_captured
+            job_name = self._job_name or DEFAULT_JOB_NAME
             self._save_in_progress = True
             self._save_progress = 0
             self._error = None
@@ -239,9 +264,13 @@ class RecordingService:
             # The episode is a complete, standard LeRobot v3.0 dataset on its
             # own (meta/info.json, meta/tasks.parquet, data/, videos/). It is
             # identified and loaded via that standard metadata; no extra manifest.
-            episodes_root = self._settings.storage.episodes_root
-            episodes_root.mkdir(parents=True, exist_ok=True)
-            target_path = episodes_root / episode_name
+            #
+            # Episodes are filed under a per-job subfolder
+            # (episodes/<job_name>/<episode_name>) so every recording for the
+            # same training job lives together.
+            job_root = self._settings.storage.episodes_root / job_name
+            job_root.mkdir(parents=True, exist_ok=True)
+            target_path = job_root / episode_name
             shutil.move(str(staging_path), str(target_path))
 
             with self._lock:
@@ -254,6 +283,7 @@ class RecordingService:
 
             return {
                 "episode_name": episode_name,
+                "job_name": job_name,
                 "frames_captured": frames_captured,
                 "path": str(target_path),
             }
@@ -299,6 +329,7 @@ class RecordingService:
             self._dataset = None
             self._staging_path = None
             self._episode_name = None
+            self._job_name = None
             self._frames_captured = 0
             self._error = None
             self._save_in_progress = False
