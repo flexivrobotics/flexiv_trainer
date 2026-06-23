@@ -3965,8 +3965,10 @@ function renderProcessing() {
                     <div class="episode-entry-card">
                         <strong class="episode-entry-card__index">${index + 1}</strong>
                         <span class="episode-entry-card__divider" aria-hidden="true"></span>
-                        <span class="episode-entry-card__name">${escapeHtml(episode.name)}</span>
-                        ${jobBadge}
+                        <div class="episode-entry-card__text">
+                            ${jobBadge}
+                            <span class="episode-entry-card__name">${escapeHtml(episode.name)}</span>
+                        </div>
                     </div>
                     <button class="round-icon-button round-icon-button--remove" data-remove-episode="${escapeHtml(episode.path)}" type="button" aria-label="Remove ${escapeHtml(episode.name)}" title="Remove ${escapeHtml(episode.name)}">
                         <span aria-hidden="true">&minus;</span>

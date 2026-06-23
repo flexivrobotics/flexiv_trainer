@@ -1984,7 +1984,19 @@ button:active {
     background: rgba(72, 103, 125, 0.18);
 }
 
+/* Stack the job tag above the episode name so a long job name wraps onto its
+   own line instead of overflowing the card's right edge. */
+.episode-entry-card__text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.3rem;
+}
+
 .episode-entry-card__name {
+    max-width: 100%;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1995,12 +2007,15 @@ button:active {
 .episode-entry-card__job,
 .episode-row__job {
     flex: 0 0 auto;
+    max-width: 100%;
     padding: 0.1rem 0.5rem;
     border-radius: 999px;
     background: rgba(105, 185, 232, 0.16);
     color: var(--accent-strong);
     font-size: 0.72rem;
     letter-spacing: 0.04em;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
 }
 .episode-row__job {
