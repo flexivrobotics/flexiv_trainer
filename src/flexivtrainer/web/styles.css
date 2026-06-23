@@ -1559,10 +1559,21 @@ button:active {
     background: rgba(255, 252, 246, 0.98);
     box-shadow: var(--shadow);
     padding: 1.3rem;
+    /* Keep the dialog within the viewport; the item list scrolls when long. */
+    max-height: calc(100vh - 3rem);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
 .dialog-toolbar {
     align-items: flex-start;
+}
+
+/* Header and toolbar stay fixed; only the list between them scrolls. */
+.dialog-panel > .dialog-header,
+.dialog-panel > .dialog-toolbar {
+    flex: 0 0 auto;
 }
 
 .dialog-path-block {
@@ -1815,10 +1826,18 @@ button:active {
 
 .dialog-list {
     margin-top: 0.72rem;
+    /* Take the remaining height inside the dialog and scroll when the entries
+       overflow, so a long episode list never pushes the footer off-screen. */
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    /* Room so the scrollbar doesn't overlap item content / focus rings. */
+    padding-right: 0.2rem;
 }
 
 .dialog-footer {
     margin-top: 0.72rem;
+    flex: 0 0 auto;
 }
 
 .dialog-empty-state {
@@ -2256,6 +2275,31 @@ button:active {
     width: 2.2rem;
     height: 2.2rem;
     padding: 0;
+}
+
+/* Time-created sort toggle in the episode browser toolbar. */
+.browser-sort-button {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.7rem;
+}
+
+.browser-sort-button .icon-sort {
+    width: 1.05rem;
+    height: 1.05rem;
+}
+
+.browser-sort-button__label {
+    font-size: 0.82rem;
+}
+
+/* Flip the descending arrow to point up when ascending (oldest first). */
+.browser-sort-button--asc .icon-sort__arrow {
+    transform-box: fill-box;
+    transform-origin: center;
+    transform: rotate(180deg);
 }
 
 /* Keep even padding on both sides of the episode picker rows in the narrow

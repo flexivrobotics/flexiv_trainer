@@ -167,3 +167,23 @@ def test_browse_path_expands_job_folders_into_episodes(tmp_path) -> None:
     assert items["legacy_ep"]["is_valid_episode"] is True
     # No raw "job_0" folder leaks into the listing.
     assert "job_0" not in items
+
+
+def test_browse_path_annotates_created_time_for_sorting(tmp_path) -> None:
+    # Every browsed entry carries a numeric "created" time so the episode picker
+    # can sort by it; the flattened job episodes carry it too.
+    manager = _bare_manager(tmp_path)
+    episodes_root = manager.settings.storage.episodes_root
+    _make_episode(episodes_root / "job_0" / "ep_a")
+    _make_episode(episodes_root / "legacy_ep")
+
+    result = manager.browse_path(
+        path=episodes_root,
+        directories_only=True,
+        root_path=episodes_root,
+        annotate_episode_dirs=True,
+    )
+
+    assert result["items"], "expected at least one browsed entry"
+    for item in result["items"]:
+        assert isinstance(item["created"], float)

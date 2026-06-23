@@ -40,6 +40,17 @@ def _optional_dependency_error(feature: str, exc: ImportError) -> str:
     return f"{feature} is unavailable in the selected environment"
 
 
+def _entry_created_time(path: Path) -> float:
+    # Creation time for the browser to sort episodes by. ``st_ctime`` is the
+    # inode-change time on POSIX (close to creation for a freshly recorded,
+    # never-modified episode) and the real creation time on Windows; fall back
+    # to mtime, then 0.0, if the stat call fails (e.g. a race on deletion).
+    try:
+        return path.stat().st_ctime
+    except OSError:
+        return 0.0
+
+
 class _UnavailableRecordingService:
     def __init__(self, reason: str) -> None:
         self._reason = reason
@@ -491,6 +502,7 @@ class RuntimeManager:
                         "is_dir": True,
                         "is_valid_episode": is_episode,
                         "job": None,
+                        "created": _entry_created_time(child),
                     }
                 )
                 continue
@@ -499,6 +511,7 @@ class RuntimeManager:
                     "name": child.name,
                     "path": str(child),
                     "is_dir": child.is_dir(),
+                    "created": _entry_created_time(child),
                 }
             )
         return {
@@ -521,6 +534,7 @@ class RuntimeManager:
                         "is_dir": True,
                         "is_valid_episode": True,
                         "job": job_dir.name,
+                        "created": _entry_created_time(child),
                     }
                 )
         return episodes

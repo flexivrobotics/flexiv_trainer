@@ -4907,6 +4907,22 @@ function syncBrowserDialogChrome() {
     if (selectAllButton) {
         selectAllButton.classList.toggle("hidden", !state.pathBrowser.showSelectAll);
     }
+    const sortButton = byId("browser-sort");
+    if (sortButton) {
+        // The time-created sort only makes sense for the episode picker.
+        sortButton.classList.toggle("hidden", !isEpisodeBrowserMode());
+        const ascending = state.pathBrowser.sortOrder === "asc";
+        const label = byId("browser-sort-label");
+        if (label) {
+            label.textContent = ascending ? "Oldest" : "Newest";
+        }
+        sortButton.classList.toggle("browser-sort-button--asc", ascending);
+        const title = ascending
+            ? "Sorted oldest first — click for newest first"
+            : "Sorted newest first — click for oldest first";
+        sortButton.setAttribute("title", title);
+        sortButton.setAttribute("aria-label", title);
+    }
     if (confirmButton) {
         confirmButton.textContent = state.pathBrowser.confirmLabel || "Select";
     }
@@ -4930,19 +4946,26 @@ async function refreshBrowser(path) {
     const result = await api(`/datasets/browse?${params.toString()}`);
     state.pathBrowser.currentPath = result.path;
     state.pathBrowser.rootPath = result.root_path || state.pathBrowser.rootPath || result.path;
-    state.pathBrowser.items = result.items || [];
+    state.pathBrowser.items = sortBrowserItems(result.items || []);
     state.pathBrowser.selected = state.pathBrowser.selected.filter((selectedPath) =>
         state.pathBrowser.items.some((item) => item.path === selectedPath),
     );
     syncBrowserDialogChrome();
     byId("browser-path").textContent = result.path;
+    renderBrowserList();
+    byId("browser-modal").classList.remove("hidden");
+}
+
+// Render the current ``state.pathBrowser.items`` into the browser list. Split
+// out of refreshBrowser so the sort-order toggle can re-render the already
+// fetched items without another round-trip.
+function renderBrowserList() {
     const list = byId("browser-list");
     list.innerHTML = "";
 
     if (!state.pathBrowser.items.length) {
         list.innerHTML = `<div class="dialog-empty-state">${escapeHtml(state.pathBrowser.emptyMessage || "No entries available.")}</div>`;
         updateBrowserSelectionUi();
-        byId("browser-modal").classList.remove("hidden");
         return;
     }
 
@@ -5008,7 +5031,46 @@ async function refreshBrowser(path) {
     });
 
     updateBrowserSelectionUi();
-    byId("browser-modal").classList.remove("hidden");
+}
+
+// Sort browser items by creation time in the current sort order. Episodes are
+// kept grouped by job: episodes within a job are ordered by time, and the job
+// groups themselves are ordered by their most recent (desc) / oldest (asc)
+// episode. Ungrouped entries (job == null) sort purely by time. Non-episode
+// browsing keeps the server's name order untouched.
+function sortBrowserItems(items) {
+    if (!isEpisodeBrowserMode()) {
+        return items;
+    }
+    const order = state.pathBrowser.sortOrder === "asc" ? "asc" : "desc";
+    const dir = order === "asc" ? 1 : -1;
+    const created = (item) => (typeof item.created === "number" ? item.created : 0);
+
+    // Bucket by job, preserving a representative time per job for group ordering.
+    const groups = new Map();
+    items.forEach((item) => {
+        const key = item.job || "";
+        if (!groups.has(key)) {
+            groups.set(key, []);
+        }
+        groups.get(key).push(item);
+    });
+
+    const groupTime = (entries) => {
+        const times = entries.map(created);
+        return order === "asc" ? Math.min(...times) : Math.max(...times);
+    };
+
+    const orderedGroups = [...groups.entries()].sort(
+        ([, a], [, b]) => (groupTime(a) - groupTime(b)) * dir,
+    );
+
+    const sorted = [];
+    orderedGroups.forEach(([, entries]) => {
+        entries.sort((a, b) => (created(a) - created(b)) * dir);
+        sorted.push(...entries);
+    });
+    return sorted;
 }
 
 async function openBrowser(options) {
@@ -5036,6 +5098,9 @@ async function openBrowser(options) {
         pathNote: "Current path",
         eyebrow: "Server Path Browser",
         onConfirm: null,
+        // Sort order for episode browsing, by creation time. "desc" lists the
+        // newest episodes first; the episode browser exposes a toggle for it.
+        sortOrder: "desc",
         ...options,
         selected: [],
         items: [],
@@ -5420,6 +5485,14 @@ function bindGlobalEvents() {
         const allSelected = selectablePaths.length > 0
             && selectablePaths.every((path) => state.pathBrowser.selected.includes(path));
         setBrowserSelection(allSelected ? [] : selectablePaths);
+    };
+    byId("browser-sort").onclick = () => {
+        // Flip the time-created order and re-render the already-fetched items.
+        state.pathBrowser.sortOrder =
+            state.pathBrowser.sortOrder === "asc" ? "desc" : "asc";
+        state.pathBrowser.items = sortBrowserItems(state.pathBrowser.items);
+        syncBrowserDialogChrome();
+        renderBrowserList();
     };
     byId("browser-up").onclick = () => {
         const parts = state.pathBrowser.currentPath.split("/").filter(Boolean);
