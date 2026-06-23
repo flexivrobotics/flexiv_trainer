@@ -428,6 +428,31 @@ const TELEOP_DISENGAGE_MARKUP = `
 // Default training job name prefilled in the Episode Recording panel's Job name
 // box; mirrors the server-side DEFAULT_JOB_NAME used when none is supplied.
 const DEFAULT_JOB_NAME = "job_0";
+// localStorage key the last-used job name is cached under so it persists across
+// reloads; the box falls back to DEFAULT_JOB_NAME when nothing is cached.
+const JOB_NAME_STORAGE_KEY = "flexivtrainer.lastJobName";
+
+// Read the cached last-used job name, or "" if none/unavailable. Wrapped in
+// try/catch because localStorage can throw in private-mode or sandboxed frames.
+function loadCachedJobName() {
+    try {
+        return (window.localStorage.getItem(JOB_NAME_STORAGE_KEY) || "").trim();
+    } catch (error) {
+        return "";
+    }
+}
+
+function saveCachedJobName(jobName) {
+    const value = (jobName || "").trim();
+    if (!value) {
+        return;
+    }
+    try {
+        window.localStorage.setItem(JOB_NAME_STORAGE_KEY, value);
+    } catch (error) {
+        // Persistence is best-effort; ignore storage failures.
+    }
+}
 const RECORD_START_MARKUP = `
     <span class="button-content">
         <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
@@ -4026,8 +4051,10 @@ function renderProcessing() {
             row.innerHTML = `
         <div class="episode-row__main">
           <input data-toggle-episode="${episode.path}" type="checkbox" ${state.selectedEpisodes.includes(episode.path) ? "checked" : ""} />
-          <span>${escapeHtml(episode.name)}</span>
-          ${jobBadge}
+          <div class="episode-row__text">
+            ${jobBadge}
+            <span>${escapeHtml(episode.name)}</span>
+          </div>
         </div>
       `;
             row.onclick = async () => {
@@ -5396,9 +5423,10 @@ function bindGlobalEvents() {
     };
     const jobNameField = byId("record-job-name");
     if (jobNameField && !jobNameField.value) {
-        // Prefill the default job name so the very first episode is grouped even
-        // if the operator never touches the box.
-        jobNameField.value = DEFAULT_JOB_NAME;
+        // Prefill the last-used job name (cached across reloads) so a session
+        // resumes the operator's job; fall back to the default when none is
+        // cached, so the very first episode is still grouped.
+        jobNameField.value = loadCachedJobName() || DEFAULT_JOB_NAME;
     }
     byId("record-toggle").onclick = async () => {
         // The single toggle button stops an in-progress recording and otherwise
@@ -5423,6 +5451,8 @@ function bindGlobalEvents() {
             // Fall back to the default when the box is blank; the server
             // sanitizes it into a single safe path segment.
             const jobName = (byId("record-job-name")?.value || "").trim() || DEFAULT_JOB_NAME;
+            // Remember this job name so the next session resumes it.
+            saveCachedJobName(jobName);
             await api("/teleop/recording/start", {
                 method: "POST",
                 body: JSON.stringify({

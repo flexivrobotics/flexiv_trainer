@@ -1904,6 +1904,21 @@ button:active {
     gap: 0.8rem;
 }
 
+/* Stack the job tag above the episode name so a long job name wraps onto its
+   own line instead of overflowing the row's right edge. */
+.episode-row__text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+.episode-row__text .episode-row__job {
+    margin-left: 0;
+    max-width: 100%;
+}
+
 .episode-row__meta {
     flex: 0 0 auto;
     font-size: 0.78rem;
