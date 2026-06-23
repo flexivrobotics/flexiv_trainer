@@ -437,18 +437,65 @@ class TeleopService:
         # because Engage requires a running loop. The mirror thread is stopped
         # too, but the enabled grippers / params stay cached so the panel's
         # sliders survive a stop/start cycle (released only on disconnect).
+        #
+        # Stop must ALWAYS halt teleop, including when one or more robots are in
+        # fault. The global Stop() raises std::runtime_error "if failed to stop
+        # the robots" -- which a faulted robot can trigger -- so calling it alone
+        # would abort before the operational pairs are stopped, leaving them
+        # teleoperating. To stay robust we stop each pair individually via
+        # StopWithIdx(idx) so a failure on a faulted pair does not prevent
+        # stopping the rest, and we mark the loop stopped regardless of any error
+        # (per the TDK contract a stopped/faulted loop requires Init()+Start() to
+        # resume, so it is no longer the controlling process either way).
         if self._controller is None:
             return self.snapshot()
+
+        # Stop the mirror thread first so it stops issuing follower commands;
+        # best-effort so a mirror failure cannot block stopping the arms.
         try:
             if self._end_effectors is not None:
                 self._end_effectors.stop()
-            self._controller.Stop()
-            self._started = False
-            self._engaged = False
-            self._error = None
         except Exception as exc:  # pragma: no cover - hardware specific
-            self._error = describe_exception(exc)
+            warn("Failed to stop end effector mirror", describe_exception(exc))
+
+        errors = self._stop_all_pairs()
+
+        # Always treat the loop as halted: even a partial/failed Stop means
+        # teleop is no longer reliably driving the arms, and the operator must
+        # Init()+Start() again to resume. Leaving _started True would re-enable
+        # the Stop button to no further effect and keep the arms shown as live.
+        self._started = False
+        self._engaged = False
+        self._error = "; ".join(errors) if errors else None
         return self.snapshot()
+
+    def _stop_all_pairs(self) -> list[str]:
+        # Stop every configured pair, isolating failures so one faulted pair
+        # cannot keep the others running. Prefer per-pair StopWithIdx(idx); fall
+        # back to a single global Stop() when the controller predates it.
+        controller = self._controller
+        if controller is None:
+            return []
+
+        stop_with_idx = getattr(controller, "StopWithIdx", None)
+        if callable(stop_with_idx):
+            errors: list[str] = []
+            for idx in range(self._engageable_pair_count()):
+                try:
+                    stop_with_idx(idx)
+                except Exception as exc:  # pragma: no cover - hardware specific
+                    message = describe_exception(exc)
+                    warn(f"Failed to stop teleop pair {idx}", message)
+                    errors.append(message)
+            return errors
+
+        try:
+            controller.Stop()
+        except Exception as exc:  # pragma: no cover - hardware specific
+            message = describe_exception(exc)
+            warn("Failed to stop teleop", message)
+            return [message]
+        return []
 
     def set_engaged(self, engaged: bool) -> TeleopSnapshot:
         # Engage/disengage every configured pair. Engage requires the teleop

@@ -105,6 +105,12 @@ class FakeTeleopController:
         self.init_calls = 0
         self.start_calls = 0
         self.stop_calls = 0
+        # Per-pair indices passed to StopWithIdx(); the service prefers this over
+        # the global Stop() so a faulted pair cannot abort stopping the rest.
+        self.stop_idx_calls: list[int] = []
+        # Pair indices whose StopWithIdx() should raise, simulating a faulted
+        # robot whose stop fails while the operational pairs still stop.
+        self.stop_idx_raises: set[int] = set()
         self.engage_calls: list[tuple[int, bool]] = []
         self.init_zero_ft_sensor: object = None
         self.clear_fault_calls: list[int] = []
@@ -121,6 +127,11 @@ class FakeTeleopController:
 
     def Stop(self) -> None:
         self.stop_calls += 1
+
+    def StopWithIdx(self, idx: int) -> None:
+        if idx in self.stop_idx_raises:
+            raise RuntimeError(f"failed to stop pair {idx}")
+        self.stop_idx_calls.append(idx)
 
     def Engage(self, idx: int, engaged: bool) -> None:
         self.engage_calls.append((idx, engaged))
@@ -269,10 +280,49 @@ def test_start_and_stop_do_not_engage_pairs(tmp_path) -> None:
     assert started.engaged is False
 
     stopped = service.stop()
-    assert controller.stop_calls == 1
+    # Two configured pairs -> per-pair StopWithIdx for each, not global Stop().
+    assert controller.stop_idx_calls == [0, 1]
+    assert controller.stop_calls == 0
     assert controller.engage_calls == []
     assert stopped.started is False
     assert stopped.engaged is False
+
+
+def test_stop_halts_operational_pairs_when_one_pair_fails(tmp_path) -> None:
+    # Regression: with one arm in fault, the global Stop() raises and used to
+    # abort before the operational pairs were stopped, leaving them in teleop.
+    # Stopping per-pair must isolate the faulted pair so the rest still stop,
+    # and the loop must report stopped regardless.
+    service = _configured_service(tmp_path)
+    controller = service._controller
+    service.start()
+
+    # Pair 0 (faulted) fails to stop; pair 1 (operational) must still stop.
+    controller.stop_idx_raises = {0}
+
+    stopped = service.stop()
+
+    assert controller.stop_idx_calls == [1]
+    assert stopped.started is False
+    assert stopped.engaged is False
+    # The failure is surfaced as an error, but the loop is still marked stopped.
+    assert stopped.error is not None
+
+
+def test_stop_marks_loop_stopped_even_when_all_pairs_fail(tmp_path) -> None:
+    # Even if every pair's stop fails, teleop must be treated as halted: the TDK
+    # contract requires Init()+Start() to resume, so the loop is no longer the
+    # controlling process and the Stop button must not keep re-arming uselessly.
+    service = _configured_service(tmp_path)
+    controller = service._controller
+    service.start()
+    controller.stop_idx_raises = {0, 1}
+
+    stopped = service.stop()
+
+    assert stopped.started is False
+    assert stopped.stopped is True
+    assert stopped.error is not None
 
 
 def test_start_always_calls_init_before_start(tmp_path) -> None:
