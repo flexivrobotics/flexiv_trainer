@@ -228,6 +228,9 @@ limitations under the License.
                         </div>
                         <div class="recording-status" id="recording-status"></div>
                         <div class="control-stack">
+                            <label class="field-label" for="record-job-name">Job name</label>
+                            <input class="text-input" id="record-job-name" type="text"
+                                placeholder="job_0" autocomplete="off" spellcheck="false" />
                             <button class="start-button button-with-icon" id="record-toggle" type="button">
                                 <span class="button-content">
                                     <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
@@ -293,6 +296,19 @@ limitations under the License.
                     <code id="browser-path">/</code>
                 </div>
                 <div class="dialog-toolbar__actions">
+                    <button class="secondary-button browser-sort-button hidden" id="browser-sort" type="button"
+                        title="Sort by time created" aria-label="Sort by time created">
+                        <svg class="icon-sort" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M7 5 7 19" fill="none" stroke="currentColor" stroke-linecap="round"
+                                stroke-width="1.8"></path>
+                            <path class="icon-sort__arrow" d="M3.5 15.5 7 19 10.5 15.5" fill="none"
+                                stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                                stroke-width="1.8"></path>
+                            <path d="M14 7 20 7M14 12 19 12M14 17 17.5 17" fill="none" stroke="currentColor"
+                                stroke-linecap="round" stroke-width="1.8"></path>
+                        </svg>
+                        <span class="browser-sort-button__label" id="browser-sort-label">Newest</span>
+                    </button>
                     <button class="secondary-button toggle-all-button hidden" id="browser-select-all" type="button"
                         title="Select all" aria-label="Select all"><svg class="icon-check" viewBox="0 0 24 24"
                             aria-hidden="true">

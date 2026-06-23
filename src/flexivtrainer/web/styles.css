@@ -363,10 +363,38 @@ button:disabled {
     letter-spacing: 0;
 }
 
+/* Slider and its number box share a row: slider stretches, number box fixed. */
+.gripper-input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
 .gripper-input-group input[type="range"] {
-    width: 100%;
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
     accent-color: rgba(105, 185, 232, 0.9);
     cursor: pointer;
+}
+
+.gripper-number-input {
+    flex: 0 0 auto;
+    width: 4.5rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.3rem 0.45rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+.gripper-number-input:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
 }
 
 .gripper-input-group input:focus {
@@ -1328,6 +1356,33 @@ button:disabled {
     padding: 0.58rem 0.9rem;
 }
 
+.control-stack .field-label {
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: -0.2rem;
+}
+.control-stack .text-input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.78rem 0.9rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.95rem;
+}
+.control-stack .text-input:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
+}
+.control-stack .text-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 .record-save-button--progress {
     position: relative;
     overflow: hidden;
@@ -1532,10 +1587,21 @@ button:active {
     background: rgba(255, 252, 246, 0.98);
     box-shadow: var(--shadow);
     padding: 1.3rem;
+    /* Keep the dialog within the viewport; the item list scrolls when long. */
+    max-height: calc(100vh - 3rem);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
 .dialog-toolbar {
     align-items: flex-start;
+}
+
+/* Header and toolbar stay fixed; only the list between them scrolls. */
+.dialog-panel > .dialog-header,
+.dialog-panel > .dialog-toolbar {
+    flex: 0 0 auto;
 }
 
 .dialog-path-block {
@@ -1788,10 +1854,18 @@ button:active {
 
 .dialog-list {
     margin-top: 0.72rem;
+    /* Take the remaining height inside the dialog and scroll when the entries
+       overflow, so a long episode list never pushes the footer off-screen. */
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    /* Room so the scrollbar doesn't overlap item content / focus rings. */
+    padding-right: 0.2rem;
 }
 
 .dialog-footer {
     margin-top: 0.72rem;
+    flex: 0 0 auto;
 }
 
 .dialog-empty-state {
@@ -1856,6 +1930,21 @@ button:active {
     display: flex;
     align-items: center;
     gap: 0.8rem;
+}
+
+/* Stack the job tag above the episode name so a long job name wraps onto its
+   own line instead of overflowing the row's right edge. */
+.episode-row__text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+.episode-row__text .episode-row__job {
+    margin-left: 0;
+    max-width: 100%;
 }
 
 .episode-row__meta {
@@ -1938,11 +2027,42 @@ button:active {
     background: rgba(72, 103, 125, 0.18);
 }
 
+/* Stack the job tag above the episode name so a long job name wraps onto its
+   own line instead of overflowing the card's right edge. */
+.episode-entry-card__text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.3rem;
+}
+
 .episode-entry-card__name {
+    max-width: 100%;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* Small pill showing which training job an episode belongs to. */
+.episode-entry-card__job,
+.episode-row__job {
+    flex: 0 0 auto;
+    max-width: 100%;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(105, 185, 232, 0.16);
+    color: var(--accent-strong);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.episode-row__job {
+    margin-left: auto;
 }
 
 .round-icon-button {
@@ -2037,6 +2157,19 @@ button:active {
     flex: 0 0 auto;
     color: var(--muted);
     font-size: 0.8rem;
+}
+
+/* Job group header in the episode picker; episodes under it are indented. */
+.browser-item__job-heading {
+    margin: 0.5rem 0 0.1rem;
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.browser-item--in-job {
+    margin-left: 0.9rem;
 }
 
 .episode-row--selectable {
@@ -2200,6 +2333,31 @@ button:active {
     width: 2.2rem;
     height: 2.2rem;
     padding: 0;
+}
+
+/* Time-created sort toggle in the episode browser toolbar. */
+.browser-sort-button {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.7rem;
+}
+
+.browser-sort-button .icon-sort {
+    width: 1.05rem;
+    height: 1.05rem;
+}
+
+.browser-sort-button__label {
+    font-size: 0.82rem;
+}
+
+/* Flip the descending arrow to point up when ascending (oldest first). */
+.browser-sort-button--asc .icon-sort__arrow {
+    transform-box: fill-box;
+    transform-origin: center;
+    transform: rotate(180deg);
 }
 
 /* Keep even padding on both sides of the episode picker rows in the narrow

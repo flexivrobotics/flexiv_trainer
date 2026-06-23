@@ -19,7 +19,11 @@ import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig
-from flexivtrainer.data.recording_service import RecordingService
+from flexivtrainer.data.recording_service import (
+    DEFAULT_JOB_NAME,
+    RecordingService,
+    sanitize_job_name,
+)
 
 
 def test_grab_images_converts_bgr_capture_to_rgb() -> None:
@@ -142,3 +146,100 @@ def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
     assert state[state_names.index("left_arm.gripper.force")] == pytest.approx(-2.0)
     assert action[action_names.index("left_arm.gripper.width")] == pytest.approx(0.03)
     assert action[action_names.index("left_arm.gripper.force")] == pytest.approx(-2.0)
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("pick_place", "pick_place"),
+        ("  spaced name  ", "spaced_name"),
+        ("../escape", "escape"),
+        ("a/b\\c", "a_b_c"),
+        ("", DEFAULT_JOB_NAME),
+        ("   ", DEFAULT_JOB_NAME),
+        (None, DEFAULT_JOB_NAME),
+        ("...", DEFAULT_JOB_NAME),
+    ],
+)
+def test_sanitize_job_name(raw, expected) -> None:
+    assert sanitize_job_name(raw) == expected
+
+
+class _StubDataset:
+    """Stands in for a LeRobotDataset so save() can run without lerobot."""
+
+    def save_episode(self) -> None:
+        return None
+
+    def finalize(self) -> None:
+        return None
+
+
+def _awaiting_save_service(tmp_path, *, job_name: str) -> RecordingService:
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    service = RecordingService(
+        settings,
+        teleop=_FakeTeleop(),
+        cameras=SimpleNamespace(),
+        get_active_sides=lambda: ["left_arm", "right_arm"],
+    )
+    # Stage a fake, already-captured episode awaiting save.
+    staging_path = settings.storage.staging_root / "20260101_120000"
+    staging_path.mkdir(parents=True)
+    (staging_path / "marker").write_text("episode", encoding="utf-8")
+    service._awaiting_save = True
+    service._episode_name = "20260101_120000"
+    service._job_name = job_name
+    service._staging_path = staging_path
+    service._dataset = _StubDataset()
+    service._frames_captured = 3
+    return service
+
+
+def test_save_files_episode_under_job_subfolder(tmp_path) -> None:
+    service = _awaiting_save_service(tmp_path, job_name="pick_place")
+
+    result = service.save()
+
+    episodes_root = service._settings.storage.episodes_root
+    expected_path = episodes_root / "pick_place" / "20260101_120000"
+    assert result["job_name"] == "pick_place"
+    assert result["path"] == str(expected_path)
+    assert (expected_path / "marker").exists()
+    # The episode lives under the job folder, not directly under episodes/.
+    assert not (episodes_root / "20260101_120000").exists()
+
+
+def test_start_sanitizes_and_reports_job_name(tmp_path) -> None:
+    # start() resolves the job name eagerly and status() surfaces the sanitized
+    # value so the recording panel can confirm the active job. Record only
+    # state/action entries (no cameras) so no video encoder is needed.
+    pytest.importorskip("lerobot")
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    service = RecordingService(
+        settings,
+        teleop=_FakeTeleop(),
+        cameras=SimpleNamespace(),
+        get_active_sides=lambda: ["left_arm", "right_arm"],
+    )
+    entries = [
+        "observation.state.left_arm.tcp_pose",
+        "action.left_arm.tcp_pose",
+    ]
+
+    status = service.start(
+        task="job name test",
+        fps=30,
+        recording_entries=entries,
+        job_name="  My Job!! ",
+    )
+    try:
+        # The unsanitized name "  My Job!! " collapses to a single safe segment.
+        assert status["job_name"] == "My_Job"
+        # status() continues to report it while the recording is active.
+        assert service.status()["job_name"] == "My_Job"
+    finally:
+        service.stop()

@@ -425,6 +425,65 @@ const TELEOP_DISENGAGE_MARKUP = `
         <span>Disengage</span>
     </span>
 `;
+// Default training job name prefilled in the Episode Recording panel's Job name
+// box; mirrors the server-side DEFAULT_JOB_NAME used when none is supplied.
+const DEFAULT_JOB_NAME = "job_0";
+// localStorage key the last-used job name is cached under so it persists across
+// reloads; the box falls back to DEFAULT_JOB_NAME when nothing is cached.
+const JOB_NAME_STORAGE_KEY = "flexivtrainer.lastJobName";
+
+// Read the cached last-used job name, or "" if none/unavailable. Wrapped in
+// try/catch because localStorage can throw in private-mode or sandboxed frames.
+function loadCachedJobName() {
+    try {
+        return (window.localStorage.getItem(JOB_NAME_STORAGE_KEY) || "").trim();
+    } catch (error) {
+        return "";
+    }
+}
+
+function saveCachedJobName(jobName) {
+    const value = (jobName || "").trim();
+    if (!value) {
+        return;
+    }
+    try {
+        window.localStorage.setItem(JOB_NAME_STORAGE_KEY, value);
+    } catch (error) {
+        // Persistence is best-effort; ignore storage failures.
+    }
+}
+
+// localStorage key the last-used gripper velocity/force are cached under, keyed
+// by arm side, so the sliders/number boxes resume their values across reloads
+// instead of always reverting to the model defaults.
+const GRIPPER_PARAMS_STORAGE_KEY = "flexivtrainer.gripperParams";
+
+// Read the cached gripper params for one side as {velocity, force}, or {} when
+// none/unavailable. Wrapped in try/catch (localStorage can throw in sandboxed
+// or private-mode frames).
+function loadCachedGripperParams(side) {
+    try {
+        const raw = window.localStorage.getItem(GRIPPER_PARAMS_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        const entry = parsed && typeof parsed === "object" ? parsed[side] : null;
+        return entry && typeof entry === "object" ? entry : {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function saveCachedGripperParams(side, velocity, force) {
+    try {
+        const raw = window.localStorage.getItem(GRIPPER_PARAMS_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        const next = parsed && typeof parsed === "object" ? parsed : {};
+        next[side] = { velocity, force };
+        window.localStorage.setItem(GRIPPER_PARAMS_STORAGE_KEY, JSON.stringify(next));
+    } catch (error) {
+        // Persistence is best-effort; ignore storage failures.
+    }
+}
 const RECORD_START_MARKUP = `
     <span class="button-content">
         <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
@@ -3111,7 +3170,26 @@ function renderRecordingStatusPanel(teleopStatus) {
         `,
     );
 
+    updateRecordingJobNameField(model);
     updateRecordingToggleButton(model);
+}
+
+// The Job name box names the training job the next episode is filed under
+// (episodes/<job_name>/). It is locked while an episode is actively recording
+// or awaiting save/discard so the job cannot change mid-session, and re-enabled
+// once the recorder is idle.
+function updateRecordingJobNameField(model) {
+    const field = byId("record-job-name");
+    if (!field) {
+        return;
+    }
+    // "recording" => active capture; "stopped" => awaiting save/discard.
+    const locked =
+        model.canStop ||
+        model.kind === "recording" ||
+        model.kind === "stopped" ||
+        !!state.ui.recordingStartBusy;
+    field.disabled = locked;
 }
 
 function updateRecordingToggleButton(model) {
@@ -3333,12 +3411,18 @@ function buildGripperControlPanel(content, sides, grippers) {
             ${multiple && label ? `<div class="gripper-control-title">${label}</div>` : ""}
             <label class="gripper-input-group">
                 <span>Grasping velocity: <strong class="gripper-velocity-value"></strong> m/s</span>
-                <input type="range" class="gripper-velocity" step="0.001" />
+                <div class="gripper-input-row">
+                    <input type="range" class="gripper-velocity" step="0.001" />
+                    <input type="number" class="gripper-number-input gripper-velocity-number" step="0.001" aria-label="Grasping velocity (m/s)" />
+                </div>
                 <small class="gripper-input-note"></small>
             </label>
             <label class="gripper-input-group">
                 <span>Grasping force: <strong class="gripper-force-value"></strong> N</span>
-                <input type="range" class="gripper-force" step="0.1" />
+                <div class="gripper-input-row">
+                    <input type="range" class="gripper-force" step="0.1" />
+                    <input type="number" class="gripper-number-input gripper-force-number" step="0.1" aria-label="Grasping force (N)" />
+                </div>
                 <small class="gripper-input-note"></small>
             </label>
             <p class="gripper-control-hint"></p>
@@ -3347,54 +3431,116 @@ function buildGripperControlPanel(content, sides, grippers) {
 
         const velInput = block.querySelector(".gripper-velocity");
         const forceInput = block.querySelector(".gripper-force");
+        const velNumber = block.querySelector(".gripper-velocity-number");
+        const forceNumber = block.querySelector(".gripper-force-number");
 
         if (params) {
             const store = (state.gripperControl[side] ||= {});
-            // Defaults: velocity = max_vel, grasping force = 1/4 of max_force.
-            if (store.velocity == null) store.velocity = params.max_vel;
-            if (store.force == null) store.force = params.max_force / 4;
+            const cached = loadCachedGripperParams(side);
+            // Seed from the cached last-used value, then the model default
+            // (velocity = max_vel; grasping force = 1/4 of max_force). The clamp
+            // below keeps a cached value valid if the gripper's range changed.
+            if (store.velocity == null) {
+                store.velocity = cached.velocity != null ? cached.velocity : params.max_vel;
+            }
+            if (store.force == null) {
+                store.force = cached.force != null ? cached.force : params.max_force / 4;
+            }
             // Clamp any carried-over value into the (possibly new) range.
             store.velocity = clampNumber(store.velocity, params.min_vel, params.max_vel);
             store.force = clampNumber(store.force, params.min_force, params.max_force);
 
-            bindGripperSlider(block, velInput, side, "velocity", params.min_vel, params.max_vel, 3);
-            bindGripperSlider(block, forceInput, side, "force", params.min_force, params.max_force, 1);
+            bindGripperControl(block, velInput, velNumber, side, "velocity", params.min_vel, params.max_vel, 3);
+            bindGripperControl(block, forceInput, forceNumber, side, "force", params.min_force, params.max_force, 1);
         } else {
             // Params (and thus the valid range) are obtained on Init; leave the
-            // sliders disabled until then.
+            // controls disabled until then.
             velInput.disabled = true;
             forceInput.disabled = true;
+            velNumber.disabled = true;
+            forceNumber.disabled = true;
         }
     });
 }
 
-// Configure a range slider for one gripper field: set its bounds, reflect the
-// stored value, live-update the readout while dragging, and push to the backend
-// when released (change). ``decimals`` controls the displayed precision.
-function bindGripperSlider(block, input, side, field, min, max, decimals) {
+// Configure a range slider plus its number box for one gripper field: set their
+// bounds, reflect the stored value, keep the two inputs in sync, live-update the
+// readout while editing, and push to the backend when committed (change).
+// ``decimals`` controls the displayed precision.
+function bindGripperControl(block, slider, number, side, field, min, max, decimals) {
     const valueEl = block.querySelector(`.gripper-${field}-value`);
-    const note = input.nextElementSibling;
+    const note = block.querySelector(`.gripper-${field}-number`).closest(".gripper-input-group").querySelector(".gripper-input-note");
     const store = (state.gripperControl[side] ||= {});
-    input.min = min;
-    input.max = max;
-    input.value = store[field];
-    const render = () => {
-        if (valueEl) valueEl.textContent = roundForInput(store[field], decimals);
-    };
-    render();
-    note.textContent = `Range: ${roundForInput(min, decimals)}–${roundForInput(max, decimals)}`;
+    const step = 1 / 10 ** decimals;
+    slider.min = min;
+    slider.max = max;
+    number.min = roundForInput(min, decimals);
+    number.max = roundForInput(max, decimals);
+    number.step = step;
 
-    input.oninput = () => {
-        const value = clampNumber(parseFloat(input.value), min, max);
-        store[field] = value;
-        render();
+    // Reflect the stored value across the readout, slider, and number box.
+    const render = () => {
+        const rounded = roundForInput(store[field], decimals);
+        if (valueEl) valueEl.textContent = rounded;
+        slider.value = store[field];
+        // Don't fight the field the user is typing in (e.g. a partial "0.").
+        if (document.activeElement !== number) {
+            number.value = rounded;
+        }
     };
-    input.onchange = () => {
-        store[field] = clampNumber(parseFloat(input.value), min, max);
+    store[field] = clampNumber(store[field], min, max);
+    render();
+    if (note) {
+        note.textContent = `Range: ${roundForInput(min, decimals)}–${roundForInput(max, decimals)}`;
+    }
+
+    // Live-update (no backend push) while dragging the slider / typing a number.
+    const onInput = (rawValue) => {
+        const value = clampNumber(parseFloat(rawValue), min, max);
+        store[field] = value;
+        const rounded = roundForInput(value, decimals);
+        if (valueEl) valueEl.textContent = rounded;
+        return value;
+    };
+    slider.oninput = () => {
+        const value = onInput(slider.value);
+        if (document.activeElement !== number) {
+            number.value = roundForInput(value, decimals);
+        }
+    };
+    number.oninput = () => {
+        // Allow intermediate, not-yet-parseable input without snapping it; only
+        // mirror to the slider once it parses to a number.
+        if (number.value.trim() === "" || Number.isNaN(parseFloat(number.value))) {
+            return;
+        }
+        const value = onInput(number.value);
+        slider.value = value;
+    };
+
+    // Commit: clamp, normalize the displayed value, persist, and push to backend.
+    // ``store[field]`` is kept current by the oninput handlers above; fall back
+    // to it when the number box holds an unparseable intermediate value.
+    const commit = () => {
+        const parsed = parseFloat(number.value);
+        const base = Number.isNaN(parsed) ? store[field] : parsed;
+        store[field] = clampNumber(base, min, max);
         render();
+        persistGripperParams(side);
         // Push to the backend so the mirror loop's Move() uses the new value.
         sendGripperParams(side);
     };
+    slider.onchange = commit;
+    number.onchange = commit;
+}
+
+// Cache this side's last-used velocity/force so they persist across reloads.
+function persistGripperParams(side) {
+    const store = state.gripperControl[side] || {};
+    if (store.velocity == null || store.force == null) {
+        return;
+    }
+    saveCachedGripperParams(side, store.velocity, store.force);
 }
 
 // Persist this side's velocity/force on the backend (used by the mirror loop's
@@ -3936,11 +4082,17 @@ function renderProcessing() {
             state.episodes.forEach((episode, index) => {
                 const row = document.createElement("div");
                 row.className = "episode-entry-row";
+                const jobBadge = episode.job
+                    ? `<span class="episode-entry-card__job">${escapeHtml(episode.job)}</span>`
+                    : "";
                 row.innerHTML = `
                     <div class="episode-entry-card">
                         <strong class="episode-entry-card__index">${index + 1}</strong>
                         <span class="episode-entry-card__divider" aria-hidden="true"></span>
-                        <span class="episode-entry-card__name">${escapeHtml(episode.name)}</span>
+                        <div class="episode-entry-card__text">
+                            ${jobBadge}
+                            <span class="episode-entry-card__name">${escapeHtml(episode.name)}</span>
+                        </div>
                     </div>
                     <button class="round-icon-button round-icon-button--remove" data-remove-episode="${escapeHtml(episode.path)}" type="button" aria-label="Remove ${escapeHtml(episode.name)}" title="Remove ${escapeHtml(episode.name)}">
                         <span aria-hidden="true">&minus;</span>
@@ -3992,10 +4144,16 @@ function renderProcessing() {
         state.episodes.forEach((episode, index) => {
             const row = document.createElement("div");
             row.className = `episode-row episode-row--selectable ${previewPath === episode.path ? "episode-row--selected" : ""}`.trim();
+            const jobBadge = episode.job
+                ? `<span class="episode-row__job">${escapeHtml(episode.job)}</span>`
+                : "";
             row.innerHTML = `
         <div class="episode-row__main">
           <input data-toggle-episode="${episode.path}" type="checkbox" ${state.selectedEpisodes.includes(episode.path) ? "checked" : ""} />
-          <span>${escapeHtml(episode.name)}</span>
+          <div class="episode-row__text">
+            ${jobBadge}
+            <span>${escapeHtml(episode.name)}</span>
+          </div>
         </div>
       `;
             row.onclick = async () => {
@@ -4877,6 +5035,22 @@ function syncBrowserDialogChrome() {
     if (selectAllButton) {
         selectAllButton.classList.toggle("hidden", !state.pathBrowser.showSelectAll);
     }
+    const sortButton = byId("browser-sort");
+    if (sortButton) {
+        // The time-created sort only makes sense for the episode picker.
+        sortButton.classList.toggle("hidden", !isEpisodeBrowserMode());
+        const ascending = state.pathBrowser.sortOrder === "asc";
+        const label = byId("browser-sort-label");
+        if (label) {
+            label.textContent = ascending ? "Oldest" : "Newest";
+        }
+        sortButton.classList.toggle("browser-sort-button--asc", ascending);
+        const title = ascending
+            ? "Sorted oldest first — click for newest first"
+            : "Sorted newest first — click for oldest first";
+        sortButton.setAttribute("title", title);
+        sortButton.setAttribute("aria-label", title);
+    }
     if (confirmButton) {
         confirmButton.textContent = state.pathBrowser.confirmLabel || "Select";
     }
@@ -4900,27 +5074,48 @@ async function refreshBrowser(path) {
     const result = await api(`/datasets/browse?${params.toString()}`);
     state.pathBrowser.currentPath = result.path;
     state.pathBrowser.rootPath = result.root_path || state.pathBrowser.rootPath || result.path;
-    state.pathBrowser.items = result.items || [];
+    state.pathBrowser.items = sortBrowserItems(result.items || []);
     state.pathBrowser.selected = state.pathBrowser.selected.filter((selectedPath) =>
         state.pathBrowser.items.some((item) => item.path === selectedPath),
     );
     syncBrowserDialogChrome();
     byId("browser-path").textContent = result.path;
+    renderBrowserList();
+    byId("browser-modal").classList.remove("hidden");
+}
+
+// Render the current ``state.pathBrowser.items`` into the browser list. Split
+// out of refreshBrowser so the sort-order toggle can re-render the already
+// fetched items without another round-trip.
+function renderBrowserList() {
     const list = byId("browser-list");
     list.innerHTML = "";
 
     if (!state.pathBrowser.items.length) {
         list.innerHTML = `<div class="dialog-empty-state">${escapeHtml(state.pathBrowser.emptyMessage || "No entries available.")}</div>`;
         updateBrowserSelectionUi();
-        byId("browser-modal").classList.remove("hidden");
         return;
     }
 
+    // Job heading currently rendered, so consecutive episodes sharing a job get
+    // one header. Episodes are listed grouped by job (see _expand_job_episodes).
+    let currentJobHeading = null;
     state.pathBrowser.items.forEach((item) => {
         if (isEpisodeBrowserMode()) {
             const selectable = !!item.is_valid_episode;
+            // Insert a job group header whenever the job changes.
+            const job = item.job || null;
+            if (selectable && job && job !== currentJobHeading) {
+                currentJobHeading = job;
+                const heading = document.createElement("div");
+                heading.className = "browser-item__job-heading";
+                heading.textContent = job;
+                list.appendChild(heading);
+            } else if (!job) {
+                currentJobHeading = null;
+            }
             const row = document.createElement("label");
-            row.className = `browser-item browser-item--episode ${selectable ? "" : "browser-item--invalid"}`.trim();
+            row.className = `browser-item browser-item--episode ${selectable ? "" : "browser-item--invalid"} ${job ? "browser-item--in-job" : ""}`.trim();
             row.dataset.browserPath = item.path;
             row.innerHTML = `
                 <span class="browser-item__main">
@@ -4964,7 +5159,46 @@ async function refreshBrowser(path) {
     });
 
     updateBrowserSelectionUi();
-    byId("browser-modal").classList.remove("hidden");
+}
+
+// Sort browser items by creation time in the current sort order. Episodes are
+// kept grouped by job: episodes within a job are ordered by time, and the job
+// groups themselves are ordered by their most recent (desc) / oldest (asc)
+// episode. Ungrouped entries (job == null) sort purely by time. Non-episode
+// browsing keeps the server's name order untouched.
+function sortBrowserItems(items) {
+    if (!isEpisodeBrowserMode()) {
+        return items;
+    }
+    const order = state.pathBrowser.sortOrder === "asc" ? "asc" : "desc";
+    const dir = order === "asc" ? 1 : -1;
+    const created = (item) => (typeof item.created === "number" ? item.created : 0);
+
+    // Bucket by job, preserving a representative time per job for group ordering.
+    const groups = new Map();
+    items.forEach((item) => {
+        const key = item.job || "";
+        if (!groups.has(key)) {
+            groups.set(key, []);
+        }
+        groups.get(key).push(item);
+    });
+
+    const groupTime = (entries) => {
+        const times = entries.map(created);
+        return order === "asc" ? Math.min(...times) : Math.max(...times);
+    };
+
+    const orderedGroups = [...groups.entries()].sort(
+        ([, a], [, b]) => (groupTime(a) - groupTime(b)) * dir,
+    );
+
+    const sorted = [];
+    orderedGroups.forEach(([, entries]) => {
+        entries.sort((a, b) => (created(a) - created(b)) * dir);
+        sorted.push(...entries);
+    });
+    return sorted;
 }
 
 async function openBrowser(options) {
@@ -4992,6 +5226,9 @@ async function openBrowser(options) {
         pathNote: "Current path",
         eyebrow: "Server Path Browser",
         onConfirm: null,
+        // Sort order for episode browsing, by creation time. "desc" lists the
+        // newest episodes first; the episode browser exposes a toggle for it.
+        sortOrder: "desc",
         ...options,
         selected: [],
         items: [],
@@ -5024,12 +5261,15 @@ function openEpisodeBrowser() {
         confirmLabel: "Load",
         pathNote: "Episodes directory",
         onConfirm: (paths) => {
-            const orderedPaths = (state.pathBrowser.items || [])
-                .map((item) => item.path)
-                .filter((itemPath) => paths.includes(itemPath));
-            orderedPaths.forEach((path) => {
-                if (!state.episodes.some((item) => item.path === path)) {
-                    state.episodes.push({ name: path.split("/").pop(), path });
+            const orderedItems = (state.pathBrowser.items || [])
+                .filter((item) => paths.includes(item.path));
+            orderedItems.forEach((item) => {
+                if (!state.episodes.some((existing) => existing.path === item.path)) {
+                    state.episodes.push({
+                        name: item.path.split("/").pop(),
+                        path: item.path,
+                        job: item.job || null,
+                    });
                 }
             });
             closeBrowser();
@@ -5280,6 +5520,13 @@ function bindGlobalEvents() {
             setTeleopHomeBusy(false);
         }
     };
+    const jobNameField = byId("record-job-name");
+    if (jobNameField && !jobNameField.value) {
+        // Prefill the last-used job name (cached across reloads) so a session
+        // resumes the operator's job; fall back to the default when none is
+        // cached, so the very first episode is still grouped.
+        jobNameField.value = loadCachedJobName() || DEFAULT_JOB_NAME;
+    }
     byId("record-toggle").onclick = async () => {
         // The single toggle button stops an in-progress recording and otherwise
         // starts a new one, mirroring the teleop power control.
@@ -5299,11 +5546,18 @@ function bindGlobalEvents() {
                 return;
             }
             setRecordingStartBusy(true);
+            // The job name groups episodes on disk under episodes/<job_name>/.
+            // Fall back to the default when the box is blank; the server
+            // sanitizes it into a single safe path segment.
+            const jobName = (byId("record-job-name")?.value || "").trim() || DEFAULT_JOB_NAME;
+            // Remember this job name so the next session resumes it.
+            saveCachedJobName(jobName);
             await api("/teleop/recording/start", {
                 method: "POST",
                 body: JSON.stringify({
                     task: "Dual-arm Flexiv teleoperation demonstration",
                     recording_entries: state.recordingEntries,
+                    job_name: jobName,
                 }),
             });
         } catch (error) {
@@ -5362,6 +5616,14 @@ function bindGlobalEvents() {
         const allSelected = selectablePaths.length > 0
             && selectablePaths.every((path) => state.pathBrowser.selected.includes(path));
         setBrowserSelection(allSelected ? [] : selectablePaths);
+    };
+    byId("browser-sort").onclick = () => {
+        // Flip the time-created order and re-render the already-fetched items.
+        state.pathBrowser.sortOrder =
+            state.pathBrowser.sortOrder === "asc" ? "desc" : "asc";
+        state.pathBrowser.items = sortBrowserItems(state.pathBrowser.items);
+        syncBrowserDialogChrome();
+        renderBrowserList();
     };
     byId("browser-up").onclick = () => {
         const parts = state.pathBrowser.currentPath.split("/").filter(Boolean);
