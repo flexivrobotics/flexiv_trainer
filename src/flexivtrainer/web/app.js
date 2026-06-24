@@ -4974,6 +4974,13 @@ function getBrowserSelectablePaths() {
         .map((item) => item.path);
 }
 
+// Selectable episode paths belonging to a single job group, in list order.
+function getBrowserSelectablePathsForJob(job) {
+    return (state.pathBrowser.items || [])
+        .filter((item) => !!item.is_valid_episode && (item.job || null) === job)
+        .map((item) => item.path);
+}
+
 function updateBrowserConfirmState() {
     const confirmButton = byId("browser-confirm");
     if (!confirmButton) {
@@ -5009,6 +5016,14 @@ function updateBrowserSelectionUi() {
         setToggleAllButton(selectAllButton, allSelected);
     }
 
+    list.querySelectorAll("[data-job-toggle]").forEach((button) => {
+        const job = button.dataset.jobToggle || null;
+        const jobPaths = getBrowserSelectablePathsForJob(job);
+        const allSelected = jobPaths.length > 0
+            && jobPaths.every((path) => selected.has(path));
+        setToggleAllButton(button, allSelected, "episodes in this job");
+    });
+
     updateBrowserConfirmState();
 }
 
@@ -5031,6 +5046,25 @@ function toggleBrowserSelection(path) {
         }
         nextSelected.add(path);
     }
+    setBrowserSelection([...nextSelected]);
+}
+
+// Select every episode under a job, or deselect them all if they are already
+// fully selected. Mirrors the global select-all toggle, scoped to one job.
+function toggleBrowserJobSelection(job) {
+    const jobPaths = getBrowserSelectablePathsForJob(job);
+    if (!jobPaths.length) {
+        return;
+    }
+    const nextSelected = new Set(state.pathBrowser.selected);
+    const allSelected = jobPaths.every((path) => nextSelected.has(path));
+    jobPaths.forEach((path) => {
+        if (allSelected) {
+            nextSelected.delete(path);
+        } else {
+            nextSelected.add(path);
+        }
+    });
     setBrowserSelection([...nextSelected]);
 }
 
@@ -5134,7 +5168,22 @@ function renderBrowserList() {
                 currentJobHeading = job;
                 const heading = document.createElement("div");
                 heading.className = "browser-item__job-heading";
-                heading.textContent = job;
+                const jobLabel = document.createElement("span");
+                jobLabel.className = "browser-item__job-heading-text";
+                jobLabel.textContent = job;
+                heading.appendChild(jobLabel);
+                if (state.pathBrowser.multiSelect) {
+                    const jobToggle = document.createElement("button");
+                    jobToggle.type = "button";
+                    jobToggle.className = "secondary-button toggle-all-button browser-item__job-toggle";
+                    jobToggle.dataset.jobToggle = job;
+                    setToggleAllButton(jobToggle, false, "episodes in this job");
+                    jobToggle.onclick = (event) => {
+                        event.preventDefault();
+                        toggleBrowserJobSelection(job);
+                    };
+                    heading.appendChild(jobToggle);
+                }
                 list.appendChild(heading);
             } else if (!job) {
                 currentJobHeading = null;

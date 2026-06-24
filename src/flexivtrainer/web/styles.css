@@ -2200,12 +2200,32 @@ button:active {
 
 /* Job group header in the episode picker; episodes under it are indented. */
 .browser-item__job-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     margin: 0.5rem 0 0.1rem;
     color: var(--muted);
     font-size: 0.74rem;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+}
+.browser-item__job-heading-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Compact per-job select-all toggle that sits inline with the job heading. */
+.browser-item__job-toggle {
+    flex: 0 0 auto;
+    width: 1.6rem;
+    height: 1.6rem;
+}
+.browser-item__job-toggle .icon-check {
+    width: 1rem;
+    height: 1rem;
 }
 .browser-item--in-job {
     margin-left: 0.9rem;
