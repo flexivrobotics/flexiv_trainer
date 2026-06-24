@@ -745,7 +745,7 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame, scope,
 
 function _formatLegendValue(value) {
     return value !== null && value !== undefined && Number.isFinite(value)
-        ? value.toFixed(2)
+        ? value.toFixed(3)
         : "—";
 }
 
