@@ -4054,6 +4054,30 @@ async function loadTrainingPreview(episodePath, options = {}) {
     }
 }
 
+// Truncated job tags reveal their full text on hover by sliding ("rolling")
+// the text to expose the clipped tail, then sliding back. Only tags whose text
+// is actually clipped get the animation; the rest keep their static ellipsis.
+function _setupJobTagMarquee(scope) {
+    scope.querySelectorAll(".episode-row__job").forEach((tag) => {
+        const text = tag.querySelector(".episode-row__job-text");
+        if (!text) {
+            return;
+        }
+        const overflow = text.scrollWidth - text.clientWidth;
+        if (overflow > 1) {
+            tag.classList.add("episode-row__job--overflowing");
+            tag.style.setProperty("--job-tag-shift", `-${overflow}px`);
+            // Pace the scroll by distance so longer names don't whip past.
+            const seconds = Math.min(8, Math.max(2, overflow / 30));
+            tag.style.setProperty("--job-tag-duration", `${seconds}s`);
+        } else {
+            tag.classList.remove("episode-row__job--overflowing");
+            tag.style.removeProperty("--job-tag-shift");
+            tag.style.removeProperty("--job-tag-duration");
+        }
+    });
+}
+
 function renderProcessing() {
     const container = byId("processing-content");
     container.classList.toggle("has-playback-bar", state.processingStep > 1);
@@ -4145,7 +4169,7 @@ function renderProcessing() {
             const row = document.createElement("div");
             row.className = `episode-row episode-row--selectable ${previewPath === episode.path ? "episode-row--selected" : ""}`.trim();
             const jobBadge = episode.job
-                ? `<span class="episode-row__job">${escapeHtml(episode.job)}</span>`
+                ? `<span class="episode-row__job" title="${escapeHtml(episode.job)}"><span class="episode-row__job-text">${escapeHtml(episode.job)}</span></span>`
                 : "";
             row.innerHTML = `
         <div class="episode-row__main">
@@ -4181,6 +4205,7 @@ function renderProcessing() {
             }
             picker.appendChild(row);
         });
+        _setupJobTagMarquee(picker);
         const previewBlock = byId("episode-preview-block");
         if (!state.preview) {
             previewBlock.innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Select an episode to preview.</div></div>`;
@@ -4949,6 +4974,13 @@ function getBrowserSelectablePaths() {
         .map((item) => item.path);
 }
 
+// Selectable episode paths belonging to a single job group, in list order.
+function getBrowserSelectablePathsForJob(job) {
+    return (state.pathBrowser.items || [])
+        .filter((item) => !!item.is_valid_episode && (item.job || null) === job)
+        .map((item) => item.path);
+}
+
 function updateBrowserConfirmState() {
     const confirmButton = byId("browser-confirm");
     if (!confirmButton) {
@@ -4984,6 +5016,14 @@ function updateBrowserSelectionUi() {
         setToggleAllButton(selectAllButton, allSelected);
     }
 
+    list.querySelectorAll("[data-job-toggle]").forEach((button) => {
+        const job = button.dataset.jobToggle || null;
+        const jobPaths = getBrowserSelectablePathsForJob(job);
+        const allSelected = jobPaths.length > 0
+            && jobPaths.every((path) => selected.has(path));
+        setToggleAllButton(button, allSelected, "episodes in this job");
+    });
+
     updateBrowserConfirmState();
 }
 
@@ -5006,6 +5046,25 @@ function toggleBrowserSelection(path) {
         }
         nextSelected.add(path);
     }
+    setBrowserSelection([...nextSelected]);
+}
+
+// Select every episode under a job, or deselect them all if they are already
+// fully selected. Mirrors the global select-all toggle, scoped to one job.
+function toggleBrowserJobSelection(job) {
+    const jobPaths = getBrowserSelectablePathsForJob(job);
+    if (!jobPaths.length) {
+        return;
+    }
+    const nextSelected = new Set(state.pathBrowser.selected);
+    const allSelected = jobPaths.every((path) => nextSelected.has(path));
+    jobPaths.forEach((path) => {
+        if (allSelected) {
+            nextSelected.delete(path);
+        } else {
+            nextSelected.add(path);
+        }
+    });
     setBrowserSelection([...nextSelected]);
 }
 
@@ -5100,16 +5159,37 @@ function renderBrowserList() {
     // Job heading currently rendered, so consecutive episodes sharing a job get
     // one header. Episodes are listed grouped by job (see _expand_job_episodes).
     let currentJobHeading = null;
+    // Per-job running sequence number, so episodes are numbered 1, 2, 3, … within
+    // each job independently. Ungrouped episodes (job == null) share their own run.
+    const jobSequence = new Map();
     state.pathBrowser.items.forEach((item) => {
         if (isEpisodeBrowserMode()) {
             const selectable = !!item.is_valid_episode;
             // Insert a job group header whenever the job changes.
             const job = item.job || null;
+            const sequenceKey = job || "";
+            const sequenceNumber = (jobSequence.get(sequenceKey) || 0) + 1;
+            jobSequence.set(sequenceKey, sequenceNumber);
             if (selectable && job && job !== currentJobHeading) {
                 currentJobHeading = job;
                 const heading = document.createElement("div");
                 heading.className = "browser-item__job-heading";
-                heading.textContent = job;
+                const jobLabel = document.createElement("span");
+                jobLabel.className = "browser-item__job-heading-text";
+                jobLabel.textContent = job;
+                heading.appendChild(jobLabel);
+                if (state.pathBrowser.multiSelect) {
+                    const jobToggle = document.createElement("button");
+                    jobToggle.type = "button";
+                    jobToggle.className = "secondary-button toggle-all-button browser-item__job-toggle";
+                    jobToggle.dataset.jobToggle = job;
+                    setToggleAllButton(jobToggle, false, "episodes in this job");
+                    jobToggle.onclick = (event) => {
+                        event.preventDefault();
+                        toggleBrowserJobSelection(job);
+                    };
+                    heading.appendChild(jobToggle);
+                }
                 list.appendChild(heading);
             } else if (!job) {
                 currentJobHeading = null;
@@ -5119,6 +5199,7 @@ function renderBrowserList() {
             row.dataset.browserPath = item.path;
             row.innerHTML = `
                 <span class="browser-item__main">
+                    <span class="browser-item__seq">${sequenceNumber}</span>
                     <input class="browser-item__checkbox" type="checkbox" ${selectable ? "" : "disabled"} />
                     <strong class="browser-item__name">${escapeHtml(item.name)}</strong>
                 </span>
