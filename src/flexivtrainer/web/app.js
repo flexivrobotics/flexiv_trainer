@@ -5159,11 +5159,17 @@ function renderBrowserList() {
     // Job heading currently rendered, so consecutive episodes sharing a job get
     // one header. Episodes are listed grouped by job (see _expand_job_episodes).
     let currentJobHeading = null;
+    // Per-job running sequence number, so episodes are numbered 1, 2, 3, … within
+    // each job independently. Ungrouped episodes (job == null) share their own run.
+    const jobSequence = new Map();
     state.pathBrowser.items.forEach((item) => {
         if (isEpisodeBrowserMode()) {
             const selectable = !!item.is_valid_episode;
             // Insert a job group header whenever the job changes.
             const job = item.job || null;
+            const sequenceKey = job || "";
+            const sequenceNumber = (jobSequence.get(sequenceKey) || 0) + 1;
+            jobSequence.set(sequenceKey, sequenceNumber);
             if (selectable && job && job !== currentJobHeading) {
                 currentJobHeading = job;
                 const heading = document.createElement("div");
@@ -5193,6 +5199,7 @@ function renderBrowserList() {
             row.dataset.browserPath = item.path;
             row.innerHTML = `
                 <span class="browser-item__main">
+                    <span class="browser-item__seq">${sequenceNumber}</span>
                     <input class="browser-item__checkbox" type="checkbox" ${selectable ? "" : "disabled"} />
                     <strong class="browser-item__name">${escapeHtml(item.name)}</strong>
                 </span>

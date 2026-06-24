@@ -2184,6 +2184,19 @@ button:active {
     opacity: 0.6;
 }
 
+/* Per-job sequence number shown in front of each episode name: a large bold
+   index with a vertical divider separating it from the episode content. */
+.browser-item__seq {
+    flex: 0 0 auto;
+    min-width: 1.6rem;
+    padding-right: 0.85rem;
+    border-right: 1px solid var(--line);
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: center;
+}
+
 .browser-item__name {
     min-width: 0;
     overflow: hidden;
