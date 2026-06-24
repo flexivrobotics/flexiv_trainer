@@ -4054,6 +4054,30 @@ async function loadTrainingPreview(episodePath, options = {}) {
     }
 }
 
+// Truncated job tags reveal their full text on hover by sliding ("rolling")
+// the text to expose the clipped tail, then sliding back. Only tags whose text
+// is actually clipped get the animation; the rest keep their static ellipsis.
+function _setupJobTagMarquee(scope) {
+    scope.querySelectorAll(".episode-row__job").forEach((tag) => {
+        const text = tag.querySelector(".episode-row__job-text");
+        if (!text) {
+            return;
+        }
+        const overflow = text.scrollWidth - text.clientWidth;
+        if (overflow > 1) {
+            tag.classList.add("episode-row__job--overflowing");
+            tag.style.setProperty("--job-tag-shift", `-${overflow}px`);
+            // Pace the scroll by distance so longer names don't whip past.
+            const seconds = Math.min(8, Math.max(2, overflow / 30));
+            tag.style.setProperty("--job-tag-duration", `${seconds}s`);
+        } else {
+            tag.classList.remove("episode-row__job--overflowing");
+            tag.style.removeProperty("--job-tag-shift");
+            tag.style.removeProperty("--job-tag-duration");
+        }
+    });
+}
+
 function renderProcessing() {
     const container = byId("processing-content");
     container.classList.toggle("has-playback-bar", state.processingStep > 1);
@@ -4145,7 +4169,7 @@ function renderProcessing() {
             const row = document.createElement("div");
             row.className = `episode-row episode-row--selectable ${previewPath === episode.path ? "episode-row--selected" : ""}`.trim();
             const jobBadge = episode.job
-                ? `<span class="episode-row__job">${escapeHtml(episode.job)}</span>`
+                ? `<span class="episode-row__job" title="${escapeHtml(episode.job)}"><span class="episode-row__job-text">${escapeHtml(episode.job)}</span></span>`
                 : "";
             row.innerHTML = `
         <div class="episode-row__main">
@@ -4181,6 +4205,7 @@ function renderProcessing() {
             }
             picker.appendChild(row);
         });
+        _setupJobTagMarquee(picker);
         const previewBlock = byId("episode-preview-block");
         if (!state.preview) {
             previewBlock.innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Select an episode to preview.</div></div>`;

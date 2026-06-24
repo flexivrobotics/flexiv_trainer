@@ -2072,6 +2072,38 @@ button:active {
     max-width: 100%;
 }
 
+/* The job name lives in an inner element so a clipped tag can reveal its full
+   text on hover by sliding ("rolling") horizontally. In the resting state it
+   truncates with an ellipsis; the outer pill keeps overflow:hidden to clip the
+   sliding text. */
+.episode-row__job-text {
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: top;
+}
+.episode-row__job--overflowing:hover .episode-row__job-text {
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+    animation: job-tag-roll var(--job-tag-duration, 4s) ease-in-out infinite alternate;
+}
+@keyframes job-tag-roll {
+    0%, 12% {
+        transform: translateX(0);
+    }
+    88%, 100% {
+        transform: translateX(var(--job-tag-shift, 0));
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .episode-row__job--overflowing:hover .episode-row__job-text {
+        animation: none;
+    }
+}
+
 .round-icon-button {
     width: 2.7rem;
     height: 2.7rem;
