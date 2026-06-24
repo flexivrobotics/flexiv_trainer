@@ -4123,6 +4123,12 @@ function renderProcessing() {
                 <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add episode dataset" title="Add episode dataset">
                     <span aria-hidden="true">+</span>
                 </button>
+                ${state.episodes.length ? `
+                <button class="round-icon-button round-icon-button--clear" id="training-clear-episodes" type="button" aria-label="Clear all episodes" title="Clear all episodes">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"></path>
+                    </svg>
+                </button>` : ""}
             </div>
             <div class="control-bar control-bar--floating-step-nav">
                 <button id="training-next-step" type="button" ${state.episodes.length ? "" : "disabled"}>Next</button>
@@ -4155,6 +4161,14 @@ function renderProcessing() {
             });
         }
         byId("training-add-episode").onclick = () => openEpisodeBrowser();
+        const clearButton = byId("training-clear-episodes");
+        if (clearButton) {
+            clearButton.onclick = () => {
+                state.episodes = [];
+                state.selectedEpisodes = [];
+                renderProcessing();
+            };
+        }
         byId("training-next-step").onclick = () => {
             state.processingStep = 2;
             renderProcessing();
