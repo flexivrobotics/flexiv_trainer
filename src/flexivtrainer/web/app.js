@@ -1136,6 +1136,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
             scope.axisEnabled[axisIndex] = !!(scope.stateEnabled[axisIndex] || scope.actionEnabled[axisIndex]);
         }
         _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+        _rebuildDatasetLegends(container, preview, seriesData, frameKey);
     };
 
     // Restore the playhead position on the freshly-mounted videos.
@@ -1212,11 +1213,39 @@ function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
         if (!hasAnyData) {
             chartDiv.innerHTML += `<div class="trend-chart__empty">No visible data</div>`;
         }
-        // Refresh the per-legend current-frame values so they track the playhead.
+        // Refresh the per-legend current-frame values so they track the
+        // playhead. Update only the value spans in place — rebuilding the whole
+        // legend here would recreate the checkbox inputs every frame, which
+        // makes them impossible to click during playback.
         const legendDiv = card.querySelector(".trend-chart__legend");
         if (legendDiv) {
-            legendDiv.innerHTML = _buildDatasetPlotLegend(seriesData, group, currentFrame, scope, gi);
+            const valueSpans = legendDiv.querySelectorAll(".trend-chart__legend-value");
+            let vi = 0;
+            for (let i = 0; i < group.labels.length; i++) {
+                const stateArr = group.stateKeys[i] ? seriesData[group.stateKeys[i]] : null;
+                const actionArr = group.actionKeys[i] ? seriesData[group.actionKeys[i]] : null;
+                if (valueSpans[vi]) valueSpans[vi].textContent = _formatLegendValue(stateArr ? stateArr[currentFrame] : null);
+                vi++;
+                if (valueSpans[vi]) valueSpans[vi].textContent = _formatLegendValue(actionArr ? actionArr[currentFrame] : null);
+                vi++;
+            }
         }
+    });
+}
+
+// Rebuild the full legend markup (checkboxes + chip dimming) for every plot
+// card. Called after a scope toggle, where the enabled/disabled state and the
+// derived axis checkbox need to be reflected in the DOM.
+function _rebuildDatasetLegends(container, preview, seriesData, frameKey) {
+    const currentFrame = state[frameKey] || 0;
+    const plotGroups = buildDatasetPlotGroups(preview.numeric_keys);
+    container.querySelectorAll(".dataset-plot-card").forEach((card, gi) => {
+        const group = plotGroups[gi];
+        if (!group || !seriesData) return;
+        const legendDiv = card.querySelector(".trend-chart__legend");
+        if (!legendDiv) return;
+        const scope = _ensureDatasetPlotScope(container.id, group);
+        legendDiv.innerHTML = _buildDatasetPlotLegend(seriesData, group, currentFrame, scope, gi);
     });
 }
 
