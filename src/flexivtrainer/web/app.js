@@ -5372,12 +5372,13 @@ async function bootstrapTraining() {
     }
     await api("/training/bootstrap", { method: "POST" });
     state.trainingPolicies = await api("/training/policies");
-    state.trainingDevices = await api("/training/devices");
     state.selectedPolicy = state.trainingPolicies.default;
     state.trainingBootstrapped = true;
     if (state.activeView === "training") {
         renderTraining();
     }
+    state.ui.trainingDeviceAutoTriggeredStep = 4;
+    refreshTrainingDevices({ silent: true }).catch((error) => showToast(error.message, true));
 }
 
 function bindGlobalEvents() {
