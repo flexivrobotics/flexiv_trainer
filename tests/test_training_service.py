@@ -123,3 +123,18 @@ def test_pause_resume_suspends_and_continues_process(tmp_path: Path) -> None:
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_evaluate_devices_caching(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    # The first call should probe and cache.
+    res1 = service.evaluate_devices()
+    assert "devices" in res1
+    assert len(res1["devices"]) > 0
+    # The cache should be populated now.
+    assert service._device_probe is not None
+    cached_probe = service._device_probe
+
+    # The second call should return cached results.
+    res2 = service.evaluate_devices()
+    assert res2["devices"][1:] == cached_probe

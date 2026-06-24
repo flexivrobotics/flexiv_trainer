@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
@@ -44,6 +45,15 @@ WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # Warm up training device detection in the background so the first visit
+        # to the Policy Training page doesn't block on a cold ``import torch`` +
+        # CUDA init (which left the device list empty for tens of seconds).
+        runtime = get_runtime_manager()
+        threading.Thread(
+            target=runtime.training.warm_up_devices,
+            name="device-warmup",
+            daemon=True,
+        ).start()
         yield
         if get_runtime_manager.cache_info().currsize:
             get_runtime_manager().shutdown()

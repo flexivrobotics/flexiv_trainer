@@ -4537,7 +4537,7 @@ function renderTraining() {
     if (deviceReloadBtn) {
         setTrainingDeviceEvalBusy(state.ui.trainingDeviceEvalBusy);
         deviceReloadBtn.onclick = () => {
-            refreshTrainingDevices({ clearBeforeFetch: true, delayMs: 1000 }).catch((error) => showToast(error.message, true));
+            refreshTrainingDevices({ clearBeforeFetch: true, delayMs: 1000, force: true }).catch((error) => showToast(error.message, true));
         };
     }
     const primaryActionBtn = byId("training-primary-action");
@@ -4667,7 +4667,7 @@ async function refreshTrainingDevices(options = {}) {
         if (options.delayMs) {
             await new Promise((resolve) => window.setTimeout(resolve, options.delayMs));
         }
-        state.trainingDevices = await api("/training/devices");
+        state.trainingDevices = await api(options.force ? "/training/devices?force=true" : "/training/devices");
         if (state.trainingPolicies) {
             state.trainingPolicies.device = state.trainingDevices.configured;
         }
@@ -5372,12 +5372,13 @@ async function bootstrapTraining() {
     }
     await api("/training/bootstrap", { method: "POST" });
     state.trainingPolicies = await api("/training/policies");
-    state.trainingDevices = await api("/training/devices");
     state.selectedPolicy = state.trainingPolicies.default;
     state.trainingBootstrapped = true;
     if (state.activeView === "training") {
         renderTraining();
     }
+    state.ui.trainingDeviceAutoTriggeredStep = 4;
+    refreshTrainingDevices({ silent: true }).catch((error) => showToast(error.message, true));
 }
 
 function bindGlobalEvents() {
