@@ -1884,6 +1884,10 @@ button:active {
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.45);
     padding: 0.8rem;
+    /* As a grid item in .episode-list, the default min-width:auto would keep the
+       row as wide as the nowrap job tag's full text, pushing it past the panel's
+       right edge. Allow it to shrink so the tag truncates with an ellipsis. */
+    min-width: 0;
 }
 
 .status-card--ok,
@@ -1932,8 +1936,9 @@ button:active {
     gap: 0.8rem;
 }
 
-/* Stack the job tag above the episode name so a long job name wraps onto its
-   own line instead of overflowing the row's right edge. */
+/* Stack the job tag above the episode name. The tag truncates with an ellipsis
+   (see .episode-row__job below) so a long job name never overflows the row's
+   right edge. */
 .episode-row__text {
     flex: 1;
     min-width: 0;
@@ -2046,7 +2051,8 @@ button:active {
     white-space: nowrap;
 }
 
-/* Small pill showing which training job an episode belongs to. */
+/* Small pill showing which training job an episode belongs to. A long job name
+   is clipped with a trailing ellipsis rather than overflowing the row. */
 .episode-entry-card__job,
 .episode-row__job {
     flex: 0 0 auto;
@@ -2063,6 +2069,7 @@ button:active {
 }
 .episode-row__job {
     margin-left: auto;
+    max-width: 100%;
 }
 
 .round-icon-button {
