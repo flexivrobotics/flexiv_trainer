@@ -2133,6 +2133,18 @@ button:active {
     color: #ffffff;
 }
 
+.round-icon-button--clear {
+    border-color: rgba(206, 73, 73, 0.26);
+    background: #ce4949;
+    color: #ffffff;
+}
+
+.round-icon-button--clear:hover {
+    border-color: #b73e3e;
+    background: #b73e3e;
+    color: #ffffff;
+}
+
 .round-icon-button--remove {
     width: 1.8rem;
     height: 1.8rem;
