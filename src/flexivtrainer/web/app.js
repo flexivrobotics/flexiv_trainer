@@ -1781,12 +1781,12 @@ function stopRecordingSavePolling() {
 }
 
 async function pollRecordingSaveProgressOnce() {
-    const nextStatus = await api("/teleop/status");
-    state.teleopStatus = nextStatus;
+    await refreshTeleopStatus();
+    const nextStatus = state.teleopStatus;
     const backendProgress = normalizePercent(nextStatus?.recording?.save_progress || 0);
     state.ui.recordingSaveProgress = Math.max(state.ui.recordingSaveProgress, backendProgress);
     if (state.summary) {
-        state.summary.services = nextStatus.services || state.summary.services;
+        state.summary.services = nextStatus?.services || state.summary.services;
         renderHomeStatus();
     }
     renderTeleop();
