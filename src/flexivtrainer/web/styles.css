@@ -2282,6 +2282,36 @@ button:active {
     gap: 0.95rem;
 }
 
+#rollout-content {
+    display: grid;
+    gap: 0.95rem;
+}
+
+.rollout-checkpoint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+}
+
+.rollout-checkpoint__path {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rollout-checkpoint__full {
+    margin: 0.55rem 0 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    word-break: break-all;
+}
+
+.rollout-error {
+    color: #c0392b;
+}
+
 /* Reserve just enough space so the fixed floating playback bar never covers
    action buttons — the panel + page-shell padding already supply most of the
    clearance, so only a small amount is needed here on top. */
