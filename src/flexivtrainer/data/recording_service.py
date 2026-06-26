@@ -28,8 +28,6 @@ import numpy as np
 
 from flexivtrainer.config import AppSettings
 from flexivtrainer.data.lerobot_io import (
-    ACTION_ENTRY_KEYS,
-    STATE_ENTRY_KEYS,
     build_features_from_sample,
     extract_recording_frame_values,
     extract_recording_images,
@@ -128,9 +126,9 @@ class RecordingService:
         sides = self._get_active_sides()
         entries = resolve_recording_entries(recording_entries, sides)
         includes_observation_values = any(
-            entry in STATE_ENTRY_KEYS for entry in entries
+            entry.startswith("observation.state.") for entry in entries
         )
-        includes_action_values = any(entry in ACTION_ENTRY_KEYS for entry in entries)
+        includes_action_values = any(entry.startswith("action.") for entry in entries)
         requires_robot_values = includes_observation_values or includes_action_values
         target_fps = fps or 30
         resolved_job_name = sanitize_job_name(job_name)
@@ -457,9 +455,9 @@ class RecordingService:
         sides = self._recording_sides
         camera_names = resolve_recording_image_names(entries, sides)
         includes_observation_values = any(
-            entry in STATE_ENTRY_KEYS for entry in entries
+            entry.startswith("observation.state.") for entry in entries
         )
-        includes_action_values = any(entry in ACTION_ENTRY_KEYS for entry in entries)
+        includes_action_values = any(entry.startswith("action.") for entry in entries)
         requires_robot_values = includes_observation_values or includes_action_values
         capture_timeout_ms = max(10, int(interval * 1_000))
 
