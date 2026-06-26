@@ -1884,6 +1884,10 @@ button:active {
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.45);
     padding: 0.8rem;
+    /* As a grid item in .episode-list, the default min-width:auto would keep the
+       row as wide as the nowrap job tag's full text, pushing it past the panel's
+       right edge. Allow it to shrink so the tag truncates with an ellipsis. */
+    min-width: 0;
 }
 
 .status-card--ok,
@@ -1932,8 +1936,9 @@ button:active {
     gap: 0.8rem;
 }
 
-/* Stack the job tag above the episode name so a long job name wraps onto its
-   own line instead of overflowing the row's right edge. */
+/* Stack the job tag above the episode name. The tag truncates with an ellipsis
+   (see .episode-row__job below) so a long job name never overflows the row's
+   right edge. */
 .episode-row__text {
     flex: 1;
     min-width: 0;
@@ -2046,7 +2051,8 @@ button:active {
     white-space: nowrap;
 }
 
-/* Small pill showing which training job an episode belongs to. */
+/* Small pill showing which training job an episode belongs to. A long job name
+   is clipped with a trailing ellipsis rather than overflowing the row. */
 .episode-entry-card__job,
 .episode-row__job {
     flex: 0 0 auto;
@@ -2063,6 +2069,39 @@ button:active {
 }
 .episode-row__job {
     margin-left: auto;
+    max-width: 100%;
+}
+
+/* The job name lives in an inner element so a clipped tag can reveal its full
+   text on hover by sliding ("rolling") horizontally. In the resting state it
+   truncates with an ellipsis; the outer pill keeps overflow:hidden to clip the
+   sliding text. */
+.episode-row__job-text {
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: top;
+}
+.episode-row__job--overflowing:hover .episode-row__job-text {
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+    animation: job-tag-roll var(--job-tag-duration, 4s) ease-in-out infinite alternate;
+}
+@keyframes job-tag-roll {
+    0%, 12% {
+        transform: translateX(0);
+    }
+    88%, 100% {
+        transform: translateX(var(--job-tag-shift, 0));
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .episode-row__job--overflowing:hover .episode-row__job-text {
+        animation: none;
+    }
 }
 
 .round-icon-button {
@@ -2091,6 +2130,18 @@ button:active {
 .round-icon-button--add:hover {
     border-color: #278553;
     background: #278553;
+    color: #ffffff;
+}
+
+.round-icon-button--clear {
+    border-color: rgba(206, 73, 73, 0.26);
+    background: #ce4949;
+    color: #ffffff;
+}
+
+.round-icon-button--clear:hover {
+    border-color: #b73e3e;
+    background: #b73e3e;
     color: #ffffff;
 }
 
@@ -2145,6 +2196,19 @@ button:active {
     opacity: 0.6;
 }
 
+/* Per-job sequence number shown in front of each episode name: a large bold
+   index with a vertical divider separating it from the episode content. */
+.browser-item__seq {
+    flex: 0 0 auto;
+    min-width: 1.6rem;
+    padding-right: 0.85rem;
+    border-right: 1px solid var(--line);
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: center;
+}
+
 .browser-item__name {
     min-width: 0;
     overflow: hidden;
@@ -2161,12 +2225,32 @@ button:active {
 
 /* Job group header in the episode picker; episodes under it are indented. */
 .browser-item__job-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     margin: 0.5rem 0 0.1rem;
     color: var(--muted);
     font-size: 0.74rem;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+}
+.browser-item__job-heading-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Compact per-job select-all toggle that sits inline with the job heading. */
+.browser-item__job-toggle {
+    flex: 0 0 auto;
+    width: 1.6rem;
+    height: 1.6rem;
+}
+.browser-item__job-toggle .icon-check {
+    width: 1rem;
+    height: 1rem;
 }
 .browser-item--in-job {
     margin-left: 0.9rem;

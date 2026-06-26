@@ -753,7 +753,7 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame, scope,
 
 function _formatLegendValue(value) {
     return value !== null && value !== undefined && Number.isFinite(value)
-        ? value.toFixed(2)
+        ? value.toFixed(3)
         : "—";
 }
 
@@ -1144,6 +1144,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
             scope.axisEnabled[axisIndex] = !!(scope.stateEnabled[axisIndex] || scope.actionEnabled[axisIndex]);
         }
         _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+        _rebuildDatasetLegends(container, preview, seriesData, frameKey);
     };
 
     // Restore the playhead position on the freshly-mounted videos.
@@ -1220,11 +1221,39 @@ function _renderDatasetFrameMeta(container, preview, seriesData, frameKey) {
         if (!hasAnyData) {
             chartDiv.innerHTML += `<div class="trend-chart__empty">No visible data</div>`;
         }
-        // Refresh the per-legend current-frame values so they track the playhead.
+        // Refresh the per-legend current-frame values so they track the
+        // playhead. Update only the value spans in place — rebuilding the whole
+        // legend here would recreate the checkbox inputs every frame, which
+        // makes them impossible to click during playback.
         const legendDiv = card.querySelector(".trend-chart__legend");
         if (legendDiv) {
-            legendDiv.innerHTML = _buildDatasetPlotLegend(seriesData, group, currentFrame, scope, gi);
+            const valueSpans = legendDiv.querySelectorAll(".trend-chart__legend-value");
+            let vi = 0;
+            for (let i = 0; i < group.labels.length; i++) {
+                const stateArr = group.stateKeys[i] ? seriesData[group.stateKeys[i]] : null;
+                const actionArr = group.actionKeys[i] ? seriesData[group.actionKeys[i]] : null;
+                if (valueSpans[vi]) valueSpans[vi].textContent = _formatLegendValue(stateArr ? stateArr[currentFrame] : null);
+                vi++;
+                if (valueSpans[vi]) valueSpans[vi].textContent = _formatLegendValue(actionArr ? actionArr[currentFrame] : null);
+                vi++;
+            }
         }
+    });
+}
+
+// Rebuild the full legend markup (checkboxes + chip dimming) for every plot
+// card. Called after a scope toggle, where the enabled/disabled state and the
+// derived axis checkbox need to be reflected in the DOM.
+function _rebuildDatasetLegends(container, preview, seriesData, frameKey) {
+    const currentFrame = state[frameKey] || 0;
+    const plotGroups = buildDatasetPlotGroups(preview.numeric_keys);
+    container.querySelectorAll(".dataset-plot-card").forEach((card, gi) => {
+        const group = plotGroups[gi];
+        if (!group || !seriesData) return;
+        const legendDiv = card.querySelector(".trend-chart__legend");
+        if (!legendDiv) return;
+        const scope = _ensureDatasetPlotScope(container.id, group);
+        legendDiv.innerHTML = _buildDatasetPlotLegend(seriesData, group, currentFrame, scope, gi);
     });
 }
 
@@ -4065,6 +4094,30 @@ async function loadTrainingPreview(episodePath, options = {}) {
     }
 }
 
+// Truncated job tags reveal their full text on hover by sliding ("rolling")
+// the text to expose the clipped tail, then sliding back. Only tags whose text
+// is actually clipped get the animation; the rest keep their static ellipsis.
+function _setupJobTagMarquee(scope) {
+    scope.querySelectorAll(".episode-row__job").forEach((tag) => {
+        const text = tag.querySelector(".episode-row__job-text");
+        if (!text) {
+            return;
+        }
+        const overflow = text.scrollWidth - text.clientWidth;
+        if (overflow > 1) {
+            tag.classList.add("episode-row__job--overflowing");
+            tag.style.setProperty("--job-tag-shift", `-${overflow}px`);
+            // Pace the scroll by distance so longer names don't whip past.
+            const seconds = Math.min(8, Math.max(2, overflow / 30));
+            tag.style.setProperty("--job-tag-duration", `${seconds}s`);
+        } else {
+            tag.classList.remove("episode-row__job--overflowing");
+            tag.style.removeProperty("--job-tag-shift");
+            tag.style.removeProperty("--job-tag-duration");
+        }
+    });
+}
+
 function renderProcessing() {
     const container = byId("processing-content");
     container.classList.toggle("has-playback-bar", state.processingStep > 1);
@@ -4081,6 +4134,12 @@ function renderProcessing() {
                 <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add episode dataset" title="Add episode dataset">
                     <span aria-hidden="true">+</span>
                 </button>
+                ${state.episodes.length ? `
+                <button class="round-icon-button round-icon-button--clear" id="training-clear-episodes" type="button" aria-label="Clear all episodes" title="Clear all episodes">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"></path>
+                    </svg>
+                </button>` : ""}
             </div>
             <div class="control-bar control-bar--floating-step-nav">
                 <button id="training-next-step" type="button" ${state.episodes.length ? "" : "disabled"}>Next</button>
@@ -4113,6 +4172,14 @@ function renderProcessing() {
             });
         }
         byId("training-add-episode").onclick = () => openEpisodeBrowser();
+        const clearButton = byId("training-clear-episodes");
+        if (clearButton) {
+            clearButton.onclick = () => {
+                state.episodes = [];
+                state.selectedEpisodes = [];
+                renderProcessing();
+            };
+        }
         byId("training-next-step").onclick = () => {
             state.processingStep = 2;
             renderProcessing();
@@ -4156,7 +4223,7 @@ function renderProcessing() {
             const row = document.createElement("div");
             row.className = `episode-row episode-row--selectable ${previewPath === episode.path ? "episode-row--selected" : ""}`.trim();
             const jobBadge = episode.job
-                ? `<span class="episode-row__job">${escapeHtml(episode.job)}</span>`
+                ? `<span class="episode-row__job" title="${escapeHtml(episode.job)}"><span class="episode-row__job-text">${escapeHtml(episode.job)}</span></span>`
                 : "";
             row.innerHTML = `
         <div class="episode-row__main">
@@ -4192,6 +4259,7 @@ function renderProcessing() {
             }
             picker.appendChild(row);
         });
+        _setupJobTagMarquee(picker);
         const previewBlock = byId("episode-preview-block");
         if (!state.preview) {
             previewBlock.innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Select an episode to preview.</div></div>`;
@@ -4960,6 +5028,13 @@ function getBrowserSelectablePaths() {
         .map((item) => item.path);
 }
 
+// Selectable episode paths belonging to a single job group, in list order.
+function getBrowserSelectablePathsForJob(job) {
+    return (state.pathBrowser.items || [])
+        .filter((item) => !!item.is_valid_episode && (item.job || null) === job)
+        .map((item) => item.path);
+}
+
 function updateBrowserConfirmState() {
     const confirmButton = byId("browser-confirm");
     if (!confirmButton) {
@@ -4995,6 +5070,14 @@ function updateBrowserSelectionUi() {
         setToggleAllButton(selectAllButton, allSelected);
     }
 
+    list.querySelectorAll("[data-job-toggle]").forEach((button) => {
+        const job = button.dataset.jobToggle || null;
+        const jobPaths = getBrowserSelectablePathsForJob(job);
+        const allSelected = jobPaths.length > 0
+            && jobPaths.every((path) => selected.has(path));
+        setToggleAllButton(button, allSelected, "episodes in this job");
+    });
+
     updateBrowserConfirmState();
 }
 
@@ -5017,6 +5100,25 @@ function toggleBrowserSelection(path) {
         }
         nextSelected.add(path);
     }
+    setBrowserSelection([...nextSelected]);
+}
+
+// Select every episode under a job, or deselect them all if they are already
+// fully selected. Mirrors the global select-all toggle, scoped to one job.
+function toggleBrowserJobSelection(job) {
+    const jobPaths = getBrowserSelectablePathsForJob(job);
+    if (!jobPaths.length) {
+        return;
+    }
+    const nextSelected = new Set(state.pathBrowser.selected);
+    const allSelected = jobPaths.every((path) => nextSelected.has(path));
+    jobPaths.forEach((path) => {
+        if (allSelected) {
+            nextSelected.delete(path);
+        } else {
+            nextSelected.add(path);
+        }
+    });
     setBrowserSelection([...nextSelected]);
 }
 
@@ -5111,16 +5213,37 @@ function renderBrowserList() {
     // Job heading currently rendered, so consecutive episodes sharing a job get
     // one header. Episodes are listed grouped by job (see _expand_job_episodes).
     let currentJobHeading = null;
+    // Per-job running sequence number, so episodes are numbered 1, 2, 3, … within
+    // each job independently. Ungrouped episodes (job == null) share their own run.
+    const jobSequence = new Map();
     state.pathBrowser.items.forEach((item) => {
         if (isEpisodeBrowserMode()) {
             const selectable = !!item.is_valid_episode;
             // Insert a job group header whenever the job changes.
             const job = item.job || null;
+            const sequenceKey = job || "";
+            const sequenceNumber = (jobSequence.get(sequenceKey) || 0) + 1;
+            jobSequence.set(sequenceKey, sequenceNumber);
             if (selectable && job && job !== currentJobHeading) {
                 currentJobHeading = job;
                 const heading = document.createElement("div");
                 heading.className = "browser-item__job-heading";
-                heading.textContent = job;
+                const jobLabel = document.createElement("span");
+                jobLabel.className = "browser-item__job-heading-text";
+                jobLabel.textContent = job;
+                heading.appendChild(jobLabel);
+                if (state.pathBrowser.multiSelect) {
+                    const jobToggle = document.createElement("button");
+                    jobToggle.type = "button";
+                    jobToggle.className = "secondary-button toggle-all-button browser-item__job-toggle";
+                    jobToggle.dataset.jobToggle = job;
+                    setToggleAllButton(jobToggle, false, "episodes in this job");
+                    jobToggle.onclick = (event) => {
+                        event.preventDefault();
+                        toggleBrowserJobSelection(job);
+                    };
+                    heading.appendChild(jobToggle);
+                }
                 list.appendChild(heading);
             } else if (!job) {
                 currentJobHeading = null;
@@ -5130,6 +5253,7 @@ function renderBrowserList() {
             row.dataset.browserPath = item.path;
             row.innerHTML = `
                 <span class="browser-item__main">
+                    <span class="browser-item__seq">${sequenceNumber}</span>
                     <input class="browser-item__checkbox" type="checkbox" ${selectable ? "" : "disabled"} />
                     <strong class="browser-item__name">${escapeHtml(item.name)}</strong>
                 </span>
