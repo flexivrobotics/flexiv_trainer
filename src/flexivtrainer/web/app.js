@@ -5633,11 +5633,13 @@ function renderRollout() {
 
     const stateLabel = isRunning
         ? "Running"
-        : status.status === "stopped"
-            ? "Stopped"
-            : status.status === "failed"
-                ? "Failed"
-                : "Idle";
+        : status.status === "failed"
+            ? "Failed"
+            : status.stop_reason === "timeout"
+                ? "Stopped (step limit reached)"
+                : status.stop_reason === "stopped"
+                    ? "Stopped"
+                    : "Idle";
     const primaryMarkup = isRunning ? TELEOP_STOP_MARKUP : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
 
