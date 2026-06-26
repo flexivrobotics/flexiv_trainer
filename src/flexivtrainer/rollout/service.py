@@ -119,6 +119,9 @@ class RolloutService:
         self._lock = threading.Lock()
         self._running = False
         self._error: str | None = None
+        # Why the last run ended: None while running/never-run, "stopped" for an
+        # operator stop, or "timeout" when the max_steps budget was reached.
+        self._stop_reason: str | None = None
         self._checkpoint_path: str | None = None
         self._robots: list[Any] = []
         self._device = "cpu"
@@ -139,6 +142,7 @@ class RolloutService:
                 "status": status,
                 "checkpoint_path": self._checkpoint_path,
                 "error": self._error,
+                "stop_reason": self._stop_reason,
             }
 
     # -- lifecycle ----------------------------------------------------------
@@ -188,6 +192,7 @@ class RolloutService:
         with self._lock:
             self._checkpoint_path = checkpoint_path
             self._error = None
+            self._stop_reason = None
             self._robots = robots
             self._device = device
             self._running = True
@@ -209,6 +214,10 @@ class RolloutService:
         self._thread = None
         self._release_robots()
         with self._lock:
+            # Only attribute the stop to the operator when the run did not
+            # already end on its own (max_steps reached or a fault recorded).
+            if self._stop_reason is None and self._error is None:
+                self._stop_reason = "stopped"
             self._running = False
         return self.status()
 
@@ -325,8 +334,11 @@ class RolloutService:
 
     def _run(self, policy: Any, robots: list[Any], sides: list[str]) -> None:
         period = self._loop_period()
+        # 0 means "no cap": run until the operator stops it or a fault occurs.
+        max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
+        step = 0
         try:
             while not self._stop_event.is_set():
                 loop_start = time.monotonic()
@@ -351,6 +363,12 @@ class RolloutService:
                 action = policy.select_action(batch)
                 action_vector = self._action_to_list(action)
                 self._dispatch_action(action_vector, robots, layout)
+
+                step += 1
+                if max_steps and step >= max_steps:
+                    with self._lock:
+                        self._stop_reason = "timeout"
+                    break
 
                 elapsed = time.monotonic() - loop_start
                 if period - elapsed > 0:
@@ -412,6 +430,13 @@ class RolloutService:
 
     @staticmethod
     def _action_to_list(action: Any) -> list[float]:
+        """Normalize a policy action into a flat ``list[float]``.
+
+        Accepts a torch tensor (any device), numpy array, or sequence, detaches
+        and moves tensors to CPU, then flattens to a 1-D list of native floats so
+        downstream slicing/commands don't depend on the policy's output type,
+        device, or shape.
+        """
         detached = getattr(action, "detach", None)
         if callable(detached):
             action = action.detach().cpu().numpy()
@@ -420,6 +445,14 @@ class RolloutService:
     def _dispatch_action(
         self, action: list[float], robots: list[Any], layout: list[dict[str, Any]]
     ) -> None:
+        """Slice the flat action vector per arm and command each robot.
+
+        ``layout`` (from ``_plan_action_layout``) maps each side to its pose and
+        wrench slices within ``action``; ``layout[i]`` is paired positionally with
+        ``robots[i]``. Arms without a pose slice are skipped, a missing wrench
+        defaults to zero force/torque, and each arm's pose+wrench is issued via
+        ``SendCartesianMotionForce``.
+        """
         for index, plan in enumerate(layout):
             if index >= len(robots):
                 break
