@@ -105,6 +105,10 @@ class TrainingConfig(BaseModel):
     save_frequency: int = 5_000
 
 
+class RolloutConfig(BaseModel):
+    loop_hz: int = Field(default=30, ge=1, le=120)
+
+
 class EndEffectorSideConfig(BaseModel):
     """End effector selections for one arm side (leader + follower devices)."""
 
@@ -216,6 +220,7 @@ class AppSettings(BaseSettings):
     )
     storage: StorageConfig = Field(default_factory=StorageConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
+    rollout: RolloutConfig = Field(default_factory=RolloutConfig)
 
     @property
     def follower_robot_serials(self) -> list[str]:

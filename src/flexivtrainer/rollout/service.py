@@ -91,10 +91,6 @@ def _rdk_mode() -> Any:
 class RolloutService:
     """Lifecycle + background control loop for policy rollout."""
 
-    # Control loop rate; matches the recorder's default capture rate so the
-    # policy is stepped at the cadence it was trained on.
-    LOOP_HZ = 30
-
     def __init__(
         self,
         settings: AppSettings,
@@ -324,8 +320,11 @@ class RolloutService:
                 return index
         return None
 
+    def _loop_period(self) -> float:
+        return 1.0 / float(self._settings.rollout.loop_hz)
+
     def _run(self, policy: Any, robots: list[Any], sides: list[str]) -> None:
-        period = 1.0 / self.LOOP_HZ
+        period = self._loop_period()
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
         try:
