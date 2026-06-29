@@ -24,7 +24,7 @@ const state = {
     trainingPolicies: null,
     trainingStatus: null,
     trainingDevices: null,
-    // Policy Rollout page state: selected checkpoint file (.pt), the rollout
+    // Policy Rollout page state: selected checkpoint folder, the rollout
     // service status snapshot, and its device selection (reuses the training
     // device probe/state on the backend).
     rolloutCheckpointPath: "",
@@ -1986,7 +1986,9 @@ function setTrainingDeviceEvalBusy(busy) {
 
 function setActiveView(view) {
     state.activeView = view;
-    if (view !== "teleoperation") {
+    // Both the teleoperation and rollout views show live camera feeds; stop the
+    // frame pumps when navigating to any other view.
+    if (view !== "teleoperation" && view !== "rollout") {
         stopAllCameraFeeds();
     }
     document.querySelectorAll(".view").forEach((element) => {
@@ -3973,6 +3975,9 @@ async function controlHomeService(serviceName, action, options = {}) {
 }
 
 function renderTeleop() {
+    if (state.activeView !== "teleoperation") {
+        return;
+    }
     const teleopStatus = state.teleopStatus || {
         teleop: { started: false, initialized: false, error: null },
         robot_data: { robots: {}, errors: {} },
@@ -5566,6 +5571,7 @@ function startRolloutPolling() {
         } catch (_) {
             return;
         }
+        refreshTeleopStatus().catch(() => { });
         renderRollout();
     }, 1000);
 }
@@ -5577,14 +5583,14 @@ function openCheckpointBrowser() {
         title: "Select Checkpoint",
         startPath: trainingRoot,
         rootPath: trainingRoot,
-        directoriesOnly: false,
+        directoriesOnly: true,
         multiSelect: false,
         allowNavigation: true,
         requireSelection: true,
-        emptyMessage: "No files found.",
+        emptyMessage: "No folders found.",
         confirmLabel: "Select",
         pathNote: "Training outputs directory",
-        eyebrow: "Select a trained policy (.pt)",
+        eyebrow: "Select a trained policy",
         onConfirm: async (paths) => {
             const path = paths[0];
             if (!path) {
@@ -5643,6 +5649,20 @@ function renderRollout() {
     const primaryMarkup = isRunning ? TELEOP_STOP_MARKUP : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
 
+    // Rebuild the content only when something it renders changed. The 1s poll
+    // calls this every tick; rebuilding unconditionally would destroy and
+    // recreate the camera container's live <img>, flashing it black each poll.
+    const renderKey = [
+        status.status, status.stop_reason || "", status.error || "",
+        checkpoint, configuredDevice, deviceOptions, deviceDetail,
+    ].join("|");
+    if (container.dataset.renderKey === renderKey) {
+        renderRolloutCameras();
+        renderRolloutTerminal();
+        return;
+    }
+    container.dataset.renderKey = renderKey;
+
     container.innerHTML = `
         <div class="training-layout">
             <div class="training-sidebar">
@@ -5680,9 +5700,20 @@ function renderRollout() {
                     </div>
                     ${checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
                 </section>
+                <section class="panel panel--soft">
+                    <div class="panel-header"><h2>Policy Camera Input</h2></div>
+                    <div id="rollout-cameras" class="rollout-cameras"></div>
+                </section>
+                <section class="panel panel--soft">
+                    <div class="panel-header"><h2>Rollout Log</h2></div>
+                    <div class="log-pane" id="rollout-terminal-pane"></div>
+                </section>
             </div>
         </div>
     `;
+
+    renderRolloutCameras();
+    renderRolloutTerminal();
 
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {
@@ -5723,6 +5754,62 @@ function renderRollout() {
             }
             renderRollout();
         };
+    }
+}
+
+// Render the live camera feeds the policy consumes during rollout, using the
+// same /teleop/cameras/<name>/frame endpoint the rollout loop reads from, so
+// the operator sees exactly what the policy sees. The active cameras follow the
+// rollout's observation layout: the shared ego plus each active side's wrist.
+function renderRolloutCameras() {
+    const container = byId("rollout-cameras");
+    if (!container) {
+        return;
+    }
+    const cameraNames = ["ego", ...getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side])];
+    // Only rebuild the feed elements when the camera set changes; rebuilding on
+    // every poll would tear down the live <img> and restart the frame pump.
+    const renderKey = cameraNames.join(",");
+    if (container.dataset.renderKey !== renderKey) {
+        container.dataset.renderKey = renderKey;
+        container.innerHTML = cameraNames.map((name) => `
+            <div class="feed">
+                <div class="feed__header">
+                    <span class="feed__title">${escapeHtml(name)}</span>
+                    <strong class="feed__fps" id="rollout-${escapeHtml(name)}-fps">0.0 FPS</strong>
+                </div>
+                <div class="feed__placeholder feed__placeholder--awaiting" data-render-mode="awaiting">
+                    ${buildAwaitingDataMarkup()}
+                </div>
+            </div>
+        `).join("");
+    }
+    const cameras = state.teleopStatus?.cameras?.cameras || {};
+    cameraNames.forEach((name) => {
+        renderCameraFps(`rollout-${name}-fps`, name, cameras[name]);
+    });
+}
+
+function renderRolloutTerminal() {
+    const pane = byId("rollout-terminal-pane");
+    if (!pane) {
+        return;
+    }
+    const status = state.rolloutStatus || {};
+    const logs = Array.isArray(status.logs) ? status.logs : [];
+    if (!logs.length) {
+        pane.innerHTML = `<div class="terminal-log__empty">Rollout logs will appear here.</div>`;
+        return;
+    }
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
+    pane.innerHTML = logs
+        .map((line) => {
+            const entry = _parseTrainingLogEntry(line);
+            return _terminalLogRow(entry.level, entry.source, entry.message, entry.detail);
+        })
+        .join("");
+    if (atBottom) {
+        pane.scrollTop = pane.scrollHeight;
     }
 }
 

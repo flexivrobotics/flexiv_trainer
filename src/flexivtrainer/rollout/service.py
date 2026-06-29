@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ from flexivtrainer.data.lerobot_io import (
     extract_recording_images,
     resolve_recording_image_names,
 )
+from flexivtrainer.jobs.train_policy import UI_LOG_PREFIX, _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
 
 # Number of scalars per metric, in the order the recorder concatenates them
@@ -59,16 +61,24 @@ def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
     """Load a LeRobot policy from a checkpoint directory onto ``device``.
 
     ``from_pretrained`` expects the checkpoint *directory* (it holds the policy
-    config + weights). A user may pick the weights file inside it, so accept
-    either and resolve to the containing directory. The concrete policy class is
-    selected from the type recorded in the checkpoint's config — the abstract
-    base cannot be instantiated directly.
+    config + weights). A user may pick the weights file inside it, or a parent
+    such as ``checkpoints/<step>`` that holds a ``pretrained_model`` subdir, so
+    resolve any of these to the directory that actually contains ``config.json``.
+    The concrete policy class is selected from the type recorded in the
+    checkpoint's config — the abstract base cannot be instantiated directly.
     """
     from lerobot.configs.policies import PreTrainedConfig  # noqa: PLC0415
     from lerobot.policies.factory import get_policy_class  # noqa: PLC0415
 
     path = Path(checkpoint_path)
     model_dir = path.parent if path.is_file() else path
+    # Accept a parent like ``checkpoints/<step>``: descend into its
+    # ``pretrained_model`` subdir when the selected directory has no config of
+    # its own but that child does.
+    if not (model_dir / "config.json").exists():
+        nested = model_dir / "pretrained_model"
+        if (nested / "config.json").exists():
+            model_dir = nested
     config = PreTrainedConfig.from_pretrained(model_dir)
     policy = get_policy_class(config.type).from_pretrained(model_dir)
     policy.to(device)
@@ -127,6 +137,10 @@ class RolloutService:
         self._device = "cpu"
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Ring buffer of UI-encoded log lines (same wire format as the training
+        # terminal), surfaced through status() so the rollout tab can stream the
+        # per-step measured state and commanded action like the training tab.
+        self._logs: deque[str] = deque(maxlen=2000)
 
     # -- status -------------------------------------------------------------
 
@@ -143,7 +157,12 @@ class RolloutService:
                 "checkpoint_path": self._checkpoint_path,
                 "error": self._error,
                 "stop_reason": self._stop_reason,
+                "logs": list(self._logs),
+                "log_lines": len(self._logs),
             }
+
+    def _append_log(self, level: str, source: str, message: str, detail: str = "") -> None:
+        self._logs.append(_encode_ui_log(level, source, message, detail))
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -196,6 +215,15 @@ class RolloutService:
             self._robots = robots
             self._device = device
             self._running = True
+            self._logs.clear()
+            self._logs.append(
+                _encode_ui_log(
+                    "INFO",
+                    "ROLLOUT",
+                    "Rollout started",
+                    f"device={device} sides={'+'.join(sides)}",
+                )
+            )
         thread = threading.Thread(
             target=self._run,
             args=(policy, robots, sides),
@@ -338,6 +366,9 @@ class RolloutService:
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
+        # Throttle the per-step log to ~2 Hz regardless of loop rate so the UI
+        # terminal stays readable rather than flooding at loop_hz.
+        log_every = max(1, int(self._settings.rollout.loop_hz // 2))
         step = 0
         try:
             while not self._stop_event.is_set():
@@ -364,6 +395,11 @@ class RolloutService:
                 action_vector = self._action_to_list(action)
                 self._dispatch_action(action_vector, robots, layout)
 
+                if step % log_every == 0:
+                    self._log_step(
+                        step, snapshot, action_vector, layout, sides, images, camera_names
+                    )
+
                 step += 1
                 if max_steps and step >= max_steps:
                     with self._lock:
@@ -374,14 +410,21 @@ class RolloutService:
                 if period - elapsed > 0:
                     self._stop_event.wait(period - elapsed)
         except Exception as exc:
+            detail = describe_exception(exc)
             with self._lock:
-                self._error = describe_exception(exc)
+                self._error = detail
                 self._running = False
-            warn("Rollout stopped", describe_exception(exc))
+                self._logs.append(_encode_ui_log("ERROR", "ROLLOUT", "Rollout stopped", detail))
+            warn("Rollout stopped", detail)
         finally:
             self._release_robots()
             with self._lock:
                 self._running = False
+                reason = self._stop_reason or "stopped"
+                if self._error is None:
+                    self._logs.append(
+                        _encode_ui_log("INFO", "ROLLOUT", "Rollout ended", f"reason={reason} steps={step}")
+                    )
 
     def _grab_images(self, camera_names: list[str]) -> dict[str, np.ndarray]:
         images: dict[str, np.ndarray] = {}
@@ -461,9 +504,82 @@ class RolloutService:
             wrench_slice = plan["wrench"]
             if pose_slice is None:
                 continue
-            target_pose = action[pose_slice]
+            target_pose = self._normalize_pose_quaternion(action[pose_slice])
             if wrench_slice is not None:
                 target_wrench = action[wrench_slice]
             else:
                 target_wrench = [0.0] * _WRENCH_DIM
             robot.SendCartesianMotionForce(target_pose, target_wrench)
+
+    def _log_step(
+        self,
+        step: int,
+        snapshot: dict[str, Any],
+        action: list[float],
+        layout: list[dict[str, Any]],
+        sides: list[str],
+        images: dict[str, np.ndarray],
+        camera_names: list[str],
+    ) -> None:
+        """Log measured vs commanded TCP pose per side, plus an observation row.
+
+        The observation row reports, per expected camera, whether a frame was
+        present and its mean pixel value -- a missing camera or a frozen/black
+        feed (mean ~0 or unchanging) would starve the policy and is the prime
+        suspect for an in-distribution start still diverging.
+        """
+        cam_parts: list[str] = []
+        for name in camera_names:
+            image = images.get(name)
+            if image is None:
+                cam_parts.append(f"{name}=MISSING")
+            else:
+                cam_parts.append(f"{name}=ok(mean={float(np.asarray(image).mean()):.1f})")
+        self._append_log("INFO", "ROLLOUT", f"step={step} obs", " ".join(cam_parts))
+
+        robots_payload = snapshot.get("robots") if isinstance(snapshot, dict) else None
+        payloads = list(robots_payload.values()) if isinstance(robots_payload, dict) else []
+        for index, plan in enumerate(layout):
+            side = plan.get("side") or (sides[index] if index < len(sides) else f"arm_{index}")
+            pose_slice = plan["pose"]
+            commanded = (
+                self._normalize_pose_quaternion(action[pose_slice])
+                if pose_slice is not None
+                else []
+            )
+            measured: list[float] = []
+            if index < len(payloads) and isinstance(payloads[index], dict):
+                states = payloads[index].get("states")
+                if isinstance(states, dict):
+                    measured = list(states.get("tcp_pose") or [])
+            self._append_log(
+                "INFO",
+                "ROLLOUT",
+                f"step={step} {side}",
+                f"cmd_xyz={self._fmt_xyz(commanded)} meas_xyz={self._fmt_xyz(measured)}",
+            )
+
+    @staticmethod
+    def _fmt_xyz(pose: list[float]) -> str:
+        if len(pose) < 3:
+            return "n/a"
+        return "[" + ", ".join(f"{pose[i]:.3f}" for i in range(3)) + "]"
+
+    @staticmethod
+    def _normalize_pose_quaternion(pose: list[float]) -> list[float]:
+        """Renormalize the orientation quaternion of a ``[x,y,z,qw,qx,qy,qz]`` pose.
+
+        The policy outputs the quaternion as four independently-regressed scalars
+        (ACTION uses per-element MIN_MAX normalization), so the result is not
+        guaranteed to be unit length. ``SendCartesianMotionForce`` expects a unit
+        quaternion, so rescale components 3:7 to unit norm before commanding. A
+        near-zero norm is left untouched to avoid dividing by ~0.
+        """
+        pose = list(pose)
+        if len(pose) < _POSE_DIM:
+            return pose
+        quat = pose[3:7]
+        norm = sum(component * component for component in quat) ** 0.5
+        if norm > 1e-6:
+            pose[3:7] = [component / norm for component in quat]
+        return pose
