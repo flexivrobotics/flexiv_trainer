@@ -77,6 +77,19 @@ class _FakePolicy:
         return np.asarray(self._action, dtype=np.float32)
 
 
+def _identity_processor(value):
+    return value
+
+
+def _fake_loader(policy):
+    """A policy_loader returning the (policy, preprocessor, postprocessor) tuple.
+
+    Tests exercise action dispatch, not normalization, so the processors are
+    identity passthroughs; ``predict_action`` is patched per loop test below.
+    """
+    return lambda path, device: (policy, _identity_processor, _identity_processor)
+
+
 def _settings(tmp_path) -> AppSettings:
     return AppSettings(storage=StorageConfig(root=tmp_path))
 
@@ -111,7 +124,7 @@ def _make_service(tmp_path, *, policy, robot):
         _teleop(initialized=False),
         _single_arm_pairs,
         lambda: ["single_arm"],
-        policy_loader=lambda path, device: policy,
+        policy_loader=_fake_loader(policy),
         robot_factory=lambda serial: robot,
         resolve_device=lambda configured: "cpu",
     )
@@ -124,7 +137,7 @@ def test_start_refuses_when_teleop_initialized(tmp_path) -> None:
         _teleop(initialized=True),
         _single_arm_pairs,
         lambda: ["single_arm"],
-        policy_loader=lambda path, device: _FakePolicy([]),
+        policy_loader=_fake_loader(_FakePolicy([])),
         robot_factory=_FakeRobot,
         resolve_device=lambda configured: "cpu",
     )
@@ -145,7 +158,7 @@ def test_start_refuses_without_follower_serial(tmp_path) -> None:
         _teleop(initialized=False),
         lambda: [TeleopRobotPair(leader_serial="L1", follower_serial="")],
         lambda: ["single_arm"],
-        policy_loader=lambda path, device: _FakePolicy([]),
+        policy_loader=_fake_loader(_FakePolicy([])),
         robot_factory=_FakeRobot,
         resolve_device=lambda configured: "cpu",
     )
@@ -192,7 +205,12 @@ def test_dispatch_action_sends_pose_and_wrench_slices(tmp_path) -> None:
     action = list(range(19))  # pose=0..6, twist=7..12, wrench=13..18
     layout = [{"side": "single_arm", "pose": slice(0, 7), "wrench": slice(13, 19)}]
     service._dispatch_action(action, [robot], layout)
-    assert robot.commands == [([0, 1, 2, 3, 4, 5, 6], [13, 14, 15, 16, 17, 18])]
+    (pose, wrench), = robot.commands
+    # Position and wrench pass through unchanged; the quaternion (pose[3:7]) is
+    # renormalized to unit length before commanding.
+    assert pose[0:3] == [0, 1, 2]
+    assert pytest.approx(sum(c * c for c in pose[3:7]) ** 0.5) == 1.0
+    assert wrench == [13, 14, 15, 16, 17, 18]
 
 
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:
@@ -215,14 +233,17 @@ def test_running_loop_sends_commands_and_stops(tmp_path, monkeypatch) -> None:
         _teleop(initialized=False),
         _single_arm_pairs,
         lambda: ["single_arm"],
-        policy_loader=lambda path, device: policy,
+        policy_loader=_fake_loader(policy),
         robot_factory=lambda serial: robot,
         resolve_device=lambda configured: "cpu",
     )
-    # The loop converts the observation to a torch batch; with no image entries
-    # the state-only batch is built from numpy via the real helper. Patch the
-    # batch conversion to pass the observation straight through (no torch dep).
-    monkeypatch.setattr(service, "_to_policy_batch", lambda obs: obs)
+    # Inference runs through lerobot's predict_action (which needs torch/lerobot);
+    # patch the module wrapper to call the fake policy directly so the test stays
+    # hermetic and still exercises the real dispatch/slicing path.
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action",
+        lambda obs, pol, dev, pre, post: pol.select_action(obs),
+    )
     # Patch the RDK mode lookup so no real flexivrdk import is needed.
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._rdk_mode",
@@ -235,7 +256,8 @@ def test_running_loop_sends_commands_and_stops(tmp_path, monkeypatch) -> None:
     assert robot.mode == "cmf"
     assert robot.commands, "expected at least one Cartesian command"
     pose, wrench = robot.commands[0]
-    assert pose == action[0:7]
+    assert pose[0:3] == action[0:3]
+    assert pytest.approx(sum(c * c for c in pose[3:7]) ** 0.5) == 1.0
     assert wrench == action[13:19]
     assert service.status()["status"] in {"idle", "stopped"}
 
@@ -250,11 +272,14 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
         _teleop(initialized=False),
         _single_arm_pairs,
         lambda: ["single_arm"],
-        policy_loader=lambda path, device: policy,
+        policy_loader=_fake_loader(policy),
         robot_factory=lambda serial: robot,
         resolve_device=lambda configured: "cpu",
     )
-    monkeypatch.setattr(service, "_to_policy_batch", lambda obs: obs)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action",
+        lambda obs, pol, dev, pre, post: pol.select_action(obs),
+    )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),

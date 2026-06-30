@@ -14,17 +14,10 @@
 
 """Run a trained LeRobot policy on the follower robot(s).
 
-Rollout drives the follower arm(s) directly through the RDK ``Robot`` API
-(NRT Cartesian motion-force control), *not* through the TDK teleop controller --
-that controller only mirrors a physical leader and has no command-injection API.
-Because a fresh RDK connection cannot coexist with the TDK controller holding the
-same follower, rollout requires teleoperation to be shut down first.
-
-The control loop, at a fixed rate, reads each follower's RDK state and the
-cameras, builds an observation in the *same layout the recorder used for
-training* (so the policy sees its training distribution), runs inference, and
-unpacks the policy's flat ``action`` vector back into per-side TCP pose / wrench
-/ gripper commands by matching the action feature's axis names.
+Rollout drives the follower arm(s) directly through the RDK ``Robot`` API, not
+the TDK teleop controller -- that controller only mirrors a physical leader and
+has no command-injection API, and its LAN connection cannot coexist with a fresh
+RDK one, so rollout requires teleoperation to be shut down first.
 """
 
 from __future__ import annotations
@@ -48,33 +41,29 @@ from flexivtrainer.data.lerobot_io import (
 from flexivtrainer.jobs.train_policy import UI_LOG_PREFIX, _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
 
-# Number of scalars per metric, in the order the recorder concatenates them
-# within one side: tcp_pose (7) -> tcp_twist (6) -> tcp_wrench (6) -> gripper (2).
-# Sliced out of the policy's flat action vector via the action feature's axis
-# names (see ``_plan_action_layout``), so this stays robust to which metrics a
-# given checkpoint was trained with.
+# Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz], tcp_wrench is 6-axis.
 _POSE_DIM = 7
 _WRENCH_DIM = 6
 
 
 def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
-    """Load a LeRobot policy from a checkpoint directory onto ``device``.
+    """Load a LeRobot policy and its processors from a checkpoint directory.
 
-    ``from_pretrained`` expects the checkpoint *directory* (it holds the policy
-    config + weights). A user may pick the weights file inside it, or a parent
-    such as ``checkpoints/<step>`` that holds a ``pretrained_model`` subdir, so
-    resolve any of these to the directory that actually contains ``config.json``.
-    The concrete policy class is selected from the type recorded in the
-    checkpoint's config — the abstract base cannot be instantiated directly.
+    Returns ``(policy, preprocessor, postprocessor)``. Since LeRobot 0.5,
+    normalization lives in the processors saved with the checkpoint, not in the
+    policy: the preprocessor normalizes the observation and the postprocessor
+    un-normalizes the action back into physical units. ``from_pretrained`` wants
+    the directory holding ``config.json``, so accept a weights file or a
+    ``checkpoints/<step>`` parent and resolve down to it.
     """
     from lerobot.configs.policies import PreTrainedConfig  # noqa: PLC0415
-    from lerobot.policies.factory import get_policy_class  # noqa: PLC0415
+    from lerobot.policies.factory import (  # noqa: PLC0415
+        get_policy_class,
+        make_pre_post_processors,
+    )
 
     path = Path(checkpoint_path)
     model_dir = path.parent if path.is_file() else path
-    # Accept a parent like ``checkpoints/<step>``: descend into its
-    # ``pretrained_model`` subdir when the selected directory has no config of
-    # its own but that child does.
     if not (model_dir / "config.json").exists():
         nested = model_dir / "pretrained_model"
         if (nested / "config.json").exists():
@@ -83,7 +72,16 @@ def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
     policy = get_policy_class(config.type).from_pretrained(model_dir)
     policy.to(device)
     policy.eval()
-    return policy
+    # The processors bake in the training device (e.g. cuda); point them at the
+    # rollout device so loading on a cpu-only host does not fail.
+    device_override = {"device_processor": {"device": device}}
+    preprocessor, postprocessor = make_pre_post_processors(
+        config,
+        pretrained_path=str(model_dir),
+        preprocessor_overrides=device_override,
+        postprocessor_overrides=device_override,
+    )
+    return policy, preprocessor, postprocessor
 
 
 def _default_robot_factory(serial: str) -> Any:
@@ -96,6 +94,27 @@ def _rdk_mode() -> Any:
     import flexivrdk  # noqa: PLC0415
 
     return flexivrdk.Mode
+
+
+def _predict_action(
+    observation: dict[str, Any],
+    policy: Any,
+    device: str,
+    preprocessor: Any,
+    postprocessor: Any,
+) -> Any:
+    """Normalize the observation, run the policy, un-normalize the action."""
+    import torch  # noqa: PLC0415
+    from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
+
+    return predict_action(
+        observation,
+        policy,
+        torch.device(device),
+        preprocessor,
+        postprocessor,
+        use_amp=False,
+    )
 
 
 class RolloutService:
@@ -192,7 +211,9 @@ class RolloutService:
             raise RuntimeError("No follower robot serial is configured")
 
         try:
-            policy = self._policy_loader(checkpoint_path, device)
+            policy, preprocessor, postprocessor = self._policy_loader(
+                checkpoint_path, device
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load policy: {describe_exception(exc)}"
@@ -226,7 +247,7 @@ class RolloutService:
             )
         thread = threading.Thread(
             target=self._run,
-            args=(policy, robots, sides),
+            args=(policy, preprocessor, postprocessor, robots, sides),
             daemon=True,
             name="rollout-control",
         )
@@ -310,11 +331,8 @@ class RolloutService:
                     "tcp_vel": tcp_vel,
                     "ext_wrench_in_world": wrench,
                 },
-                # The policy produces the action; we never read a commanded
-                # action off the robot. But ``build_features_from_sample`` derives
-                # the action feature's axis names (used to slice the policy
-                # output) from this section, so mirror the state dimensions here.
-                # Only the names/dimensions matter, not these placeholder values.
+                # Placeholder: ``build_features_from_sample`` reads only the axis
+                # names/dimensions here to slice the policy output, not the values.
                 "actions": {
                     "tcp_pose_d": tcp_pose,
                     "tcp_vel_d": tcp_vel,
@@ -360,14 +378,19 @@ class RolloutService:
     def _loop_period(self) -> float:
         return 1.0 / float(self._settings.rollout.loop_hz)
 
-    def _run(self, policy: Any, robots: list[Any], sides: list[str]) -> None:
+    def _run(
+        self,
+        policy: Any,
+        preprocessor: Any,
+        postprocessor: Any,
+        robots: list[Any],
+        sides: list[str],
+    ) -> None:
         period = self._loop_period()
         # 0 means "no cap": run until the operator stops it or a fault occurs.
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
-        # Throttle the per-step log to ~2 Hz regardless of loop rate so the UI
-        # terminal stays readable rather than flooding at loop_hz.
         log_every = max(1, int(self._settings.rollout.loop_hz // 2))
         step = 0
         try:
@@ -390,8 +413,9 @@ class RolloutService:
                     action_names = action_feature["names"] if action_feature else []
                     layout = self._plan_action_layout(action_names, sides)
 
-                batch = self._to_policy_batch(observation)
-                action = policy.select_action(batch)
+                action = _predict_action(
+                    observation, policy, self._device, preprocessor, postprocessor
+                )
                 action_vector = self._action_to_list(action)
                 self._dispatch_action(action_vector, robots, layout)
 
@@ -450,36 +474,9 @@ class RolloutService:
                 observation[key] = np.asarray(vector, dtype=np.float32)
         return observation
 
-    def _to_policy_batch(self, observation: dict[str, np.ndarray]) -> dict[str, Any]:
-        """Convert the numpy observation into a batched torch tensor dict.
-
-        LeRobot policies expect a batch of torch tensors on the policy's device:
-        state vectors as float32 with a leading batch axis, and images as float
-        CHW normalized to [0, 1] (the recorder stored HWC uint8 RGB frames).
-        ``select_action`` applies the policy's own input normalization on top.
-        """
-        import torch  # noqa: PLC0415
-
-        batch: dict[str, Any] = {}
-        for key, value in observation.items():
-            array = np.asarray(value)
-            if key.startswith("observation.images."):
-                tensor = torch.from_numpy(np.ascontiguousarray(array)).float() / 255.0
-                tensor = tensor.permute(2, 0, 1)  # HWC -> CHW
-            else:
-                tensor = torch.from_numpy(array.astype(np.float32))
-            batch[key] = tensor.unsqueeze(0).to(self._device)
-        return batch
-
     @staticmethod
     def _action_to_list(action: Any) -> list[float]:
-        """Normalize a policy action into a flat ``list[float]``.
-
-        Accepts a torch tensor (any device), numpy array, or sequence, detaches
-        and moves tensors to CPU, then flattens to a 1-D list of native floats so
-        downstream slicing/commands don't depend on the policy's output type,
-        device, or shape.
-        """
+        """Flatten a policy action (torch tensor, numpy, or sequence) to floats."""
         detached = getattr(action, "detach", None)
         if callable(detached):
             action = action.detach().cpu().numpy()
@@ -490,11 +487,8 @@ class RolloutService:
     ) -> None:
         """Slice the flat action vector per arm and command each robot.
 
-        ``layout`` (from ``_plan_action_layout``) maps each side to its pose and
-        wrench slices within ``action``; ``layout[i]`` is paired positionally with
-        ``robots[i]``. Arms without a pose slice are skipped, a missing wrench
-        defaults to zero force/torque, and each arm's pose+wrench is issued via
-        ``SendCartesianMotionForce``.
+        ``layout[i]`` is paired positionally with ``robots[i]``; arms without a
+        pose slice are skipped and a missing wrench defaults to zero.
         """
         for index, plan in enumerate(layout):
             if index >= len(robots):
