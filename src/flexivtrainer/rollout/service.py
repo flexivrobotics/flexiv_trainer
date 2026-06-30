@@ -41,8 +41,10 @@ from flexivtrainer.data.lerobot_io import (
 from flexivtrainer.jobs.train_policy import UI_LOG_PREFIX, _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
 
-# Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz], tcp_wrench is 6-axis.
+# Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz]; tcp_twist (velocity) and
+# tcp_wrench are each 6-axis.
 _POSE_DIM = 7
+_TWIST_DIM = 6
 _WRENCH_DIM = 6
 
 
@@ -348,24 +350,32 @@ class RolloutService:
 
         ``action_names`` are the action feature's axis names, e.g.
         ``left_arm.tcp_pose.x`` ... ``right_arm.tcp_wrench.mz``. We locate each
-        side's ``tcp_pose`` and ``tcp_wrench`` runs by name so the slicing tracks
-        exactly what the recorder produced for this checkpoint.
+        side's ``tcp_pose``, ``tcp_twist`` and ``tcp_wrench`` runs by name so the
+        slicing tracks exactly what the recorder produced for this checkpoint.
         """
         layout: list[dict[str, Any]] = []
         for side in sides:
             pose_start = self._find_run(action_names, f"{side}.tcp_pose.")
+            twist_start = self._find_run(action_names, f"{side}.tcp_twist.")
             wrench_start = self._find_run(action_names, f"{side}.tcp_wrench.")
             pose = (
                 None
                 if pose_start is None
                 else slice(pose_start, pose_start + _POSE_DIM)
             )
+            twist = (
+                None
+                if twist_start is None
+                else slice(twist_start, twist_start + _TWIST_DIM)
+            )
             wrench = (
                 None
                 if wrench_start is None
                 else slice(wrench_start, wrench_start + _WRENCH_DIM)
             )
-            layout.append({"side": side, "pose": pose, "wrench": wrench})
+            layout.append(
+                {"side": side, "pose": pose, "twist": twist, "wrench": wrench}
+            )
         return layout
 
     @staticmethod
@@ -386,12 +396,15 @@ class RolloutService:
         robots: list[Any],
         sides: list[str],
     ) -> None:
+        policy.reset()
         period = self._loop_period()
         # 0 means "no cap": run until the operator stops it or a fault occurs.
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
         log_every = max(1, int(self._settings.rollout.loop_hz // 2))
+        # Recent per-step work times (sleep excluded) for a smoothed actual Hz.
+        work_times: deque[float] = deque(maxlen=10)
         step = 0
         try:
             while not self._stop_event.is_set():
@@ -419,9 +432,13 @@ class RolloutService:
                 action_vector = self._action_to_list(action)
                 self._dispatch_action(action_vector, robots, layout)
 
+                work_times.append(time.monotonic() - loop_start)
                 if step % log_every == 0:
+                    mean_work = sum(work_times) / len(work_times)
+                    actual_hz = 1.0 / mean_work if mean_work > 0 else 0.0
                     self._log_step(
-                        step, snapshot, action_vector, layout, sides, images, camera_names
+                        step, snapshot, action_vector, layout, sides,
+                        images, camera_names, actual_hz,
                     )
 
                 step += 1
@@ -488,13 +505,14 @@ class RolloutService:
         """Slice the flat action vector per arm and command each robot.
 
         ``layout[i]`` is paired positionally with ``robots[i]``; arms without a
-        pose slice are skipped and a missing wrench defaults to zero.
+        pose slice are skipped and a missing twist/wrench defaults to zero.
         """
         for index, plan in enumerate(layout):
             if index >= len(robots):
                 break
             robot = robots[index]
             pose_slice = plan["pose"]
+            twist_slice = plan["twist"]
             wrench_slice = plan["wrench"]
             if pose_slice is None:
                 continue
@@ -503,7 +521,13 @@ class RolloutService:
                 target_wrench = action[wrench_slice]
             else:
                 target_wrench = [0.0] * _WRENCH_DIM
-            robot.SendCartesianMotionForce(target_pose, target_wrench)
+            if twist_slice is not None:
+                target_velocity = action[twist_slice]
+            else:
+                target_velocity = [0.0] * _TWIST_DIM
+            robot.SendCartesianMotionForce(
+                target_pose, target_wrench, target_velocity
+            )
 
     def _log_step(
         self,
@@ -514,6 +538,7 @@ class RolloutService:
         sides: list[str],
         images: dict[str, np.ndarray],
         camera_names: list[str],
+        actual_hz: float,
     ) -> None:
         """Log measured vs commanded TCP pose per side, plus an observation row.
 
@@ -529,6 +554,8 @@ class RolloutService:
                 cam_parts.append(f"{name}=MISSING")
             else:
                 cam_parts.append(f"{name}=ok(mean={float(np.asarray(image).mean()):.1f})")
+        expected_hz = float(self._settings.rollout.loop_hz)
+        cam_parts.append(f"freq={actual_hz:.1f}/{expected_hz:.1f}Hz")
         self._append_log("INFO", "ROLLOUT", f"step={step} obs", " ".join(cam_parts))
 
         robots_payload = snapshot.get("robots") if isinstance(snapshot, dict) else None

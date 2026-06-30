@@ -107,7 +107,7 @@ class TrainingConfig(BaseModel):
 
 class RolloutConfig(BaseModel):
     loop_hz: int = Field(default=30, ge=1, le=120)
-    max_steps: int = Field(default=30, ge=0)
+    max_steps: int = Field(default=0, ge=0)
 
 
 class EndEffectorSideConfig(BaseModel):

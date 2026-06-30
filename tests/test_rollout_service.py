@@ -58,8 +58,8 @@ class _FakeRobot:
     def states(self):
         return _FakeRobotStates(base=1.0)
 
-    def SendCartesianMotionForce(self, pose, wrench):  # noqa: N802
-        self.commands.append((list(pose), list(wrench)))
+    def SendCartesianMotionForce(self, pose, wrench, velocity=()):  # noqa: N802
+        self.commands.append((list(pose), list(wrench), list(velocity)))
 
     def Stop(self) -> None:  # noqa: N802
         pass
@@ -71,6 +71,10 @@ class _FakePolicy:
     def __init__(self, action_vector: list[float]) -> None:
         self._action = action_vector
         self.batches: list[dict] = []
+        self.reset_count = 0
+
+    def reset(self) -> None:
+        self.reset_count += 1
 
     def select_action(self, batch):
         self.batches.append(batch)
@@ -196,20 +200,29 @@ def test_plan_action_layout_locates_pose_and_wrench_runs(tmp_path) -> None:
     layout = service._plan_action_layout(names, ["single_arm"])
     assert len(layout) == 1
     assert layout[0]["pose"] == slice(0, 7)
+    assert layout[0]["twist"] == slice(7, 13)
     assert layout[0]["wrench"] == slice(13, 19)
 
 
-def test_dispatch_action_sends_pose_and_wrench_slices(tmp_path) -> None:
+def test_dispatch_action_sends_pose_twist_and_wrench_slices(tmp_path) -> None:
     robot = _FakeRobot("F1")
     service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
     action = list(range(19))  # pose=0..6, twist=7..12, wrench=13..18
-    layout = [{"side": "single_arm", "pose": slice(0, 7), "wrench": slice(13, 19)}]
+    layout = [
+        {
+            "side": "single_arm",
+            "pose": slice(0, 7),
+            "twist": slice(7, 13),
+            "wrench": slice(13, 19),
+        }
+    ]
     service._dispatch_action(action, [robot], layout)
-    (pose, wrench), = robot.commands
-    # Position and wrench pass through unchanged; the quaternion (pose[3:7]) is
-    # renormalized to unit length before commanding.
+    (pose, wrench, velocity), = robot.commands
+    # Position, velocity and wrench pass through unchanged; the quaternion
+    # (pose[3:7]) is renormalized to unit length before commanding.
     assert pose[0:3] == [0, 1, 2]
     assert pytest.approx(sum(c * c for c in pose[3:7]) ** 0.5) == 1.0
+    assert velocity == [7, 8, 9, 10, 11, 12]
     assert wrench == [13, 14, 15, 16, 17, 18]
 
 
@@ -252,14 +265,48 @@ def test_running_loop_sends_commands_and_stops(tmp_path, monkeypatch) -> None:
 
     _run_one_tick(service, robot, _checkpoint(tmp_path))
 
+    assert policy.reset_count == 1
     assert robot.enabled
     assert robot.mode == "cmf"
     assert robot.commands, "expected at least one Cartesian command"
-    pose, wrench = robot.commands[0]
+    pose, wrench, velocity = robot.commands[0]
     assert pose[0:3] == action[0:3]
     assert pytest.approx(sum(c * c for c in pose[3:7]) ** 0.5) == 1.0
+    assert velocity == action[7:13]
     assert wrench == action[13:19]
     assert service.status()["status"] in {"idle", "stopped"}
+
+
+def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -> None:
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    robot = _FakeRobot("F1")
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        _single_arm_pairs,
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cpu",
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action",
+        lambda obs, pol, dev, pre, post: pol.select_action(obs),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    _run_one_tick(service, robot, _checkpoint(tmp_path))
+
+    expected_hz = service._settings.rollout.loop_hz
+    logs = service.status()["logs"]
+    # An obs row is logged on step 0 (0 % log_every == 0) carrying the expected
+    # frequency and a measured actual frequency, e.g. "freq=123.4/30.0Hz".
+    assert any(f"/{float(expected_hz):.1f}Hz" in line for line in logs)
 
 
 def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
