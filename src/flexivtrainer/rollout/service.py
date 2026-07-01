@@ -98,25 +98,37 @@ def _rdk_mode() -> Any:
     return flexivrdk.Mode
 
 
-def _predict_action(
+def _predict_action_chunk(
     observation: dict[str, Any],
     policy: Any,
     device: str,
     preprocessor: Any,
     postprocessor: Any,
 ) -> Any:
-    """Normalize the observation, run the policy, un-normalize the action."""
+    """Run one inference cycle; return the whole action chunk as [n_steps, dim].
+
+    lerobot's ``predict_action`` runs the policy's ``select_action``, which on a
+    fresh cycle generates the full action chunk, caches every step but the first
+    in ``policy._queues[ACTION]``, and returns step 0 un-normalized. We reuse that
+    call for step 0, then read and un-normalize the cached tail -- so the whole
+    chunk comes out of a single diffusion sample rather than a second one. The
+    tail sits in the queue *before* the un-normalizer runs, hence the extra
+    ``postprocessor`` call here; without it the tail reaches the robot normalized.
+    """
     import torch  # noqa: PLC0415
+    from lerobot.utils.constants import ACTION  # noqa: PLC0415
     from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
 
-    return predict_action(
-        observation,
-        policy,
-        torch.device(device),
-        preprocessor,
-        postprocessor,
-        use_amp=False,
+    torch_device = torch.device(device)
+    first = predict_action(
+        observation, policy, torch_device, preprocessor, postprocessor, use_amp=False
     )
+    tail = list(policy._queues.get(ACTION, []))
+    if not tail:
+        return first.reshape(1, -1)
+    with torch.inference_mode():
+        tail = postprocessor(torch.cat([t.to(torch_device) for t in tail], dim=0))
+    return torch.cat([first.reshape(1, -1), tail.reshape(len(tail), -1)], dim=0)
 
 
 def _cuda_sync(device: str) -> None:
@@ -173,14 +185,22 @@ class _StreamingController:
         self._make_interp = PoseTrajectoryInterpolator
         self._error: str | None = None
         self._ticks = 0
+        # Chunk steps that survived the future-filter last call; a shrinking
+        # count means inference is eating into the streamed horizon.
+        self._last_scheduled = 0
         self._thread: threading.Thread | None = None
 
-    def schedule(self, action: list[float], target_time: float, now: float) -> None:
-        """Blend each arm's commanded pose (from the flat action) as a waypoint
-        at absolute ``target_time`` into that arm's interpolator.
+    def schedule_chunk(
+        self,
+        actions: list[list[float]],
+        target_times: list[float],
+        now: float,
+    ) -> None:
+        """Splice a whole action chunk into each arm's interpolator as waypoints.
 
-        Uses the layout's pose and wrench slices; velocity comes from the spline,
-        so the twist slice is not read here.
+        ``actions[k]`` is the flat action for step k, reached at ``target_times[k]``;
+        steps already in the past (``<= now``) are dropped. Velocity comes from the
+        spline, so the twist slice is not read here.
         """
         with self._lock:
             for index, arm_plan in enumerate(self._layout):
@@ -189,35 +209,41 @@ class _StreamingController:
                 pose_slice = arm_plan["pose"]
                 if pose_slice is None:
                     continue
-                pose = RolloutService._normalize_pose_quaternion(
-                    list(action[pose_slice])
-                )
+                future = [
+                    (t, RolloutService._normalize_pose_quaternion(list(a[pose_slice])))
+                    for a, t in zip(actions, target_times)
+                    if t > now
+                ]
+                self._last_scheduled = len(future)
+                if not future:
+                    continue
                 wrench_slice = arm_plan["wrench"]
                 self._wrench[index] = (
-                    list(action[wrench_slice])
+                    list(actions[0][wrench_slice])
                     if wrench_slice is not None
                     else [0.0] * _WRENCH_DIM
                 )
                 interp = self._interp[index]
+                start = 0
                 if interp is None:
-                    # Seed from the robot's measured pose so the first tick eases
-                    # from where the arm actually is toward the policy command,
-                    # rather than jumping to it.
+                    # Seed from the measured pose so the first tick eases from
+                    # where the arm actually is, rather than jumping.
                     measured = RolloutService._normalize_pose_quaternion(
                         [float(v) for v in self._robots[index].states().tcp_pose]
                     )
-                    self._interp[index] = self._make_interp(
-                        times=[now, target_time], poses=[measured, pose]
-                    )
-                    self._last_wp_time[index] = target_time
-                else:
-                    self._interp[index] = interp.schedule_waypoint(
+                    t0, pose0 = future[0]
+                    interp = self._make_interp(times=[now, t0], poses=[measured, pose0])
+                    self._last_wp_time[index] = t0
+                    start = 1
+                for target_time, pose in future[start:]:
+                    interp = interp.schedule_waypoint(
                         pose=pose,
                         time=target_time,
                         curr_time=now,
                         last_waypoint_time=self._last_wp_time[index],
                     )
                     self._last_wp_time[index] = target_time
+                self._interp[index] = interp
 
     def _send_interpolated_action(self) -> None:
         now = time.monotonic()
@@ -613,6 +639,8 @@ class RolloutService:
     ) -> None:
         policy.reset()
         period = self._loop_period()
+        # Chunk pose spacing: the dataset's recording period, not the loop period.
+        dt = 1.0 / float(self._settings.rollout.action_fps)
         # 0 means "no cap": run until the operator stops it or a fault occurs.
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
@@ -686,7 +714,7 @@ class RolloutService:
                     self._controller = controller
                     controller.start()
 
-                action = _predict_action(
+                actions = _predict_action_chunk(
                     observation, policy, self._device, preprocessor, postprocessor
                 )
                 # Sync so async cuda inference is timed here, not at to_list's
@@ -697,15 +725,19 @@ class RolloutService:
                 infer_raw.append(now - mark)
                 mark = now
 
-                action_vector = self._action_to_list(action)
+                action_lists = self._actions_to_lists(actions)
                 now = time.monotonic()
                 stage_times["to_list"].append(now - mark)
                 mark = now
 
-                # Schedule this step's poses one policy period ahead so the
-                # high-rate sender always has a target to interpolate toward.
+                # Space the chunk at the dataset control period and anchor it to
+                # this step's observation time, so the sender always has ~a whole
+                # inference interval of future trajectory to interpolate across.
                 assert controller is not None  # created above with the layout
-                controller.schedule(action_vector, target_time=now + period, now=now)
+                target_times = [loop_start + k * dt for k in range(len(action_lists))]
+                controller.schedule_chunk(
+                    action_lists, target_times, now=time.monotonic()
+                )
                 if controller.error is not None:
                     raise RuntimeError(controller.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
@@ -714,9 +746,11 @@ class RolloutService:
                 if step % log_every == 0:
                     mean_work = sum(work_times) / len(work_times)
                     actual_hz = 1.0 / mean_work if mean_work > 0 else 0.0
-                    self._log_timing(step, stage_times, infer_raw)
+                    self._log_timing(
+                        step, stage_times, infer_raw, controller._last_scheduled
+                    )
                     self._log_step(
-                        step, snapshot, action_vector, layout, sides,
+                        step, snapshot, action_lists[0], layout, sides,
                         images, camera_names, actual_hz,
                     )
 
@@ -778,28 +812,36 @@ class RolloutService:
         return observation
 
     @staticmethod
-    def _action_to_list(action: Any) -> list[float]:
-        """Flatten a policy action (torch tensor, numpy, or sequence) to floats."""
-        detached = getattr(action, "detach", None)
+    def _actions_to_lists(actions: Any) -> list[list[float]]:
+        """Convert an action chunk to a list of per-step float vectors.
+
+        Accepts a [n_steps, dim], [1, n_steps, dim] or [dim] tensor/ndarray/
+        sequence; a bare single action becomes a one-element list.
+        """
+        detached = getattr(actions, "detach", None)
         if callable(detached):
-            action = action.detach().cpu().numpy()
-        return [float(v) for v in np.asarray(action).reshape(-1)]
+            actions = actions.detach().cpu().numpy()
+        array = np.asarray(actions, dtype=float)
+        if array.ndim == 1:
+            array = array.reshape(1, -1)
+        elif array.ndim == 3:
+            array = array.reshape(array.shape[-2], array.shape[-1])
+        return [[float(v) for v in row] for row in array]
 
     def _log_timing(
         self,
         step: int,
         stage_times: dict[str, deque[float]],
         infer_raw: deque[float],
+        scheduled: int,
     ) -> None:
         """Log the mean per-stage duration (ms) over the recent window.
 
         One line per ``log_every``, ordered as the stages run in the loop, with a
         ``total`` so the breakdown can be checked against the ``freq=`` line. Use
         it to find which stage (e.g. grab_images, inference) caps the loop rate.
-
-        Inference is also reported raw and un-smoothed -- ``infer_max`` and the
-        per-step ``infer_steps`` list -- so a 1-in-n_action_steps chunk-refill
-        spike is visible instead of being averaged away by the smoothed window.
+        ``sched`` is how many chunk steps the sender last accepted -- if it falls
+        toward 0, inference is outrunning the streamed horizon.
         """
         parts: list[str] = []
         total_ms = 0.0
@@ -808,11 +850,10 @@ class RolloutService:
             total_ms += mean_ms
             parts.append(f"{name}={mean_ms:.1f}ms")
         parts.append(f"total={total_ms:.1f}ms")
+        parts.append(f"sched={scheduled}")
         if infer_raw:
             raw_ms = [1000.0 * value for value in infer_raw]
             parts.append(f"infer_max={max(raw_ms):.1f}ms")
-            steps = ", ".join(f"{ms:.1f}" for ms in raw_ms)
-            parts.append(f"infer_steps=[{steps}]")
         self._append_log("INFO", "ROLLOUT", f"step={step} timing", " ".join(parts))
 
     def _log_step(

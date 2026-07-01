@@ -120,6 +120,9 @@ class RolloutConfig(BaseModel):
     # that sender's rate; SendCartesianMotionForce handles up to 1000 Hz, 100-200
     # is ideal.
     interp_hz: int = Field(default=200, ge=1, le=1000)
+    # Spacing of the poses within one predicted action chunk = the training
+    # dataset's recording fps, not the loop rate. Set to match the checkpoint.
+    action_fps: int = Field(default=30, ge=1, le=120)
     max_linear_vel: float = Field(default=0.25, gt=0)  # m/s
     max_angular_vel: float = Field(default=0.6, gt=0)  # rad/s
     max_linear_acc: float = Field(default=1.0, gt=0)  # m/s^2

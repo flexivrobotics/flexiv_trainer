@@ -183,8 +183,15 @@ def test_start_refuses_without_follower_serial(tmp_path) -> None:
         service.start(_checkpoint(tmp_path))
 
 
-def test_action_to_list_handles_numpy_and_torch_like() -> None:
-    assert RolloutService._action_to_list(np.array([1.0, 2.0, 3.0])) == [1.0, 2.0, 3.0]
+def test_actions_to_lists_handles_chunk_and_single() -> None:
+    # Bare 1-D action -> single-element outer list.
+    assert RolloutService._actions_to_lists(
+        np.array([1.0, 2.0, 3.0])
+    ) == [[1.0, 2.0, 3.0]]
+    # 2-D chunk -> one inner list per step.
+    assert RolloutService._actions_to_lists(
+        np.array([[1.0, 2.0], [3.0, 4.0]])
+    ) == [[1.0, 2.0], [3.0, 4.0]]
 
     class _TorchLike:
         def __init__(self, data):
@@ -199,7 +206,7 @@ def test_action_to_list_handles_numpy_and_torch_like() -> None:
         def numpy(self):
             return self._data
 
-    assert RolloutService._action_to_list(_TorchLike([4.0, 5.0])) == [4.0, 5.0]
+    assert RolloutService._actions_to_lists(_TorchLike([[4.0, 5.0]])) == [[4.0, 5.0]]
 
 
 def test_plan_action_layout_locates_pose_and_wrench_runs(tmp_path) -> None:
@@ -291,8 +298,8 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
     # Inference runs through lerobot's predict_action (needs torch/lerobot); patch
     # the wrapper to call the fake policy directly so the test stays hermetic.
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action",
-        lambda obs, pol, dev, pre, post: pol.select_action(obs),
+        "flexivtrainer.rollout.service._predict_action_chunk",
+        lambda obs, pol, dev, pre, post: np.tile(pol.select_action(obs), (8, 1)),
     )
     # Patch the RDK mode lookup so no real flexivrdk import is needed.
     monkeypatch.setattr(
@@ -340,8 +347,8 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
         resolve_device=lambda configured: "cpu",
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action",
-        lambda obs, pol, dev, pre, post: pol.select_action(obs),
+        "flexivtrainer.rollout.service._predict_action_chunk",
+        lambda obs, pol, dev, pre, post: np.tile(pol.select_action(obs), (8, 1)),
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._rdk_mode",
@@ -372,8 +379,8 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
         resolve_device=lambda configured: "cpu",
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action",
-        lambda obs, pol, dev, pre, post: pol.select_action(obs),
+        "flexivtrainer.rollout.service._predict_action_chunk",
+        lambda obs, pol, dev, pre, post: np.tile(pol.select_action(obs), (8, 1)),
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._rdk_mode",
