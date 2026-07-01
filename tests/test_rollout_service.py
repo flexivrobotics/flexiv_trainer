@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -58,8 +59,20 @@ class _FakeRobot:
     def states(self):
         return _FakeRobotStates(base=1.0)
 
-    def SendCartesianMotionForce(self, pose, wrench, velocity=()):  # noqa: N802
+    def SendCartesianMotionForce(  # noqa: N802
+        self,
+        pose,
+        wrench=(),
+        velocity=(),
+        max_linear_vel=0.5,
+        max_angular_vel=1.0,
+        max_linear_acc=2.0,
+        max_angular_acc=5.0,
+    ):
         self.commands.append((list(pose), list(wrench), list(velocity)))
+        self.motion_limits = (
+            max_linear_vel, max_angular_vel, max_linear_acc, max_angular_acc
+        )
 
     def Stop(self) -> None:  # noqa: N802
         pass
@@ -204,26 +217,47 @@ def test_plan_action_layout_locates_pose_and_wrench_runs(tmp_path) -> None:
     assert layout[0]["wrench"] == slice(13, 19)
 
 
-def test_dispatch_action_sends_pose_twist_and_wrench_slices(tmp_path) -> None:
-    robot = _FakeRobot("F1")
-    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
-    action = list(range(19))  # pose=0..6, twist=7..12, wrench=13..18
-    layout = [
-        {
-            "side": "single_arm",
-            "pose": slice(0, 7),
-            "twist": slice(7, 13),
-            "wrench": slice(13, 19),
-        }
-    ]
-    service._dispatch_action(action, [robot], layout)
-    (pose, wrench, velocity), = robot.commands
-    # Position, velocity and wrench pass through unchanged; the quaternion
-    # (pose[3:7]) is renormalized to unit length before commanding.
-    assert pose[0:3] == [0, 1, 2]
-    assert pytest.approx(sum(c * c for c in pose[3:7]) ** 0.5) == 1.0
-    assert velocity == [7, 8, 9, 10, 11, 12]
-    assert wrench == [13, 14, 15, 16, 17, 18]
+def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
+    pytest.importorskip("diffusers")
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+    from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+
+    # A diffusion-policy stand-in: only the attributes the override touches.
+    ddpm = DDPMScheduler(
+        num_train_timesteps=100, beta_schedule="squaredcos_cap_v2",
+        clip_sample=True, prediction_type="epsilon",
+    )
+    policy = SimpleNamespace(
+        diffusion=SimpleNamespace(noise_scheduler=ddpm, num_inference_steps=100)
+    )
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
+    # Request a DDIM swap explicitly and confirm the override applies it.
+    service._settings.rollout.diffusion_scheduler = "DDIM"
+    service._settings.rollout.diffusion_inference_steps = 10
+    service._apply_diffusion_scheduler_override(policy)
+    assert isinstance(policy.diffusion.noise_scheduler, DDIMScheduler)
+    assert policy.diffusion.num_inference_steps == 10
+    # The trained schedule is preserved -- only the sampler family changed.
+    assert policy.diffusion.noise_scheduler.config.num_train_timesteps == 100
+
+
+def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
+    policy = SimpleNamespace(
+        diffusion=SimpleNamespace(noise_scheduler=object(), num_inference_steps=100)
+    )
+    settings = _settings(tmp_path)
+    settings.rollout.diffusion_scheduler = ""
+    service = RolloutService(
+        settings, _cameras(), _teleop(initialized=False),
+        _single_arm_pairs, lambda: ["single_arm"],
+        policy_loader=_fake_loader(_FakePolicy([])),
+        robot_factory=_FakeRobot, resolve_device=lambda configured: "cpu",
+    )
+    sentinel = policy.diffusion.noise_scheduler
+    service._apply_diffusion_scheduler_override(policy)
+    # "" leaves the checkpoint's own scheduler and step count untouched.
+    assert policy.diffusion.noise_scheduler is sentinel
+    assert policy.diffusion.num_inference_steps == 100
 
 
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:
@@ -235,13 +269,17 @@ def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -
     service.stop()
 
 
-def test_running_loop_sends_commands_and_stops(tmp_path, monkeypatch) -> None:
-    # 19-D single-arm action (pose+twist+wrench) so pose/wrench slices exist.
+def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
+    # The rollout's only send path: a high-rate sender thread streams interpolated
+    # poses to the robot. Verify the loop runs, enables + switches the robot,
+    # streams commands toward the policy pose, and shuts down cleanly (no hang).
     action = [float(i) for i in range(19)]
     policy = _FakePolicy(action)
     robot = _FakeRobot("F1")
+    settings = _settings(tmp_path)
+    settings.rollout.interp_hz = 200
     service = RolloutService(
-        _settings(tmp_path),
+        settings,
         _cameras(),
         _teleop(initialized=False),
         _single_arm_pairs,
@@ -250,9 +288,8 @@ def test_running_loop_sends_commands_and_stops(tmp_path, monkeypatch) -> None:
         robot_factory=lambda serial: robot,
         resolve_device=lambda configured: "cpu",
     )
-    # Inference runs through lerobot's predict_action (which needs torch/lerobot);
-    # patch the module wrapper to call the fake policy directly so the test stays
-    # hermetic and still exercises the real dispatch/slicing path.
+    # Inference runs through lerobot's predict_action (needs torch/lerobot); patch
+    # the wrapper to call the fake policy directly so the test stays hermetic.
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._predict_action",
         lambda obs, pol, dev, pre, post: pol.select_action(obs),
@@ -268,13 +305,24 @@ def test_running_loop_sends_commands_and_stops(tmp_path, monkeypatch) -> None:
     assert policy.reset_count == 1
     assert robot.enabled
     assert robot.mode == "cmf"
-    assert robot.commands, "expected at least one Cartesian command"
-    pose, wrench, velocity = robot.commands[0]
-    assert pose[0:3] == action[0:3]
+    assert robot.commands, "expected at least one streamed Cartesian command"
+    pose, _wrench, _velocity = robot.commands[0]
+    # The interpolator seeds from the measured pose ([1,2,3]) and eases toward the
+    # policy command ([0,1,2]); the first streamed x lies within that range and
+    # the quaternion stays unit-norm.
+    assert min(action[0], 1.0) - 1e-6 <= pose[0] <= max(action[0], 1.0) + 1e-6
     assert pytest.approx(sum(c * c for c in pose[3:7]) ** 0.5) == 1.0
-    assert velocity == action[7:13]
-    assert wrench == action[13:19]
+    # The configured hardware speed/accel caps are passed to the robot.
+    cfg = service._settings.rollout
+    assert robot.motion_limits == (
+        cfg.max_linear_vel, cfg.max_angular_vel,
+        cfg.max_linear_acc, cfg.max_angular_acc,
+    )
+    # Clean shutdown: status settled and the sender thread no longer running.
     assert service.status()["status"] in {"idle", "stopped"}
+    assert not any(
+        t.name == "rollout-sender" and t.is_alive() for t in threading.enumerate()
+    )
 
 
 def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -> None:

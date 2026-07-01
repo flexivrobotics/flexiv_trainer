@@ -15,6 +15,7 @@ dependencies = [
   "pydantic-settings>=2.14,<3.0",
   "typer>=0.25,<1.0",
   "numpy>=1.26",
+  "scipy>=1.11",
   "flexivrdk==1.9.2",
   "flexivtdk==1.6.1",
   "lerobot==0.5.1",

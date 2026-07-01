@@ -119,6 +119,162 @@ def _predict_action(
     )
 
 
+def _cuda_sync(device: str) -> None:
+    """Block until queued CUDA work finishes so stage timings are attributed
+    to the stage that issued the work, not to a later forced sync.
+
+    No-op off cuda or when torch is unavailable (e.g. the cpu/fake-policy tests).
+    """
+    if not str(device).startswith("cuda"):
+        return
+    try:
+        import torch  # noqa: PLC0415
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:  # pragma: no cover - torch optional
+        pass
+
+
+class _StreamingController:
+    """High-rate sender streaming an interpolated pose trajectory per arm.
+
+    The producer schedules sparse timestamped waypoints; a background thread
+    ticks at ``interp_hz`` and sends the interpolated pose, so the robot tracks a
+    smooth spline instead of raw waypoints (which is what made motion jerky).
+    """
+
+    def __init__(
+        self,
+        robots: list[Any],
+        layout: list[dict[str, Any]],
+        interp_hz: int,
+        stop_event: threading.Event,
+        motion_limits: tuple[float, float, float, float],
+    ) -> None:
+        from flexivtrainer.rollout.pose_interpolator import (  # noqa: PLC0415
+            PoseTrajectoryInterpolator,
+        )
+
+        self._robots = robots
+        self._layout = layout
+        self._period = 1.0 / float(interp_hz)
+        self._stop_event = stop_event
+        # (max_linear_vel, max_angular_vel, max_linear_acc, max_angular_acc) —
+        # hardware ceilings on the motion generator, our speed safety backstop.
+        self._motion_limits = motion_limits
+        self._lock = threading.Lock()
+        # Per-arm interpolator, created lazily on the first scheduled pose.
+        self._interp: list[Any | None] = [None] * len(layout)
+        # Per-arm time of the last scheduled waypoint; lets the next one splice
+        # onto the trajectory end instead of overwriting it.
+        self._last_wp_time: list[float] = [0.0] * len(layout)
+        self._wrench: list[list[float]] = [[0.0] * _WRENCH_DIM for _ in layout]
+        self._make_interp = PoseTrajectoryInterpolator
+        self._error: str | None = None
+        self._ticks = 0
+        self._thread: threading.Thread | None = None
+
+    def schedule(self, action: list[float], target_time: float, now: float) -> None:
+        """Blend each arm's commanded pose (from the flat action) as a waypoint
+        at absolute ``target_time`` into that arm's interpolator.
+
+        Uses the layout's pose and wrench slices; velocity comes from the spline,
+        so the twist slice is not read here.
+        """
+        with self._lock:
+            for index, arm_plan in enumerate(self._layout):
+                if index >= len(self._robots):
+                    break
+                pose_slice = arm_plan["pose"]
+                if pose_slice is None:
+                    continue
+                pose = RolloutService._normalize_pose_quaternion(
+                    list(action[pose_slice])
+                )
+                wrench_slice = arm_plan["wrench"]
+                self._wrench[index] = (
+                    list(action[wrench_slice])
+                    if wrench_slice is not None
+                    else [0.0] * _WRENCH_DIM
+                )
+                interp = self._interp[index]
+                if interp is None:
+                    # Seed from the robot's measured pose so the first tick eases
+                    # from where the arm actually is toward the policy command,
+                    # rather than jumping to it.
+                    measured = RolloutService._normalize_pose_quaternion(
+                        [float(v) for v in self._robots[index].states().tcp_pose]
+                    )
+                    self._interp[index] = self._make_interp(
+                        times=[now, target_time], poses=[measured, pose]
+                    )
+                    self._last_wp_time[index] = target_time
+                else:
+                    self._interp[index] = interp.schedule_waypoint(
+                        pose=pose,
+                        time=target_time,
+                        curr_time=now,
+                        last_waypoint_time=self._last_wp_time[index],
+                    )
+                    self._last_wp_time[index] = target_time
+
+    def _send_interpolated_action(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            interps = list(self._interp)
+            wrenches = [list(w) for w in self._wrench]
+        max_lin_vel, max_ang_vel, max_lin_acc, max_ang_acc = self._motion_limits
+        for index, interp in enumerate(interps):
+            if interp is None or index >= len(self._robots):
+                continue
+            pose = interp(now)
+            velocity = interp.velocity(now)
+            self._robots[index].SendCartesianMotionForce(
+                [float(v) for v in pose],
+                wrenches[index],
+                [float(v) for v in velocity],
+                max_lin_vel,
+                max_ang_vel,
+                max_lin_acc,
+                max_ang_acc,
+            )
+
+    def _sender_loop(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                start = time.monotonic()
+                # Skip until at least one arm has a scheduled trajectory.
+                if any(i is not None for i in self._interp):
+                    self._send_interpolated_action()
+                    self._ticks += 1
+                rest = self._period - (time.monotonic() - start)
+                if rest > 0:
+                    self._stop_event.wait(rest)
+        except Exception as exc:  # pragma: no cover - hardware specific
+            self._error = describe_exception(exc)
+            self._stop_event.set()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._sender_loop, daemon=True, name="rollout-sender"
+        )
+        self._thread.start()
+
+    def join(self, timeout: float = 2.0) -> None:
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+
+    @property
+    def error(self) -> str | None:
+        return self._error
+
+    @property
+    def ticks(self) -> int:
+        return self._ticks
+
+
 class RolloutService:
     """Lifecycle + background control loop for policy rollout."""
 
@@ -157,6 +313,8 @@ class RolloutService:
         self._robots: list[Any] = []
         self._device = "cpu"
         self._thread: threading.Thread | None = None
+        # Held so stop() can join the sender before releasing the robots.
+        self._controller: _StreamingController | None = None
         self._stop_event = threading.Event()
         # Ring buffer of UI-encoded log lines (same wire format as the training
         # terminal), surfaced through status() so the rollout tab can stream the
@@ -220,6 +378,7 @@ class RolloutService:
             raise RuntimeError(
                 f"Failed to load policy: {describe_exception(exc)}"
             ) from exc
+        self._apply_diffusion_scheduler_override(policy)
         robots: list[Any] = []
         try:
             for serial in followers:
@@ -259,6 +418,10 @@ class RolloutService:
 
     def stop(self) -> dict[str, Any]:
         self._stop_event.set()
+        # Join the sender before releasing robots so it can't command them after.
+        controller = self._controller
+        if controller is not None:
+            controller.join()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
@@ -283,6 +446,58 @@ class RolloutService:
     def _teleop_initialized(self) -> bool:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
+
+    def _apply_diffusion_scheduler_override(self, policy: Any) -> None:
+        """Swap a diffusion policy's denoising sampler per the rollout config.
+
+        Rebuilds ``policy.diffusion.noise_scheduler`` (e.g. DDPM -> DDIM) reusing
+        the checkpoint's own schedule kwargs -- only the sampler changes, the
+        trained weights do not -- and sets ``num_inference_steps``. DDIM reaches
+        the target in far fewer steps, shrinking the per-chunk refill that stalls
+        the control loop. Best-effort and no-op for non-diffusion policies or
+        when ``diffusion_scheduler`` is "".
+        """
+        scheduler = self._settings.rollout.diffusion_scheduler
+        if not scheduler:
+            return
+        diffusion = getattr(policy, "diffusion", None)
+        existing = getattr(diffusion, "noise_scheduler", None)
+        if diffusion is None or existing is None:
+            return  # not a diffusion policy; nothing to override
+        steps = self._settings.rollout.diffusion_inference_steps
+        try:
+            from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
+                _make_noise_scheduler,
+            )
+
+            # Reuse the trained schedule (beta range, clip, prediction type) so
+            # only the sampler family changes. Pass just these kwargs -- the same
+            # set LeRobot builds the scheduler with -- since a scheduler's full
+            # config carries family-specific keys the other family rejects.
+            cfg = existing.config
+            kwargs = dict(
+                num_train_timesteps=cfg.num_train_timesteps,
+                beta_start=cfg.beta_start,
+                beta_end=cfg.beta_end,
+                beta_schedule=cfg.beta_schedule,
+                clip_sample=cfg.clip_sample,
+                clip_sample_range=cfg.clip_sample_range,
+                prediction_type=cfg.prediction_type,
+            )
+            diffusion.noise_scheduler = _make_noise_scheduler(scheduler, **kwargs)
+            diffusion.num_inference_steps = steps
+        except Exception as exc:
+            warn("Failed to override diffusion scheduler", describe_exception(exc))
+            return
+        with self._lock:
+            self._logs.append(
+                _encode_ui_log(
+                    "INFO",
+                    "ROLLOUT",
+                    "Diffusion scheduler overridden",
+                    f"scheduler={scheduler} inference_steps={steps}",
+                )
+            )
 
     def _connect_robot(self, serial: str) -> Any:
         robot = self._robot_factory(serial)
@@ -403,20 +618,50 @@ class RolloutService:
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
         log_every = max(1, int(self._settings.rollout.loop_hz // 2))
-        # Recent per-step work times (sleep excluded) for a smoothed actual Hz.
+        # Recent per-step work times (sleep excluded) for a smoothed actual Hz,
+        # plus the same window per pipeline stage for the timing breakdown.
         work_times: deque[float] = deque(maxlen=10)
+        stage_times: dict[str, deque[float]] = {
+            name: deque(maxlen=10)
+            for name in (
+                "fault_check", "grab_images", "read_states",
+                "build_obs", "inference", "to_list", "dispatch",
+            )
+        }
+        # Raw (un-smoothed) per-step inference times for one logging interval, to
+        # expose the 1-in-n_action_steps refill spike that the smoothed window hides.
+        infer_raw: deque[float] = deque(maxlen=log_every)
+        interp_hz = self._settings.rollout.interp_hz
+        controller: _StreamingController | None = None
         step = 0
         try:
             while not self._stop_event.is_set():
                 loop_start = time.monotonic()
+                # ``mark`` advances after each stage; ``now - mark`` is that
+                # stage's duration, recorded into its rolling window.
+                mark = loop_start
 
                 for robot in robots:
                     if robot.fault():
                         raise RuntimeError("Fault occurred on a follower robot")
+                now = time.monotonic()
+                stage_times["fault_check"].append(now - mark)
+                mark = now
 
                 images = self._grab_images(camera_names)
+                now = time.monotonic()
+                stage_times["grab_images"].append(now - mark)
+                mark = now
+
                 snapshot = self._read_robot_snapshot(robots, sides)
+                now = time.monotonic()
+                stage_times["read_states"].append(now - mark)
+                mark = now
+
                 observation = self._build_observation(snapshot, images, sides)
+                now = time.monotonic()
+                stage_times["build_obs"].append(now - mark)
+                mark = now
 
                 if layout is None:
                     features, _, _ = build_features_from_sample(
@@ -425,17 +670,51 @@ class RolloutService:
                     action_feature = features.get("action")
                     action_names = action_feature["names"] if action_feature else []
                     layout = self._plan_action_layout(action_names, sides)
+                    rollout_cfg = self._settings.rollout
+                    controller = _StreamingController(
+                        robots,
+                        layout,
+                        interp_hz,
+                        self._stop_event,
+                        (
+                            rollout_cfg.max_linear_vel,
+                            rollout_cfg.max_angular_vel,
+                            rollout_cfg.max_linear_acc,
+                            rollout_cfg.max_angular_acc,
+                        ),
+                    )
+                    self._controller = controller
+                    controller.start()
 
                 action = _predict_action(
                     observation, policy, self._device, preprocessor, postprocessor
                 )
+                # Sync so async cuda inference is timed here, not at to_list's
+                # device->host copy.
+                _cuda_sync(self._device)
+                now = time.monotonic()
+                stage_times["inference"].append(now - mark)
+                infer_raw.append(now - mark)
+                mark = now
+
                 action_vector = self._action_to_list(action)
-                self._dispatch_action(action_vector, robots, layout)
+                now = time.monotonic()
+                stage_times["to_list"].append(now - mark)
+                mark = now
+
+                # Schedule this step's poses one policy period ahead so the
+                # high-rate sender always has a target to interpolate toward.
+                assert controller is not None  # created above with the layout
+                controller.schedule(action_vector, target_time=now + period, now=now)
+                if controller.error is not None:
+                    raise RuntimeError(controller.error)
+                stage_times["dispatch"].append(time.monotonic() - mark)
 
                 work_times.append(time.monotonic() - loop_start)
                 if step % log_every == 0:
                     mean_work = sum(work_times) / len(work_times)
                     actual_hz = 1.0 / mean_work if mean_work > 0 else 0.0
+                    self._log_timing(step, stage_times, infer_raw)
                     self._log_step(
                         step, snapshot, action_vector, layout, sides,
                         images, camera_names, actual_hz,
@@ -458,6 +737,13 @@ class RolloutService:
                 self._logs.append(_encode_ui_log("ERROR", "ROLLOUT", "Rollout stopped", detail))
             warn("Rollout stopped", detail)
         finally:
+            # Stop the high-rate sender before releasing robots so it cannot
+            # command an already-released robot. The break paths above may exit
+            # the loop without setting the stop event, so set it here.
+            if controller is not None:
+                self._stop_event.set()
+                controller.join()
+            self._controller = None
             self._release_robots()
             with self._lock:
                 self._running = False
@@ -499,35 +785,35 @@ class RolloutService:
             action = action.detach().cpu().numpy()
         return [float(v) for v in np.asarray(action).reshape(-1)]
 
-    def _dispatch_action(
-        self, action: list[float], robots: list[Any], layout: list[dict[str, Any]]
+    def _log_timing(
+        self,
+        step: int,
+        stage_times: dict[str, deque[float]],
+        infer_raw: deque[float],
     ) -> None:
-        """Slice the flat action vector per arm and command each robot.
+        """Log the mean per-stage duration (ms) over the recent window.
 
-        ``layout[i]`` is paired positionally with ``robots[i]``; arms without a
-        pose slice are skipped and a missing twist/wrench defaults to zero.
+        One line per ``log_every``, ordered as the stages run in the loop, with a
+        ``total`` so the breakdown can be checked against the ``freq=`` line. Use
+        it to find which stage (e.g. grab_images, inference) caps the loop rate.
+
+        Inference is also reported raw and un-smoothed -- ``infer_max`` and the
+        per-step ``infer_steps`` list -- so a 1-in-n_action_steps chunk-refill
+        spike is visible instead of being averaged away by the smoothed window.
         """
-        for index, plan in enumerate(layout):
-            if index >= len(robots):
-                break
-            robot = robots[index]
-            pose_slice = plan["pose"]
-            twist_slice = plan["twist"]
-            wrench_slice = plan["wrench"]
-            if pose_slice is None:
-                continue
-            target_pose = self._normalize_pose_quaternion(action[pose_slice])
-            if wrench_slice is not None:
-                target_wrench = action[wrench_slice]
-            else:
-                target_wrench = [0.0] * _WRENCH_DIM
-            if twist_slice is not None:
-                target_velocity = action[twist_slice]
-            else:
-                target_velocity = [0.0] * _TWIST_DIM
-            robot.SendCartesianMotionForce(
-                target_pose, target_wrench, target_velocity
-            )
+        parts: list[str] = []
+        total_ms = 0.0
+        for name, samples in stage_times.items():
+            mean_ms = 1000.0 * sum(samples) / len(samples) if samples else 0.0
+            total_ms += mean_ms
+            parts.append(f"{name}={mean_ms:.1f}ms")
+        parts.append(f"total={total_ms:.1f}ms")
+        if infer_raw:
+            raw_ms = [1000.0 * value for value in infer_raw]
+            parts.append(f"infer_max={max(raw_ms):.1f}ms")
+            steps = ", ".join(f"{ms:.1f}" for ms in raw_ms)
+            parts.append(f"infer_steps=[{steps}]")
+        self._append_log("INFO", "ROLLOUT", f"step={step} timing", " ".join(parts))
 
     def _log_step(
         self,
