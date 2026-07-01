@@ -104,31 +104,35 @@ def _predict_action_chunk(
     device: str,
     preprocessor: Any,
     postprocessor: Any,
-) -> Any:
-    """Run one inference cycle; return the whole action chunk as [n_steps, dim].
+) -> tuple[Any, bool]:
+    """Run one inference cycle; return ``(chunk, fresh)``.
 
-    lerobot's ``predict_action`` runs the policy's ``select_action``, which on a
-    fresh cycle generates the full action chunk, caches every step but the first
-    in ``policy._queues[ACTION]``, and returns step 0 un-normalized. We reuse that
-    call for step 0, then read and un-normalize the cached tail -- so the whole
-    chunk comes out of a single diffusion sample rather than a second one. The
-    tail sits in the queue *before* the un-normalizer runs, hence the extra
-    ``postprocessor`` call here; without it the tail reaches the robot normalized.
+    Execute-then-refill: ``select_action`` re-runs the U-Net only when its action
+    queue has drained (every ``n_action_steps`` calls), otherwise it just pops the
+    next cached step. ``fresh`` (queue empty before the call) tells the caller a
+    genuinely new chunk exists, so it schedules a new trajectory only then instead
+    of re-anchoring the interpolator on the pop-only steps (which stomps the
+    trajectory in flight). On a fresh cycle we reuse this call for step 0 and
+    un-normalize the cached tail so the whole chunk comes from one diffusion
+    sample; the tail sits in the queue before the un-normalizer runs, hence the
+    extra ``postprocessor`` call.
     """
     import torch  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
     from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
 
     torch_device = torch.device(device)
+    fresh = len(policy._queues.get(ACTION, [])) == 0
     first = predict_action(
         observation, policy, torch_device, preprocessor, postprocessor, use_amp=False
     )
     tail = list(policy._queues.get(ACTION, []))
     if not tail:
-        return first.reshape(1, -1)
+        return first.reshape(1, -1), fresh
     with torch.inference_mode():
         tail = postprocessor(torch.cat([t.to(torch_device) for t in tail], dim=0))
-    return torch.cat([first.reshape(1, -1), tail.reshape(len(tail), -1)], dim=0)
+    chunk = torch.cat([first.reshape(1, -1), tail.reshape(len(tail), -1)], dim=0)
+    return chunk, fresh
 
 
 def _cuda_sync(device: str) -> None:
@@ -148,19 +152,24 @@ def _cuda_sync(device: str) -> None:
         pass
 
 
-class _StreamingController:
-    """High-rate sender streaming an interpolated pose trajectory per arm.
+class _SenderController:
+    """Sender side of the rollout producer/consumer split (see ``RolloutService``).
 
-    The producer schedules sparse timestamped waypoints; a background thread
-    ticks at ``interp_hz`` and sends the interpolated pose, so the robot tracks a
-    smooth spline instead of raw waypoints (which is what made motion jerky).
+    Owns the ``rollout-sender`` thread. The planner
+    (``RolloutService._planner_loop``) schedules sparse timestamped waypoints via
+    ``schedule_chunk``; this thread
+    ticks at ``sender_hz`` and sends the interpolated pose, so the robot tracks a
+    smooth spline instead of raw waypoints (which is what made motion jerky). The
+    per-arm interpolators are the shared state -- both sides touch them under
+    ``self._lock``; shutdown is the shared ``stop_event``; a sender fault surfaces
+    on ``self.error`` for the producer to poll.
     """
 
     def __init__(
         self,
         robots: list[Any],
         layout: list[dict[str, Any]],
-        interp_hz: int,
+        sender_hz: int,
         stop_event: threading.Event,
         motion_limits: tuple[float, float, float, float],
     ) -> None:
@@ -170,7 +179,7 @@ class _StreamingController:
 
         self._robots = robots
         self._layout = layout
-        self._period = 1.0 / float(interp_hz)
+        self._period = 1.0 / float(sender_hz)
         self._stop_event = stop_event
         # (max_linear_vel, max_angular_vel, max_linear_acc, max_angular_acc) —
         # hardware ceilings on the motion generator, our speed safety backstop.
@@ -302,7 +311,30 @@ class _StreamingController:
 
 
 class RolloutService:
-    """Lifecycle + background control loop for policy rollout."""
+    """Lifecycle + background control loop for policy rollout.
+
+    Two threads run during a rollout, in a planner/sender (producer/consumer) split:
+
+    - **Planner** -- ``_planner_loop`` (thread ``rollout-planner``): reads cameras
+      and robot state, runs policy inference, and schedules the resulting action
+      chunk as timestamped waypoints. Ticks at ``planner_hz``.
+    - **Sender** -- ``_SenderController._sender_loop`` (thread ``rollout-sender``):
+      samples the interpolated pose spline and sends it to the robot via
+      ``SendCartesianMotionForce``. Ticks at the higher ``sender_hz``.
+
+    Handshake between them:
+
+    - **Trajectory** -- the planner calls ``controller.schedule_chunk`` and the
+      sender reads ``controller(now)``; both touch the controller's per-arm
+      interpolators under ``_SenderController._lock``. This is the only shared
+      mutable state.
+    - **Shutdown** -- ``self._stop_event`` (owned here, passed into the controller)
+      signals both threads to exit. ``stop()`` sets it, then joins the sender
+      *before* ``_release_robots()`` so the sender can never command a released
+      robot.
+    - **Errors** -- a fault in the sender is recorded on ``controller.error`` and
+      polled by the planner, which raises and tears the run down.
+    """
 
     def __init__(
         self,
@@ -340,7 +372,7 @@ class RolloutService:
         self._device = "cpu"
         self._thread: threading.Thread | None = None
         # Held so stop() can join the sender before releasing the robots.
-        self._controller: _StreamingController | None = None
+        self._controller: _SenderController | None = None
         self._stop_event = threading.Event()
         # Ring buffer of UI-encoded log lines (same wire format as the training
         # terminal), surfaced through status() so the rollout tab can stream the
@@ -433,10 +465,10 @@ class RolloutService:
                 )
             )
         thread = threading.Thread(
-            target=self._run,
+            target=self._planner_loop,
             args=(policy, preprocessor, postprocessor, robots, sides),
             daemon=True,
-            name="rollout-control",
+            name="rollout-planner",
         )
         self._thread = thread
         thread.start()
@@ -481,16 +513,16 @@ class RolloutService:
         trained weights do not -- and sets ``num_inference_steps``. DDIM reaches
         the target in far fewer steps, shrinking the per-chunk refill that stalls
         the control loop. Best-effort and no-op for non-diffusion policies or
-        when ``diffusion_scheduler`` is "".
+        when ``scheduler`` is "".
         """
-        scheduler = self._settings.rollout.diffusion_scheduler
+        scheduler = self._settings.rollout.diffusion.scheduler
         if not scheduler:
             return
         diffusion = getattr(policy, "diffusion", None)
         existing = getattr(diffusion, "noise_scheduler", None)
         if diffusion is None or existing is None:
             return  # not a diffusion policy; nothing to override
-        steps = self._settings.rollout.diffusion_inference_steps
+        steps = self._settings.rollout.diffusion.inference_steps
         try:
             from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
                 _make_noise_scheduler,
@@ -627,9 +659,9 @@ class RolloutService:
         return None
 
     def _loop_period(self) -> float:
-        return 1.0 / float(self._settings.rollout.loop_hz)
+        return 1.0 / float(self._settings.rollout.planner_hz)
 
-    def _run(
+    def _planner_loop(
         self,
         policy: Any,
         preprocessor: Any,
@@ -640,12 +672,12 @@ class RolloutService:
         policy.reset()
         period = self._loop_period()
         # Chunk pose spacing: the dataset's recording period, not the loop period.
-        dt = 1.0 / float(self._settings.rollout.action_fps)
+        dt = 1.0 / float(self._settings.rollout.action_dt_hz)
         # 0 means "no cap": run until the operator stops it or a fault occurs.
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
-        log_every = max(1, int(self._settings.rollout.loop_hz // 2))
+        log_every = max(1, int(self._settings.rollout.planner_hz // 2))
         # Recent per-step work times (sleep excluded) for a smoothed actual Hz,
         # plus the same window per pipeline stage for the timing breakdown.
         work_times: deque[float] = deque(maxlen=10)
@@ -659,8 +691,8 @@ class RolloutService:
         # Raw (un-smoothed) per-step inference times for one logging interval, to
         # expose the 1-in-n_action_steps refill spike that the smoothed window hides.
         infer_raw: deque[float] = deque(maxlen=log_every)
-        interp_hz = self._settings.rollout.interp_hz
-        controller: _StreamingController | None = None
+        sender_hz = self._settings.rollout.sender_hz
+        controller: _SenderController | None = None
         step = 0
         try:
             while not self._stop_event.is_set():
@@ -699,10 +731,10 @@ class RolloutService:
                     action_names = action_feature["names"] if action_feature else []
                     layout = self._plan_action_layout(action_names, sides)
                     rollout_cfg = self._settings.rollout
-                    controller = _StreamingController(
+                    controller = _SenderController(
                         robots,
                         layout,
-                        interp_hz,
+                        sender_hz,
                         self._stop_event,
                         (
                             rollout_cfg.max_linear_vel,
@@ -714,7 +746,7 @@ class RolloutService:
                     self._controller = controller
                     controller.start()
 
-                actions = _predict_action_chunk(
+                actions, fresh = _predict_action_chunk(
                     observation, policy, self._device, preprocessor, postprocessor
                 )
                 # Sync so async cuda inference is timed here, not at to_list's
@@ -730,14 +762,19 @@ class RolloutService:
                 stage_times["to_list"].append(now - mark)
                 mark = now
 
-                # Space the chunk at the dataset control period and anchor it to
-                # this step's observation time, so the sender always has ~a whole
-                # inference interval of future trajectory to interpolate across.
+                # Execute-then-refill: only a fresh inference yields a new chunk; on
+                # pop-only steps the sender keeps riding the trajectory already
+                # scheduled. Space the poses at the dataset control period and
+                # anchor at the observation time so the chunk plays out at real-time
+                # speed (with planner_hz == action_dt_hz the chunk abuts the refill).
                 assert controller is not None  # created above with the layout
-                target_times = [loop_start + k * dt for k in range(len(action_lists))]
-                controller.schedule_chunk(
-                    action_lists, target_times, now=time.monotonic()
-                )
+                if fresh:
+                    target_times = [
+                        loop_start + k * dt for k in range(len(action_lists))
+                    ]
+                    controller.schedule_chunk(
+                        action_lists, target_times, now=time.monotonic()
+                    )
                 if controller.error is not None:
                     raise RuntimeError(controller.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
@@ -881,7 +918,7 @@ class RolloutService:
                 cam_parts.append(f"{name}=MISSING")
             else:
                 cam_parts.append(f"{name}=ok(mean={float(np.asarray(image).mean()):.1f})")
-        expected_hz = float(self._settings.rollout.loop_hz)
+        expected_hz = float(self._settings.rollout.planner_hz)
         cam_parts.append(f"freq={actual_hz:.1f}/{expected_hz:.1f}Hz")
         self._append_log("INFO", "ROLLOUT", f"step={step} obs", " ".join(cam_parts))
 

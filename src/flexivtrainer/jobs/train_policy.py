@@ -488,6 +488,18 @@ class TrainingService:
                     str(self._settings.training.save_frequency),
                 ]
             )
+            if policy_type == "diffusion":
+                # Bake the sampler into the checkpoint (DDIM by default) so rollout
+                # samples in few steps without a load-time scheduler swap.
+                diffusion = self._settings.policies.diffusion
+                command.extend(
+                    [
+                        "--policy.noise_scheduler_type",
+                        diffusion.noise_scheduler_type,
+                        "--policy.num_inference_steps",
+                        str(diffusion.num_inference_steps),
+                    ]
+                )
             if extra_args:
                 command.extend(extra_args)
 

@@ -239,8 +239,8 @@ def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
     )
     service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
     # Request a DDIM swap explicitly and confirm the override applies it.
-    service._settings.rollout.diffusion_scheduler = "DDIM"
-    service._settings.rollout.diffusion_inference_steps = 10
+    service._settings.rollout.diffusion.scheduler = "DDIM"
+    service._settings.rollout.diffusion.inference_steps = 10
     service._apply_diffusion_scheduler_override(policy)
     assert isinstance(policy.diffusion.noise_scheduler, DDIMScheduler)
     assert policy.diffusion.num_inference_steps == 10
@@ -253,7 +253,7 @@ def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
         diffusion=SimpleNamespace(noise_scheduler=object(), num_inference_steps=100)
     )
     settings = _settings(tmp_path)
-    settings.rollout.diffusion_scheduler = ""
+    settings.rollout.diffusion.scheduler = ""
     service = RolloutService(
         settings, _cameras(), _teleop(initialized=False),
         _single_arm_pairs, lambda: ["single_arm"],
@@ -284,7 +284,7 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
     policy = _FakePolicy(action)
     robot = _FakeRobot("F1")
     settings = _settings(tmp_path)
-    settings.rollout.interp_hz = 200
+    settings.rollout.sender_hz = 200
     service = RolloutService(
         settings,
         _cameras(),
@@ -299,7 +299,10 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
     # the wrapper to call the fake policy directly so the test stays hermetic.
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._predict_action_chunk",
-        lambda obs, pol, dev, pre, post: np.tile(pol.select_action(obs), (8, 1)),
+        lambda obs, pol, dev, pre, post: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
     )
     # Patch the RDK mode lookup so no real flexivrdk import is needed.
     monkeypatch.setattr(
@@ -348,7 +351,10 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._predict_action_chunk",
-        lambda obs, pol, dev, pre, post: np.tile(pol.select_action(obs), (8, 1)),
+        lambda obs, pol, dev, pre, post: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._rdk_mode",
@@ -357,7 +363,7 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
 
     _run_one_tick(service, robot, _checkpoint(tmp_path))
 
-    expected_hz = service._settings.rollout.loop_hz
+    expected_hz = service._settings.rollout.planner_hz
     logs = service.status()["logs"]
     # An obs row is logged on step 0 (0 % log_every == 0) carrying the expected
     # frequency and a measured actual frequency, e.g. "freq=123.4/30.0Hz".
@@ -380,7 +386,10 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._predict_action_chunk",
-        lambda obs, pol, dev, pre, post: np.tile(pol.select_action(obs), (8, 1)),
+        lambda obs, pol, dev, pre, post: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._rdk_mode",
