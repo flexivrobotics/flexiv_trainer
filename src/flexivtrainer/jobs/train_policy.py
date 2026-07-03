@@ -38,6 +38,7 @@ from flexivtrainer.observability import (
     stream,
     warn,
 )
+from flexivtrainer.policies import training_field_schema
 
 POLICY_CATALOG = {
     "diffusion": {
@@ -227,9 +228,15 @@ class TrainingService:
         self._device_probe_lock = threading.Lock()
 
     def list_policies(self) -> dict[str, Any]:
+        # Attach each policy's UI form schema (derived from its TrainingConfig) so
+        # the frontend can render config inputs without duplicating defaults.
+        policies = {
+            key: {**entry, "fields": training_field_schema(key)}
+            for key, entry in POLICY_CATALOG.items()
+        }
         return {
             "default": self._settings.training.default_policy,
-            "policies": POLICY_CATALOG,
+            "policies": policies,
             "device": self._settings.training.default_device,
         }
 
