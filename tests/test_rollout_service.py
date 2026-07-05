@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
-from flexivtrainer.rollout.service import RolloutService
+from flexivtrainer.rollout.service import RolloutService, _SenderController
 
 
 class _FakeRobotStates:
@@ -239,9 +239,10 @@ def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
     )
     service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
     # Request a DDIM swap explicitly and confirm the override applies it.
-    service._settings.rollout.diffusion.scheduler = "DDIM"
-    service._settings.rollout.diffusion.inference_steps = 10
-    service._apply_diffusion_scheduler_override(policy)
+    rollout_cfg = service._settings.policies.diffusion.rollout
+    rollout_cfg.noise_scheduler_type = "DDIM"
+    rollout_cfg.num_inference_steps = 10
+    service._apply_rollout_overrides(policy, rollout_cfg)
     assert isinstance(policy.diffusion.noise_scheduler, DDIMScheduler)
     assert policy.diffusion.num_inference_steps == 10
     # The trained schedule is preserved -- only the sampler family changed.
@@ -253,7 +254,7 @@ def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
         diffusion=SimpleNamespace(noise_scheduler=object(), num_inference_steps=100)
     )
     settings = _settings(tmp_path)
-    settings.rollout.diffusion.scheduler = ""
+    settings.policies.diffusion.rollout.noise_scheduler_type = ""
     service = RolloutService(
         settings, _cameras(), _teleop(initialized=False),
         _single_arm_pairs, lambda: ["single_arm"],
@@ -261,7 +262,7 @@ def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
         robot_factory=_FakeRobot, resolve_device=lambda configured: "cpu",
     )
     sentinel = policy.diffusion.noise_scheduler
-    service._apply_diffusion_scheduler_override(policy)
+    service._apply_rollout_overrides(policy, settings.policies.diffusion.rollout)
     # "" leaves the checkpoint's own scheduler and step count untouched.
     assert policy.diffusion.noise_scheduler is sentinel
     assert policy.diffusion.num_inference_steps == 100
@@ -299,7 +300,7 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
     # the wrapper to call the fake policy directly so the test stays hermetic.
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._predict_action_chunk",
-        lambda obs, pol, dev, pre, post: (
+        lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
             True,
         ),
@@ -351,7 +352,7 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._predict_action_chunk",
-        lambda obs, pol, dev, pre, post: (
+        lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
             True,
         ),
@@ -386,7 +387,7 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "flexivtrainer.rollout.service._predict_action_chunk",
-        lambda obs, pol, dev, pre, post: (
+        lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
             True,
         ),
@@ -406,3 +407,180 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
     assert status["status"] == "failed"
     assert "Fault" in (status["error"] or "")
     service.stop()
+
+
+def _pose_layout():
+    # Single-arm layout: pose in the first 7 slots, no wrench slice.
+    return [{"side": "single_arm", "pose": slice(0, 7), "twist": None, "wrench": None}]
+
+
+def _unit_pose(x: float) -> list[float]:
+    return [x, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+
+
+def test_overlapped_replan_forces_and_extends_committed_path(
+    tmp_path, monkeypatch
+) -> None:
+    # The planner must force a fresh inference every replan_steps ticks, splice a
+    # new chunk more than once, and always keep a committed path extending at
+    # least replan_steps*dt past now so the sender is never left dry.
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    robot = _FakeRobot("F1")
+    settings = _settings(tmp_path)
+    settings.policies.diffusion.rollout.replan_steps = 4
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    service._settings = settings
+
+    forces: list[bool] = []
+    schedules: list[float] = []
+    real_schedule = _SenderController.schedule_chunk
+
+    def _recording_schedule(self, actions, target_times, now):
+        real_schedule(self, actions, target_times, now)
+        schedules.append(self._last_wp_time[0] - now)
+
+    monkeypatch.setattr(_SenderController, "schedule_chunk", _recording_schedule)
+
+    def _fake_predict(obs, pol, dev, pre, post, **kwargs):
+        force = bool(kwargs.get("force_refresh"))
+        forces.append(force)
+        return np.tile(pol.select_action(obs), (8, 1)), force
+
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path))
+    deadline = time.monotonic() + 3.0
+    while len(forces) < 12 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    service.stop()
+
+    # The first tick forces (replan_steps unresolved), then every 4th tick after.
+    assert forces[0] is True
+    forced_ticks = [i for i, f in enumerate(forces) if f]
+    assert 4 in forced_ticks and 8 in forced_ticks
+    # A fresh chunk was spliced on more than one forced tick.
+    assert len(schedules) >= 2
+    dt = 1.0 / float(settings.rollout.action_dt_hz)
+    # Each schedule leaves a committed horizon covering at least the replan gap.
+    assert all(extent >= 4 * dt - 1e-6 for extent in schedules)
+
+
+def test_schedule_chunk_splices_over_committed_tail() -> None:
+    # A later chunk starting inside an earlier chunk's span replaces its tail:
+    # the interpolator's last waypoint follows chunk B, not chunk A.
+    robot = _FakeRobot("F1")
+    stop_event = threading.Event()
+    controller = _SenderController(
+        [robot], _pose_layout(), 200, stop_event, (0.25, 0.6, 1.0, 2.5)
+    )
+    dt = 0.05
+    now = 100.0
+    # Chunk A spans now+dt .. now+8dt.
+    a_actions = [_unit_pose(float(k)) for k in range(8)]
+    a_times = [now + (k + 1) * dt for k in range(8)]
+    controller.schedule_chunk(a_actions, a_times, now=now)
+    assert controller._last_wp_time[0] == pytest.approx(now + 8 * dt)
+    # Chunk B is issued mid-span (its waypoint 0 predates A's tail) and must trim
+    # A's tail, so the last waypoint tracks B's end, not A's.
+    now_b = now + 2 * dt
+    b_actions = [_unit_pose(100.0 + k) for k in range(8)]
+    b_times = [now_b + (k + 1) * dt for k in range(8)]
+    controller.schedule_chunk(b_actions, b_times, now=now_b)
+    assert controller._last_wp_time[0] == pytest.approx(now_b + 8 * dt)
+
+
+def test_anchor_offset_keeps_first_waypoint_ahead_of_filter() -> None:
+    # With inference latency < dt, offset 1 keeps waypoint 0 in the future so the
+    # whole chunk survives the sender's past-filter; offset 0 loses waypoint 0.
+    dt = 0.05
+    latency = dt / 2  # inference finished before the k=0 waypoint's target time
+    for anchor, expected in ((1, 8), (0, 7)):
+        robot = _FakeRobot("F1")
+        controller = _SenderController(
+            [robot], _pose_layout(), 200, threading.Event(), (0.25, 0.6, 1.0, 2.5)
+        )
+        loop_start = 100.0
+        actions = [_unit_pose(float(k)) for k in range(8)]
+        target_times = [loop_start + (k + anchor) * dt for k in range(8)]
+        controller.schedule_chunk(actions, target_times, now=loop_start + latency)
+        assert controller._last_scheduled == expected
+
+
+def test_n_action_steps_override_applies_clamps_and_skips(tmp_path) -> None:
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
+    rollout_cfg = service._settings.policies.diffusion.rollout
+
+    def _policy():
+        return SimpleNamespace(
+            config=SimpleNamespace(n_action_steps=8, horizon=16, n_obs_steps=2)
+        )
+
+    # In-range value is applied verbatim.
+    policy = _policy()
+    rollout_cfg.n_action_steps = 12
+    service._apply_rollout_overrides(policy, rollout_cfg)
+    assert policy.config.n_action_steps == 12
+
+    # Above horizon - n_obs_steps + 1 (= 15) is clamped.
+    policy = _policy()
+    rollout_cfg.n_action_steps = 20
+    service._apply_rollout_overrides(policy, rollout_cfg)
+    assert policy.config.n_action_steps == 15
+
+    # 0 leaves the checkpoint default untouched.
+    policy = _policy()
+    rollout_cfg.n_action_steps = 0
+    service._apply_rollout_overrides(policy, rollout_cfg)
+    assert policy.config.n_action_steps == 8
+
+
+def test_rollout_for_selects_per_policy_config_and_loop_runs_for_act(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    diffusion_rollout = settings.policies.rollout_for("diffusion")
+    # A diffusion family exposes its own sampler knob; an unknown family falls
+    # back to the shared config, which has none.
+    assert hasattr(diffusion_rollout, "noise_scheduler_type")
+    assert settings.policies.rollout_for("act").__class__.__name__ == (
+        "SharedRolloutConfig"
+    )
+    assert not hasattr(settings.policies.rollout_for("act"), "noise_scheduler_type")
+
+    # An ACT-typed policy (config.type="act") must drive the loop without error
+    # even though no per-family rollout config exists for it.
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    policy.config = SimpleNamespace(type="act")
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    _run_one_tick(service, robot, _checkpoint(tmp_path))
+    assert robot.commands
+    assert service.status()["status"] in {"idle", "stopped"}
+
+
+def test_env_var_plumbs_into_rollout_config(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FLEXIV_TRAINER_POLICIES__DIFFUSION__ROLLOUT__REPLAN_STEPS", "4"
+    )
+    settings = AppSettings()
+    assert settings.policies.diffusion.rollout.replan_steps == 4

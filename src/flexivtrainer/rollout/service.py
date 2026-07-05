@@ -47,6 +47,10 @@ _POSE_DIM = 7
 _TWIST_DIM = 6
 _WRENCH_DIM = 6
 
+# One-time guard so a policy without ``_queues[ACTION]`` (e.g. ACT) does not
+# spam the force-refresh fallback warning on every replan tick.
+_FORCE_REFRESH_WARNED = False
+
 
 def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
     """Load a LeRobot policy and its processors from a checkpoint directory.
@@ -104,24 +108,47 @@ def _predict_action_chunk(
     device: str,
     preprocessor: Any,
     postprocessor: Any,
+    *,
+    force_refresh: bool = False,
 ) -> tuple[Any, bool]:
     """Run one inference cycle; return ``(chunk, fresh)``.
 
-    Execute-then-refill: ``select_action`` re-runs the U-Net only when its action
-    queue has drained (every ``n_action_steps`` calls), otherwise it just pops the
-    next cached step. ``fresh`` (queue empty before the call) tells the caller a
-    genuinely new chunk exists, so it schedules a new trajectory only then instead
-    of re-anchoring the interpolator on the pop-only steps (which stomps the
-    trajectory in flight). On a fresh cycle we reuse this call for step 0 and
-    un-normalize the cached tail so the whole chunk comes from one diffusion
-    sample; the tail sits in the queue before the un-normalizer runs, hence the
-    extra ``postprocessor`` call.
+    The planner drives freshness via ``force_refresh`` every ``replan_steps``
+    ticks: clearing the ACTION queue makes ``select_action`` re-infer a new chunk
+    from the current observation, so a committed path always remains while the
+    next chunk computes (overlapped replanning). Non-forced ticks still call
+    ``select_action`` -- the pop is harmless (superseded at the next replan) and
+    keeps the obs queues populated at planner-tick spacing for ``n_obs_steps``
+    history. ``fresh`` (queue empty before the call) tells the caller a genuinely
+    new chunk exists, so it schedules a new trajectory only then instead of
+    re-anchoring the interpolator on pop-only steps (which stomps the trajectory
+    in flight). On a fresh cycle we reuse this call for step 0 and un-normalize
+    the cached tail so the whole chunk comes from one diffusion sample; the tail
+    sits in the queue before the un-normalizer runs, hence the extra
+    ``postprocessor`` call.
+
+    ``policy._queues[ACTION]`` is a LeRobot 0.5.1 internal; the forced clear is
+    guarded so a family that keys its queue differently (e.g. ACT's
+    ``_action_queue``) degrades to today's drain-refill instead of crashing.
     """
     import torch  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
     from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
 
     torch_device = torch.device(device)
+    if force_refresh:
+        queues = getattr(policy, "_queues", None)
+        queue = queues.get(ACTION) if isinstance(queues, dict) else None
+        if queue is not None:
+            queue.clear()  # LeRobot re-infers from the current obs when empty
+        else:
+            global _FORCE_REFRESH_WARNED
+            if not _FORCE_REFRESH_WARNED:
+                _FORCE_REFRESH_WARNED = True
+                warn(
+                    "Cannot force a fresh rollout inference",
+                    "policy has no _queues[ACTION]; falling back to drain-refill",
+                )
     fresh = len(policy._queues.get(ACTION, [])) == 0
     first = predict_action(
         observation, policy, torch_device, preprocessor, postprocessor, use_amp=False
@@ -316,8 +343,9 @@ class RolloutService:
     Two threads run during a rollout, in a planner/sender (producer/consumer) split:
 
     - **Planner** -- ``_planner_loop`` (thread ``rollout-planner``): reads cameras
-      and robot state, runs policy inference, and schedules the resulting action
-      chunk as timestamped waypoints. Ticks at ``planner_hz``.
+      and robot state, re-runs policy inference every ``replan_steps`` ticks
+      (overlapped replanning), and splices the resulting action chunk over the
+      committed path as timestamped waypoints. Ticks at ``planner_hz``.
     - **Sender** -- ``_SenderController._sender_loop`` (thread ``rollout-sender``):
       samples the interpolated pose spline and sends it to the robot via
       ``SendCartesianMotionForce``. Ticks at the higher ``sender_hz``.
@@ -436,7 +464,14 @@ class RolloutService:
             raise RuntimeError(
                 f"Failed to load policy: {describe_exception(exc)}"
             ) from exc
-        self._apply_diffusion_scheduler_override(policy)
+        # Prefer the policy's own config.type (the LeRobot family name); fall
+        # back to a ``name`` attribute so the test fakes and the 3-tuple loader
+        # contract still resolve a policy type.
+        policy_type = getattr(
+            getattr(policy, "config", None), "type", None
+        ) or getattr(policy, "name", "")
+        rollout_cfg = self._settings.policies.rollout_for(policy_type)
+        self._apply_rollout_overrides(policy, rollout_cfg)
         robots: list[Any] = []
         try:
             for serial in followers:
@@ -466,7 +501,7 @@ class RolloutService:
             )
         thread = threading.Thread(
             target=self._planner_loop,
-            args=(policy, preprocessor, postprocessor, robots, sides),
+            args=(policy, preprocessor, postprocessor, robots, sides, rollout_cfg),
             daemon=True,
             name="rollout-planner",
         )
@@ -505,24 +540,34 @@ class RolloutService:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
 
-    def _apply_diffusion_scheduler_override(self, policy: Any) -> None:
-        """Swap a diffusion policy's denoising sampler per the rollout config.
+    def _apply_rollout_overrides(self, policy: Any, rollout_cfg: Any) -> None:
+        """Apply the resolved rollout overrides to a freshly loaded policy.
 
-        Rebuilds ``policy.diffusion.noise_scheduler`` (e.g. DDPM -> DDIM) reusing
-        the checkpoint's own schedule kwargs -- only the sampler changes, the
-        trained weights do not -- and sets ``num_inference_steps``. DDIM reaches
-        the target in far fewer steps, shrinking the per-chunk refill that stalls
-        the control loop. Best-effort and no-op for non-diffusion policies or
-        when ``scheduler`` is "".
+        Runs before ``policy.reset()`` (in ``_planner_loop``): the chunk-length
+        override changes ``config.n_action_steps``, and LeRobot rebuilds the
+        ACTION deque with that ``maxlen`` in ``reset()``, so a later override
+        would not take effect. Best-effort -- each step no-ops for a policy that
+        lacks the attributes it touches (e.g. a bare ``SharedRolloutConfig`` on a
+        non-diffusion family).
         """
-        scheduler = self._settings.rollout.diffusion.scheduler
+        self._apply_diffusion_scheduler(policy, rollout_cfg)
+        self._apply_n_action_steps(policy, rollout_cfg)
+
+    def _apply_diffusion_scheduler(self, policy: Any, rollout_cfg: Any) -> None:
+        # Rebuilds ``policy.diffusion.noise_scheduler`` (e.g. DDPM -> DDIM) reusing
+        # the checkpoint's own schedule kwargs -- only the sampler changes, the
+        # trained weights do not -- and sets ``num_inference_steps``. DDIM reaches
+        # the target in far fewer steps, shrinking the per-chunk refill that stalls
+        # the control loop. No-op for non-diffusion policies (a bare
+        # SharedRolloutConfig has no scheduler field) or when it is "".
+        scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
         if not scheduler:
             return
         diffusion = getattr(policy, "diffusion", None)
         existing = getattr(diffusion, "noise_scheduler", None)
         if diffusion is None or existing is None:
             return  # not a diffusion policy; nothing to override
-        steps = self._settings.rollout.diffusion.inference_steps
+        steps = getattr(rollout_cfg, "num_inference_steps", 0)
         try:
             from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
                 _make_noise_scheduler,
@@ -554,6 +599,45 @@ class RolloutService:
                     "ROLLOUT",
                     "Diffusion scheduler overridden",
                     f"scheduler={scheduler} inference_steps={steps}",
+                )
+            )
+
+    def _apply_n_action_steps(self, policy: Any, rollout_cfg: Any) -> None:
+        # Override the checkpoint's action-chunk length. Diffusion's ACTION deque
+        # is rebuilt with maxlen=config.n_action_steps in reset(), so setting it
+        # here (before reset) resizes the executed chunk. Clamp to the diffusion
+        # bound horizon - n_obs_steps + 1 when those attrs exist; families without
+        # them get the value unclamped (try/except keeps a bad value loud).
+        requested = getattr(rollout_cfg, "n_action_steps", 0)
+        if requested <= 0:
+            return
+        config = getattr(policy, "config", None)
+        if config is None or not hasattr(config, "n_action_steps"):
+            return
+        try:
+            previous = config.n_action_steps
+            value = requested
+            horizon = getattr(config, "horizon", None)
+            n_obs_steps = getattr(config, "n_obs_steps", None)
+            if horizon is not None and n_obs_steps is not None:
+                upper = horizon - n_obs_steps + 1
+                if value > upper:
+                    warn(
+                        "Clamped rollout n_action_steps to the checkpoint's bound",
+                        f"requested={requested} clamped={upper}",
+                    )
+                    value = upper
+            config.n_action_steps = value
+        except Exception as exc:
+            warn("Failed to override n_action_steps", describe_exception(exc))
+            return
+        with self._lock:
+            self._logs.append(
+                _encode_ui_log(
+                    "INFO",
+                    "ROLLOUT",
+                    "Action chunk length overridden",
+                    f"n_action_steps={value} (checkpoint default {previous})",
                 )
             )
 
@@ -668,11 +752,18 @@ class RolloutService:
         postprocessor: Any,
         robots: list[Any],
         sides: list[str],
+        rollout_cfg: Any,
     ) -> None:
+        # Overrides run in start() before this reset(): reset() rebuilds the
+        # ACTION deque at the (possibly overridden) n_action_steps maxlen.
         policy.reset()
         period = self._loop_period()
         # Chunk pose spacing: the dataset's recording period, not the loop period.
         dt = 1.0 / float(self._settings.rollout.action_dt_hz)
+        anchor = rollout_cfg.action_anchor_offset_steps
+        # Resolved on the first fresh chunk once its length is known (auto =
+        # half the effective chunk); None means force every tick until then.
+        replan_steps: int | None = None
         # 0 means "no cap": run until the operator stops it or a fault occurs.
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
@@ -689,7 +780,7 @@ class RolloutService:
             )
         }
         # Raw (un-smoothed) per-step inference times for one logging interval, to
-        # expose the 1-in-n_action_steps refill spike that the smoothed window hides.
+        # expose the 1-in-replan_steps refill spike that the smoothed window hides.
         infer_raw: deque[float] = deque(maxlen=log_every)
         sender_hz = self._settings.rollout.sender_hz
         controller: _SenderController | None = None
@@ -730,24 +821,33 @@ class RolloutService:
                     action_feature = features.get("action")
                     action_names = action_feature["names"] if action_feature else []
                     layout = self._plan_action_layout(action_names, sides)
-                    rollout_cfg = self._settings.rollout
+                    app_rollout = self._settings.rollout
                     controller = _SenderController(
                         robots,
                         layout,
                         sender_hz,
                         self._stop_event,
                         (
-                            rollout_cfg.max_linear_vel,
-                            rollout_cfg.max_angular_vel,
-                            rollout_cfg.max_linear_acc,
-                            rollout_cfg.max_angular_acc,
+                            app_rollout.max_linear_vel,
+                            app_rollout.max_angular_vel,
+                            app_rollout.max_linear_acc,
+                            app_rollout.max_angular_acc,
                         ),
                     )
                     self._controller = controller
                     controller.start()
 
+                # Force a fresh chunk every replan_steps ticks (every tick until
+                # replan_steps is resolved below on the first fresh chunk), so a
+                # committed path always remains while the next chunk computes.
+                force = replan_steps is None or step % replan_steps == 0
                 actions, fresh = _predict_action_chunk(
-                    observation, policy, self._device, preprocessor, postprocessor
+                    observation,
+                    policy,
+                    self._device,
+                    preprocessor,
+                    postprocessor,
+                    force_refresh=force,
                 )
                 # Sync so async cuda inference is timed here, not at to_list's
                 # device->host copy.
@@ -762,15 +862,29 @@ class RolloutService:
                 stage_times["to_list"].append(now - mark)
                 mark = now
 
-                # Execute-then-refill: only a fresh inference yields a new chunk; on
-                # pop-only steps the sender keeps riding the trajectory already
-                # scheduled. Space the poses at the dataset control period and
-                # anchor at the observation time so the chunk plays out at real-time
-                # speed (with planner_hz == action_dt_hz the chunk abuts the refill).
+                # Overlapped replanning: a forced tick yields a fresh chunk that
+                # splices over the committed path's tail; non-forced ticks reuse
+                # the trajectory already scheduled. Space poses at the dataset
+                # control period; the anchor offset keeps waypoint 0 ahead of the
+                # sender's past-filter after inference latency (which would drop it
+                # at offset 0). Forced-tick overrun below 30Hz is by design -- the
+                # committed path already covers the gap while the next chunk runs.
                 assert controller is not None  # created above with the layout
                 if fresh:
+                    if replan_steps is None:
+                        effective = len(action_lists)
+                        replan_steps = rollout_cfg.replan_steps or max(
+                            1, effective // 2
+                        )
+                        if replan_steps > effective:
+                            warn(
+                                "Clamped replan_steps to the effective chunk length",
+                                f"replan_steps={replan_steps} chunk={effective}",
+                            )
+                            replan_steps = effective
                     target_times = [
-                        loop_start + k * dt for k in range(len(action_lists))
+                        loop_start + (k + anchor) * dt
+                        for k in range(len(action_lists))
                     ]
                     controller.schedule_chunk(
                         action_lists, target_times, now=time.monotonic()
