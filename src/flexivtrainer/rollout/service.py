@@ -26,6 +26,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +39,9 @@ from flexivtrainer.data.lerobot_io import (
     extract_recording_images,
     resolve_recording_image_names,
 )
-from flexivtrainer.jobs.train_policy import UI_LOG_PREFIX, _encode_ui_log
+from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.policies import diffusion as diffusion_policy
 
 # Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz]; tcp_twist (velocity) and
 # tcp_wrench are each 6-axis.
@@ -53,15 +55,7 @@ _FORCE_REFRESH_WARNED = False
 
 
 def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
-    """Load a LeRobot policy and its processors from a checkpoint directory.
-
-    Returns ``(policy, preprocessor, postprocessor)``. Since LeRobot 0.5,
-    normalization lives in the processors saved with the checkpoint, not in the
-    policy: the preprocessor normalizes the observation and the postprocessor
-    un-normalizes the action back into physical units. ``from_pretrained`` wants
-    the directory holding ``config.json``, so accept a weights file or a
-    ``checkpoints/<step>`` parent and resolve down to it.
-    """
+    """Load a LeRobot policy and its processors from a checkpoint directory."""
     from lerobot.configs.policies import PreTrainedConfig  # noqa: PLC0415
     from lerobot.policies.factory import (  # noqa: PLC0415
         get_policy_class,
@@ -113,23 +107,9 @@ def _predict_action_chunk(
 ) -> tuple[Any, bool]:
     """Run one inference cycle; return ``(chunk, fresh)``.
 
-    The planner drives freshness via ``force_refresh`` every ``replan_steps``
-    ticks: clearing the ACTION queue makes ``select_action`` re-infer a new chunk
-    from the current observation, so a committed path always remains while the
-    next chunk computes (overlapped replanning). Non-forced ticks still call
-    ``select_action`` -- the pop is harmless (superseded at the next replan) and
-    keeps the obs queues populated at planner-tick spacing for ``n_obs_steps``
-    history. ``fresh`` (queue empty before the call) tells the caller a genuinely
-    new chunk exists, so it schedules a new trajectory only then instead of
-    re-anchoring the interpolator on pop-only steps (which stomps the trajectory
-    in flight). On a fresh cycle we reuse this call for step 0 and un-normalize
-    the cached tail so the whole chunk comes from one diffusion sample; the tail
-    sits in the queue before the un-normalizer runs, hence the extra
-    ``postprocessor`` call.
-
-    ``policy._queues[ACTION]`` is a LeRobot 0.5.1 internal; the forced clear is
-    guarded so a family that keys its queue differently (e.g. ACT's
-    ``_action_queue``) degrades to today's drain-refill instead of crashing.
+    Forced refresh clears the action queue so ``select_action`` produces a new
+    chunk from the current observation. The first action and cached tail are
+    returned together so one fresh inference replaces the pending waypoint chunk.
     """
     import torch  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
@@ -179,147 +159,130 @@ def _cuda_sync(device: str) -> None:
         pass
 
 
-class _SenderController:
-    """Sender side of the rollout producer/consumer split (see ``RolloutService``).
+@dataclass
+class _RobotCommand:
+    pose: list[float]
+    wrench: list[float]
+    twist: list[float]
 
-    Owns the ``rollout-sender`` thread. The planner
-    (``RolloutService._planner_loop``) schedules sparse timestamped waypoints via
-    ``schedule_chunk``; this thread
-    ticks at ``sender_hz`` and sends the interpolated pose, so the robot tracks a
-    smooth spline instead of raw waypoints (which is what made motion jerky). The
-    per-arm interpolators are the shared state -- both sides touch them under
-    ``self._lock``; shutdown is the shared ``stop_event``; a sender fault surfaces
-    on ``self.error`` for the producer to poll.
-    """
+
+@dataclass
+class _TimedWaypoint:
+    target_time: float
+    commands: list[_RobotCommand | None]
+
+
+class _WaypointDispatcher:
+    """Timed dispatcher for rollout waypoints."""
 
     def __init__(
         self,
         robots: list[Any],
         layout: list[dict[str, Any]],
-        sender_hz: int,
         stop_event: threading.Event,
         motion_limits: tuple[float, float, float, float],
     ) -> None:
-        from flexivtrainer.rollout.pose_interpolator import (  # noqa: PLC0415
-            PoseTrajectoryInterpolator,
-        )
-
         self._robots = robots
         self._layout = layout
-        self._period = 1.0 / float(sender_hz)
         self._stop_event = stop_event
-        # (max_linear_vel, max_angular_vel, max_linear_acc, max_angular_acc) —
-        # hardware ceilings on the motion generator, our speed safety backstop.
+        # Hardware ceilings for the robot motion generator.
         self._motion_limits = motion_limits
-        self._lock = threading.Lock()
-        # Per-arm interpolator, created lazily on the first scheduled pose.
-        self._interp: list[Any | None] = [None] * len(layout)
-        # Per-arm time of the last scheduled waypoint; lets the next one splice
-        # onto the trajectory end instead of overwriting it.
-        self._last_wp_time: list[float] = [0.0] * len(layout)
-        self._wrench: list[list[float]] = [[0.0] * _WRENCH_DIM for _ in layout]
-        self._make_interp = PoseTrajectoryInterpolator
+        self._cond = threading.Condition()
+        # Time-ordered (target_time, per-arm commands) not yet dispatched.
+        self._waypoints: list[_TimedWaypoint] = []
         self._error: str | None = None
-        self._ticks = 0
-        # Chunk steps that survived the future-filter last call; a shrinking
+        # Chunk steps that survived the past-filter last call; a shrinking
         # count means inference is eating into the streamed horizon.
         self._last_scheduled = 0
         self._thread: threading.Thread | None = None
 
-    def schedule_chunk(
+    def replace_waypoints(
         self,
         actions: list[list[float]],
         target_times: list[float],
         now: float,
     ) -> None:
-        """Splice a whole action chunk into each arm's interpolator as waypoints.
+        """Install a chunk's future waypoints, replacing any still pending.
 
         ``actions[k]`` is the flat action for step k, reached at ``target_times[k]``;
-        steps already in the past (``<= now``) are dropped. Velocity comes from the
-        spline, so the twist slice is not read here.
+        steps already in the past (``<= now``) are dropped.
         """
-        with self._lock:
+        waypoints: list[_TimedWaypoint] = []
+        for action, target_time in zip(actions, target_times):
+            if target_time <= now:
+                continue
+            commands: list[_RobotCommand | None] = []
             for index, arm_plan in enumerate(self._layout):
                 if index >= len(self._robots):
                     break
                 pose_slice = arm_plan["pose"]
                 if pose_slice is None:
+                    commands.append(None)
                     continue
-                future = [
-                    (t, RolloutService._normalize_pose_quaternion(list(a[pose_slice])))
-                    for a, t in zip(actions, target_times)
-                    if t > now
-                ]
-                self._last_scheduled = len(future)
-                if not future:
-                    continue
+                twist_slice = arm_plan["twist"]
                 wrench_slice = arm_plan["wrench"]
-                self._wrench[index] = (
-                    list(actions[0][wrench_slice])
-                    if wrench_slice is not None
-                    else [0.0] * _WRENCH_DIM
+                commands.append(
+                    _RobotCommand(
+                        pose=RolloutService._normalize_pose_quaternion(
+                            list(action[pose_slice])
+                        ),
+                        wrench=(
+                            list(action[wrench_slice])
+                            if wrench_slice is not None
+                            else [0.0] * _WRENCH_DIM
+                        ),
+                        twist=(
+                            list(action[twist_slice])
+                            if twist_slice is not None
+                            else [0.0] * _TWIST_DIM
+                        ),
+                    )
                 )
-                interp = self._interp[index]
-                start = 0
-                if interp is None:
-                    # Seed from the measured pose so the first tick eases from
-                    # where the arm actually is, rather than jumping.
-                    measured = RolloutService._normalize_pose_quaternion(
-                        [float(v) for v in self._robots[index].states().tcp_pose]
-                    )
-                    t0, pose0 = future[0]
-                    interp = self._make_interp(times=[now, t0], poses=[measured, pose0])
-                    self._last_wp_time[index] = t0
-                    start = 1
-                for target_time, pose in future[start:]:
-                    interp = interp.schedule_waypoint(
-                        pose=pose,
-                        time=target_time,
-                        curr_time=now,
-                        last_waypoint_time=self._last_wp_time[index],
-                    )
-                    self._last_wp_time[index] = target_time
-                self._interp[index] = interp
+            waypoints.append(_TimedWaypoint(float(target_time), commands))
+        with self._cond:
+            self._waypoints = waypoints
+            self._last_scheduled = len(waypoints)
+            self._cond.notify()
 
-    def _send_interpolated_action(self) -> None:
-        now = time.monotonic()
-        with self._lock:
-            interps = list(self._interp)
-            wrenches = [list(w) for w in self._wrench]
+    def _send_waypoint(self, waypoint: _TimedWaypoint) -> None:
         max_lin_vel, max_ang_vel, max_lin_acc, max_ang_acc = self._motion_limits
-        for index, interp in enumerate(interps):
-            if interp is None or index >= len(self._robots):
+        for index, command in enumerate(waypoint.commands):
+            if command is None or index >= len(self._robots):
                 continue
-            pose = interp(now)
-            velocity = interp.velocity(now)
             self._robots[index].SendCartesianMotionForce(
-                [float(v) for v in pose],
-                wrenches[index],
-                [float(v) for v in velocity],
+                command.pose,
+                command.wrench,
+                command.twist,
                 max_lin_vel,
                 max_ang_vel,
                 max_lin_acc,
                 max_ang_acc,
             )
 
-    def _sender_loop(self) -> None:
+    def _dispatch_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
-                start = time.monotonic()
-                # Skip until at least one arm has a scheduled trajectory.
-                if any(i is not None for i in self._interp):
-                    self._send_interpolated_action()
-                    self._ticks += 1
-                rest = self._period - (time.monotonic() - start)
-                if rest > 0:
-                    self._stop_event.wait(rest)
+                with self._cond:
+                    if not self._waypoints:
+                        self._cond.wait(0.1)
+                        continue
+                    delay = self._waypoints[0].target_time - time.monotonic()
+                    if delay > 0:
+                        # Capped so stop_event stays responsive; a fresh chunk
+                        # with an earlier head wakes the wait via notify().
+                        self._cond.wait(min(delay, 0.1))
+                        continue
+                    waypoint = self._waypoints.pop(0)
+                self._send_waypoint(waypoint)
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
             self._stop_event.set()
+            with self._cond:
+                self._cond.notify()
 
     def start(self) -> None:
         self._thread = threading.Thread(
-            target=self._sender_loop, daemon=True, name="rollout-sender"
+            target=self._dispatch_loop, daemon=True, name="rollout-dispatcher"
         )
         self._thread.start()
 
@@ -332,37 +295,9 @@ class _SenderController:
     def error(self) -> str | None:
         return self._error
 
-    @property
-    def ticks(self) -> int:
-        return self._ticks
-
 
 class RolloutService:
-    """Lifecycle + background control loop for policy rollout.
-
-    Two threads run during a rollout, in a planner/sender (producer/consumer) split:
-
-    - **Planner** -- ``_planner_loop`` (thread ``rollout-planner``): reads cameras
-      and robot state, re-runs policy inference every ``replan_steps`` ticks
-      (overlapped replanning), and splices the resulting action chunk over the
-      committed path as timestamped waypoints. Ticks at ``planner_hz``.
-    - **Sender** -- ``_SenderController._sender_loop`` (thread ``rollout-sender``):
-      samples the interpolated pose spline and sends it to the robot via
-      ``SendCartesianMotionForce``. Ticks at the higher ``sender_hz``.
-
-    Handshake between them:
-
-    - **Trajectory** -- the planner calls ``controller.schedule_chunk`` and the
-      sender reads ``controller(now)``; both touch the controller's per-arm
-      interpolators under ``_SenderController._lock``. This is the only shared
-      mutable state.
-    - **Shutdown** -- ``self._stop_event`` (owned here, passed into the controller)
-      signals both threads to exit. ``stop()`` sets it, then joins the sender
-      *before* ``_release_robots()`` so the sender can never command a released
-      robot.
-    - **Errors** -- a fault in the sender is recorded on ``controller.error`` and
-      polled by the planner, which raises and tears the run down.
-    """
+    """Lifecycle and background control loop for policy rollout."""
 
     def __init__(
         self,
@@ -399,12 +334,10 @@ class RolloutService:
         self._robots: list[Any] = []
         self._device = "cpu"
         self._thread: threading.Thread | None = None
-        # Held so stop() can join the sender before releasing the robots.
-        self._controller: _SenderController | None = None
+        # Held so stop() can join the dispatcher before releasing the robots.
+        self._dispatcher: _WaypointDispatcher | None = None
         self._stop_event = threading.Event()
-        # Ring buffer of UI-encoded log lines (same wire format as the training
-        # terminal), surfaced through status() so the rollout tab can stream the
-        # per-step measured state and commanded action like the training tab.
+        # UI-encoded log ring buffer exposed through status().
         self._logs: deque[str] = deque(maxlen=2000)
 
     # -- status -------------------------------------------------------------
@@ -426,7 +359,9 @@ class RolloutService:
                 "log_lines": len(self._logs),
             }
 
-    def _append_log(self, level: str, source: str, message: str, detail: str = "") -> None:
+    def _append_log(
+        self, level: str, source: str, message: str, detail: str = ""
+    ) -> None:
         self._logs.append(_encode_ui_log(level, source, message, detail))
 
     # -- lifecycle ----------------------------------------------------------
@@ -464,14 +399,14 @@ class RolloutService:
             raise RuntimeError(
                 f"Failed to load policy: {describe_exception(exc)}"
             ) from exc
-        # Prefer the policy's own config.type (the LeRobot family name); fall
-        # back to a ``name`` attribute so the test fakes and the 3-tuple loader
-        # contract still resolve a policy type.
         policy_type = getattr(
             getattr(policy, "config", None), "type", None
         ) or getattr(policy, "name", "")
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
-        self._apply_rollout_overrides(policy, rollout_cfg)
+        diffusion_overridden = diffusion_policy.apply_rollout_overrides(
+            policy, rollout_cfg
+        )
+        self._apply_n_action_steps(policy, rollout_cfg)
         robots: list[Any] = []
         try:
             for serial in followers:
@@ -499,6 +434,17 @@ class RolloutService:
                     f"device={device} sides={'+'.join(sides)}",
                 )
             )
+            if diffusion_overridden:
+                self._logs.append(
+                    _encode_ui_log(
+                        "INFO",
+                        "ROLLOUT",
+                        "Diffusion scheduler overridden",
+                        "scheduler="
+                        f"{rollout_cfg.noise_scheduler_type} "
+                        f"inference_steps={rollout_cfg.num_denoise_steps}",
+                    )
+                )
         thread = threading.Thread(
             target=self._planner_loop,
             args=(policy, preprocessor, postprocessor, robots, sides, rollout_cfg),
@@ -511,10 +457,10 @@ class RolloutService:
 
     def stop(self) -> dict[str, Any]:
         self._stop_event.set()
-        # Join the sender before releasing robots so it can't command them after.
-        controller = self._controller
-        if controller is not None:
-            controller.join()
+        # Join the dispatcher before releasing robots so it can't command them after.
+        dispatcher = self._dispatcher
+        if dispatcher is not None:
+            dispatcher.join()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
@@ -539,68 +485,6 @@ class RolloutService:
     def _teleop_initialized(self) -> bool:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
-
-    def _apply_rollout_overrides(self, policy: Any, rollout_cfg: Any) -> None:
-        """Apply the resolved rollout overrides to a freshly loaded policy.
-
-        Runs before ``policy.reset()`` (in ``_planner_loop``): the chunk-length
-        override changes ``config.n_action_steps``, and LeRobot rebuilds the
-        ACTION deque with that ``maxlen`` in ``reset()``, so a later override
-        would not take effect. Best-effort -- each step no-ops for a policy that
-        lacks the attributes it touches (e.g. a bare ``SharedRolloutConfig`` on a
-        non-diffusion family).
-        """
-        self._apply_diffusion_scheduler(policy, rollout_cfg)
-        self._apply_n_action_steps(policy, rollout_cfg)
-
-    def _apply_diffusion_scheduler(self, policy: Any, rollout_cfg: Any) -> None:
-        # Rebuilds ``policy.diffusion.noise_scheduler`` (e.g. DDPM -> DDIM) reusing
-        # the checkpoint's own schedule kwargs -- only the sampler changes, the
-        # trained weights do not -- and sets ``num_inference_steps``. DDIM reaches
-        # the target in far fewer steps, shrinking the per-chunk refill that stalls
-        # the control loop. No-op for non-diffusion policies (a bare
-        # SharedRolloutConfig has no scheduler field) or when it is "".
-        scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
-        if not scheduler:
-            return
-        diffusion = getattr(policy, "diffusion", None)
-        existing = getattr(diffusion, "noise_scheduler", None)
-        if diffusion is None or existing is None:
-            return  # not a diffusion policy; nothing to override
-        steps = getattr(rollout_cfg, "num_denoise_steps", 0)
-        try:
-            from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
-                _make_noise_scheduler,
-            )
-
-            # Reuse the trained schedule (beta range, clip, prediction type) so
-            # only the sampler family changes. Pass just these kwargs -- the same
-            # set LeRobot builds the scheduler with -- since a scheduler's full
-            # config carries family-specific keys the other family rejects.
-            cfg = existing.config
-            kwargs = dict(
-                num_train_timesteps=cfg.num_train_timesteps,
-                beta_start=cfg.beta_start,
-                beta_end=cfg.beta_end,
-                beta_schedule=cfg.beta_schedule,
-                clip_sample=cfg.clip_sample,
-                clip_sample_range=cfg.clip_sample_range,
-                prediction_type=cfg.prediction_type,
-            )
-            diffusion.noise_scheduler = _make_noise_scheduler(scheduler, **kwargs)
-            diffusion.num_inference_steps = steps
-        except Exception as exc:
-            warn("Failed to override diffusion scheduler", describe_exception(exc))
-            return
-        with self._lock:
-            self._logs.append(
-                _encode_ui_log(
-                    "INFO",
-                    "ROLLOUT",
-                    "Diffusion scheduler overridden",
-                    f"scheduler={scheduler} inference_steps={steps}",
-                )
-            )
 
     def _apply_n_action_steps(self, policy: Any, rollout_cfg: Any) -> None:
         # Override the checkpoint's action-chunk length. Diffusion's ACTION deque
@@ -668,15 +552,8 @@ class RolloutService:
             except Exception:  # pragma: no cover - hardware specific
                 pass
 
-    def _read_robot_snapshot(
-        self, robots: list[Any], sides: list[str]
-    ) -> dict[str, Any]:
-        """Build a robot_data_snapshot-shaped dict from direct RDK reads.
-
-        Mirrors ``TeleopService.robot_data_snapshot`` so the lerobot_io helpers
-        consume it unchanged: the follower's ``states()`` provides tcp_pose /
-        tcp_vel / ext_wrench_in_world for the observation.
-        """
+    def _read_robot_snapshot(self, robots: list[Any]) -> dict[str, Any]:
+        """Build the robot snapshot shape consumed by the LeRobot I/O helpers."""
         robots_payload: dict[str, Any] = {}
         for index, robot in enumerate(robots):
             states = robot.states()
@@ -690,8 +567,7 @@ class RolloutService:
                     "tcp_vel": tcp_vel,
                     "ext_wrench_in_world": wrench,
                 },
-                # Placeholder: ``build_features_from_sample`` reads only the axis
-                # names/dimensions here to slice the policy output, not the values.
+                # Values are placeholders; the feature builder reads only axes.
                 "actions": {
                     "tcp_pose_d": tcp_pose,
                     "tcp_vel_d": tcp_vel,
@@ -782,8 +658,7 @@ class RolloutService:
         # Raw (un-smoothed) per-step inference times for one logging interval, to
         # expose the 1-in-replan_steps refill spike that the smoothed window hides.
         infer_raw: deque[float] = deque(maxlen=log_every)
-        sender_hz = self._settings.rollout.sender_hz
-        controller: _SenderController | None = None
+        dispatcher: _WaypointDispatcher | None = None
         step = 0
         try:
             while not self._stop_event.is_set():
@@ -804,7 +679,7 @@ class RolloutService:
                 stage_times["grab_images"].append(now - mark)
                 mark = now
 
-                snapshot = self._read_robot_snapshot(robots, sides)
+                snapshot = self._read_robot_snapshot(robots)
                 now = time.monotonic()
                 stage_times["read_states"].append(now - mark)
                 mark = now
@@ -822,10 +697,9 @@ class RolloutService:
                     action_names = action_feature["names"] if action_feature else []
                     layout = self._plan_action_layout(action_names, sides)
                     app_rollout = self._settings.rollout
-                    controller = _SenderController(
+                    dispatcher = _WaypointDispatcher(
                         robots,
                         layout,
-                        sender_hz,
                         self._stop_event,
                         (
                             app_rollout.max_linear_vel,
@@ -834,8 +708,8 @@ class RolloutService:
                             app_rollout.max_angular_acc,
                         ),
                     )
-                    self._controller = controller
-                    controller.start()
+                    self._dispatcher = dispatcher
+                    dispatcher.start()
 
                 # Force a fresh chunk every replan_steps ticks (every tick until
                 # replan_steps is resolved below on the first fresh chunk), so a
@@ -862,14 +736,10 @@ class RolloutService:
                 stage_times["to_list"].append(now - mark)
                 mark = now
 
-                # Overlapped replanning: a forced tick yields a fresh chunk that
-                # splices over the committed path's tail; non-forced ticks reuse
-                # the trajectory already scheduled. Space poses at the dataset
-                # control period; the anchor offset keeps waypoint 0 ahead of the
-                # sender's past-filter after inference latency (which would drop it
-                # at offset 0). Forced-tick overrun below 30Hz is by design -- the
-                # committed path already covers the gap while the next chunk runs.
-                assert controller is not None  # created above with the layout
+                # Forced ticks replace the dispatcher's future waypoints; other
+                # ticks leave the current plan in place. The anchor keeps the
+                # first waypoint ahead of the past-filter after inference latency.
+                assert dispatcher is not None  # created above with the layout
                 if fresh:
                     if replan_steps is None:
                         effective = len(action_lists)
@@ -886,11 +756,11 @@ class RolloutService:
                         loop_start + (k + anchor) * dt
                         for k in range(len(action_lists))
                     ]
-                    controller.schedule_chunk(
+                    dispatcher.replace_waypoints(
                         action_lists, target_times, now=time.monotonic()
                     )
-                if controller.error is not None:
-                    raise RuntimeError(controller.error)
+                if dispatcher.error is not None:
+                    raise RuntimeError(dispatcher.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
 
                 work_times.append(time.monotonic() - loop_start)
@@ -898,7 +768,7 @@ class RolloutService:
                     mean_work = sum(work_times) / len(work_times)
                     actual_hz = 1.0 / mean_work if mean_work > 0 else 0.0
                     self._log_timing(
-                        step, stage_times, infer_raw, controller._last_scheduled
+                        step, stage_times, infer_raw, dispatcher._last_scheduled
                     )
                     self._log_step(
                         step, snapshot, action_lists[0], layout, sides,
@@ -919,23 +789,29 @@ class RolloutService:
             with self._lock:
                 self._error = detail
                 self._running = False
-                self._logs.append(_encode_ui_log("ERROR", "ROLLOUT", "Rollout stopped", detail))
+                self._logs.append(
+                    _encode_ui_log("ERROR", "ROLLOUT", "Rollout stopped", detail)
+                )
             warn("Rollout stopped", detail)
         finally:
-            # Stop the high-rate sender before releasing robots so it cannot
-            # command an already-released robot. The break paths above may exit
-            # the loop without setting the stop event, so set it here.
-            if controller is not None:
+            # Stop the dispatcher before releasing robots. Break paths above may
+            # exit without setting the stop event, so set it here.
+            if dispatcher is not None:
                 self._stop_event.set()
-                controller.join()
-            self._controller = None
+                dispatcher.join()
+            self._dispatcher = None
             self._release_robots()
             with self._lock:
                 self._running = False
                 reason = self._stop_reason or "stopped"
                 if self._error is None:
                     self._logs.append(
-                        _encode_ui_log("INFO", "ROLLOUT", "Rollout ended", f"reason={reason} steps={step}")
+                        _encode_ui_log(
+                            "INFO",
+                            "ROLLOUT",
+                            "Rollout ended",
+                            f"reason={reason} steps={step}",
+                        )
                     )
 
     def _grab_images(self, camera_names: list[str]) -> dict[str, np.ndarray]:
@@ -991,8 +867,7 @@ class RolloutService:
         One line per ``log_every``, ordered as the stages run in the loop, with a
         ``total`` so the breakdown can be checked against the ``freq=`` line. Use
         it to find which stage (e.g. grab_images, inference) caps the loop rate.
-        ``sched`` is how many chunk steps the sender last accepted -- if it falls
-        toward 0, inference is outrunning the streamed horizon.
+        ``sched`` is how many future waypoints the dispatcher last accepted.
         """
         parts: list[str] = []
         total_ms = 0.0
@@ -1037,14 +912,22 @@ class RolloutService:
         self._append_log("INFO", "ROLLOUT", f"step={step} obs", " ".join(cam_parts))
 
         robots_payload = snapshot.get("robots") if isinstance(snapshot, dict) else None
-        payloads = list(robots_payload.values()) if isinstance(robots_payload, dict) else []
+        payloads = (
+            list(robots_payload.values()) if isinstance(robots_payload, dict) else []
+        )
         for index, plan in enumerate(layout):
-            side = plan.get("side") or (sides[index] if index < len(sides) else f"arm_{index}")
+            side = plan.get("side") or (
+                sides[index] if index < len(sides) else f"arm_{index}"
+            )
             pose_slice = plan["pose"]
+            twist_slice = plan["twist"]
             commanded = (
                 self._normalize_pose_quaternion(action[pose_slice])
                 if pose_slice is not None
                 else []
+            )
+            commanded_twist = (
+                list(action[twist_slice]) if twist_slice is not None else []
             )
             measured: list[float] = []
             if index < len(payloads) and isinstance(payloads[index], dict):
@@ -1055,7 +938,11 @@ class RolloutService:
                 "INFO",
                 "ROLLOUT",
                 f"step={step} {side}",
-                f"cmd_xyz={self._fmt_xyz(commanded)} meas_xyz={self._fmt_xyz(measured)}",
+                (
+                    f"cmd_xyz={self._fmt_xyz(commanded)} "
+                    f"meas_xyz={self._fmt_xyz(measured)} "
+                    f"cmd_twist={self._fmt_vector(commanded_twist)}"
+                ),
             )
 
     @staticmethod
@@ -1063,6 +950,12 @@ class RolloutService:
         if len(pose) < 3:
             return "n/a"
         return "[" + ", ".join(f"{pose[i]:.3f}" for i in range(3)) + "]"
+
+    @staticmethod
+    def _fmt_vector(vector: list[float]) -> str:
+        if not vector:
+            return "n/a"
+        return "[" + ", ".join(f"{value:.3f}" for value in vector) + "]"
 
     @staticmethod
     def _normalize_pose_quaternion(pose: list[float]) -> list[float]:

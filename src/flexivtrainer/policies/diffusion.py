@@ -22,10 +22,11 @@ count is tunable at inference without retraining.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.policies._shared import SharedRolloutConfig
 
 
@@ -38,19 +39,44 @@ class TrainingConfig(BaseModel):
 
 
 class RolloutConfig(SharedRolloutConfig):
-    """Diffusion-policy rollout overrides applied at load.
-
-    Swaps the denoising sampler at rollout load. Old checkpoints train with
-    DDPM/100 (~100 U-Net forwards per refill, stalling the loop); DDIM reuses the
-    same weights but reaches the target in far fewer steps. "" leaves the
-    checkpoint's own scheduler/steps untouched.
-
-    Transitional: a bridge for pre-existing DDPM checkpoints. New checkpoints bake
-    in DDIM via ``TrainingConfig`` at train time, so once all live checkpoints are
-    DDIM-native, delete these fields + the scheduler swap in
-    ``_apply_rollout_overrides``.
-    """
+    """Diffusion-policy rollout overrides applied at load."""
 
     # "" = leave the checkpoint's own sampler/steps untouched.
     noise_scheduler_type: Literal["", "DDPM", "DDIM"] = "DDIM"
     num_denoise_steps: int = Field(default=16, ge=1, le=1000)
+
+
+def apply_rollout_overrides(policy: Any, rollout_cfg: RolloutConfig) -> bool:
+    """Apply diffusion-specific rollout overrides to a freshly loaded policy."""
+    scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
+    if not scheduler:
+        return False
+    diffusion = getattr(policy, "diffusion", None)
+    existing = getattr(diffusion, "noise_scheduler", None)
+    if diffusion is None or existing is None:
+        return False
+    steps = getattr(rollout_cfg, "num_denoise_steps", 0)
+    try:
+        from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
+            _make_noise_scheduler,
+        )
+
+        # Reuse the trained schedule so only the sampler family changes. A
+        # scheduler's full config carries family-specific keys the other family
+        # rejects, so pass the same kwargs LeRobot uses when building one.
+        cfg = existing.config
+        kwargs = dict(
+            num_train_timesteps=cfg.num_train_timesteps,
+            beta_start=cfg.beta_start,
+            beta_end=cfg.beta_end,
+            beta_schedule=cfg.beta_schedule,
+            clip_sample=cfg.clip_sample,
+            clip_sample_range=cfg.clip_sample_range,
+            prediction_type=cfg.prediction_type,
+        )
+        diffusion.noise_scheduler = _make_noise_scheduler(scheduler, **kwargs)
+        diffusion.num_inference_steps = steps
+    except Exception as exc:
+        warn("Failed to override diffusion scheduler", describe_exception(exc))
+        return False
+    return True

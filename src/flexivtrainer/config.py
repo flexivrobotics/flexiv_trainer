@@ -113,9 +113,6 @@ class RolloutConfig(BaseModel):
     # so chunks play at real speed.
     planner_hz: int = Field(default=10, ge=1, le=120)
     max_steps: int = Field(default=0, ge=0)
-    # Rate of the background sender that streams the interpolated pose spline to
-    # the robot; SendCartesianMotionForce handles up to 1000 Hz, 100-200 is ideal.
-    sender_hz: int = Field(default=200, ge=1, le=1000)
     # Time-spacing of poses within one predicted chunk = the training data rate.
     # A checkpoint property, not a loop rate; set to match the checkpoint.
     action_dt_hz: int = Field(default=10, ge=1, le=120)

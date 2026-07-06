@@ -20,7 +20,8 @@ import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
-from flexivtrainer.rollout.service import RolloutService, _SenderController
+from flexivtrainer.policies import diffusion as diffusion_policy
+from flexivtrainer.rollout.service import RolloutService, _WaypointDispatcher
 
 
 class _FakeRobotStates:
@@ -63,12 +64,26 @@ class _FakeRobot:
         self,
         pose,
         wrench=(),
+        *args,
         velocity=(),
         max_linear_vel=0.5,
         max_angular_vel=1.0,
         max_linear_acc=2.0,
         max_angular_acc=5.0,
     ):
+        if len(args) == 5:
+            (
+                velocity,
+                max_linear_vel,
+                max_angular_vel,
+                max_linear_acc,
+                max_angular_acc,
+            ) = args
+        elif len(args) == 4:
+            max_linear_vel, max_angular_vel, max_linear_acc, max_angular_acc = args
+            velocity = ()
+        elif args:
+            raise TypeError(f"unexpected SendCartesianMotionForce args: {args!r}")
         self.commands.append((list(pose), list(wrench), list(velocity)))
         self.motion_limits = (
             max_linear_vel, max_angular_vel, max_linear_acc, max_angular_acc
@@ -231,18 +246,19 @@ def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
 
     # A diffusion-policy stand-in: only the attributes the override touches.
     ddpm = DDPMScheduler(
-        num_train_timesteps=100, beta_schedule="squaredcos_cap_v2",
-        clip_sample=True, prediction_type="epsilon",
+        num_train_timesteps=100,
+        beta_schedule="squaredcos_cap_v2",
+        clip_sample=True,
+        prediction_type="epsilon",
     )
     policy = SimpleNamespace(
         diffusion=SimpleNamespace(noise_scheduler=ddpm, num_inference_steps=100)
     )
-    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
     # Request a DDIM swap explicitly and confirm the override applies it.
-    rollout_cfg = service._settings.policies.diffusion.rollout
+    rollout_cfg = _settings(tmp_path).policies.diffusion.rollout
     rollout_cfg.noise_scheduler_type = "DDIM"
     rollout_cfg.num_denoise_steps = 10
-    service._apply_rollout_overrides(policy, rollout_cfg)
+    assert diffusion_policy.apply_rollout_overrides(policy, rollout_cfg)
     assert isinstance(policy.diffusion.noise_scheduler, DDIMScheduler)
     assert policy.diffusion.num_inference_steps == 10
     # The trained schedule is preserved -- only the sampler family changed.
@@ -255,14 +271,10 @@ def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
     )
     settings = _settings(tmp_path)
     settings.policies.diffusion.rollout.noise_scheduler_type = ""
-    service = RolloutService(
-        settings, _cameras(), _teleop(initialized=False),
-        _single_arm_pairs, lambda: ["single_arm"],
-        policy_loader=_fake_loader(_FakePolicy([])),
-        robot_factory=_FakeRobot, resolve_device=lambda configured: "cpu",
-    )
     sentinel = policy.diffusion.noise_scheduler
-    service._apply_rollout_overrides(policy, settings.policies.diffusion.rollout)
+    assert not diffusion_policy.apply_rollout_overrides(
+        policy, settings.policies.diffusion.rollout
+    )
     # "" leaves the checkpoint's own scheduler and step count untouched.
     assert policy.diffusion.noise_scheduler is sentinel
     assert policy.diffusion.num_inference_steps == 100
@@ -278,14 +290,13 @@ def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -
 
 
 def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
-    # The rollout's only send path: a high-rate sender thread streams interpolated
-    # poses to the robot. Verify the loop runs, enables + switches the robot,
-    # streams commands toward the policy pose, and shuts down cleanly (no hang).
+    # The rollout's only send path: a dispatcher thread sends each waypoint once
+    # at its target time. Verify the loop runs, enables + switches the robot,
+    # sends the raw policy waypoint, and shuts down cleanly (no hang).
     action = [float(i) for i in range(19)]
     policy = _FakePolicy(action)
     robot = _FakeRobot("F1")
     settings = _settings(tmp_path)
-    settings.rollout.sender_hz = 200
     service = RolloutService(
         settings,
         _cameras(),
@@ -316,23 +327,25 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
     assert policy.reset_count == 1
     assert robot.enabled
     assert robot.mode == "cmf"
-    assert robot.commands, "expected at least one streamed Cartesian command"
-    pose, _wrench, _velocity = robot.commands[0]
-    # The interpolator seeds from the measured pose ([1,2,3]) and eases toward the
-    # policy command ([0,1,2]); the first streamed x lies within that range and
-    # the quaternion stays unit-norm.
-    assert min(action[0], 1.0) - 1e-6 <= pose[0] <= max(action[0], 1.0) + 1e-6
+    assert robot.commands, "expected at least one dispatched Cartesian command"
+    pose, wrench, velocity = robot.commands[0]
+    # The dispatcher sends the raw waypoint: the action's pose slice with a
+    # unit-norm quaternion, its twist slice as velocity, its wrench slice as-is.
+    assert pose[0] == pytest.approx(action[0])
     assert pytest.approx(sum(c * c for c in pose[3:7]) ** 0.5) == 1.0
+    assert velocity == pytest.approx(action[7:13])
+    assert wrench == pytest.approx(action[13:19])
     # The configured hardware speed/accel caps are passed to the robot.
     cfg = service._settings.rollout
     assert robot.motion_limits == (
         cfg.max_linear_vel, cfg.max_angular_vel,
         cfg.max_linear_acc, cfg.max_angular_acc,
     )
-    # Clean shutdown: status settled and the sender thread no longer running.
+    # Clean shutdown: status settled and the dispatcher thread no longer running.
     assert service.status()["status"] in {"idle", "stopped"}
     assert not any(
-        t.name == "rollout-sender" and t.is_alive() for t in threading.enumerate()
+        t.name == "rollout-dispatcher" and t.is_alive()
+        for t in threading.enumerate()
     )
 
 
@@ -369,6 +382,10 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
     # An obs row is logged on step 0 (0 % log_every == 0) carrying the expected
     # frequency and a measured actual frequency, e.g. "freq=123.4/30.0Hz".
     assert any(f"/{float(expected_hz):.1f}Hz" in line for line in logs)
+    assert any(
+        "cmd_twist=[7.000, 8.000, 9.000, 10.000, 11.000, 12.000]" in line
+        for line in logs
+    )
 
 
 def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
@@ -423,9 +440,12 @@ def test_overlapped_replan_forces_and_extends_committed_path(
 ) -> None:
     # The planner must force a fresh inference every replan_steps ticks, splice a
     # new chunk more than once, and always keep a committed path extending at
-    # least replan_steps*dt past now so the sender is never left dry.
+    # least replan_steps*dt past now so the dispatcher is never left dry.
     action = [float(i) for i in range(19)]
     policy = _FakePolicy(action)
+    # Identify as diffusion so the per-family rollout config (replan_steps=4)
+    # applies instead of the shared defaults.
+    policy.config = SimpleNamespace(type="diffusion")
     robot = _FakeRobot("F1")
     settings = _settings(tmp_path)
     settings.policies.diffusion.rollout.replan_steps = 4
@@ -434,13 +454,13 @@ def test_overlapped_replan_forces_and_extends_committed_path(
 
     forces: list[bool] = []
     schedules: list[float] = []
-    real_schedule = _SenderController.schedule_chunk
+    real_replace = _WaypointDispatcher.replace_waypoints
 
-    def _recording_schedule(self, actions, target_times, now):
-        real_schedule(self, actions, target_times, now)
-        schedules.append(self._last_wp_time[0] - now)
+    def _recording_replace(self, actions, target_times, now):
+        real_replace(self, actions, target_times, now)
+        schedules.append(self._waypoints[-1].target_time - now)
 
-    monkeypatch.setattr(_SenderController, "schedule_chunk", _recording_schedule)
+    monkeypatch.setattr(_WaypointDispatcher, "replace_waypoints", _recording_replace)
 
     def _fake_predict(obs, pol, dev, pre, post, **kwargs):
         force = bool(kwargs.get("force_refresh"))
@@ -472,45 +492,50 @@ def test_overlapped_replan_forces_and_extends_committed_path(
     assert all(extent >= 4 * dt - 1e-6 for extent in schedules)
 
 
-def test_schedule_chunk_splices_over_committed_tail() -> None:
-    # A later chunk starting inside an earlier chunk's span replaces its tail:
-    # the interpolator's last waypoint follows chunk B, not chunk A.
+def test_replace_waypoints_replaces_undispatched_waypoints() -> None:
+    # A later chunk replaces every undispatched waypoint: the timeline
+    # tracks chunk B's grid and poses, not chunk A's.
     robot = _FakeRobot("F1")
     stop_event = threading.Event()
-    controller = _SenderController(
-        [robot], _pose_layout(), 200, stop_event, (0.25, 0.6, 1.0, 2.5)
+    dispatcher = _WaypointDispatcher(
+        [robot], _pose_layout(), stop_event, (0.25, 0.6, 1.0, 2.5)
     )
     dt = 0.05
     now = 100.0
     # Chunk A spans now+dt .. now+8dt.
     a_actions = [_unit_pose(float(k)) for k in range(8)]
     a_times = [now + (k + 1) * dt for k in range(8)]
-    controller.schedule_chunk(a_actions, a_times, now=now)
-    assert controller._last_wp_time[0] == pytest.approx(now + 8 * dt)
-    # Chunk B is issued mid-span (its waypoint 0 predates A's tail) and must trim
-    # A's tail, so the last waypoint tracks B's end, not A's.
+    dispatcher.replace_waypoints(a_actions, a_times, now=now)
+    assert len(dispatcher._waypoints) == 8
+    assert dispatcher._waypoints[-1].target_time == pytest.approx(now + 8 * dt)
+    # Chunk B is issued mid-span; A's overlapping tail is dropped, not merged.
     now_b = now + 2 * dt
     b_actions = [_unit_pose(100.0 + k) for k in range(8)]
     b_times = [now_b + (k + 1) * dt for k in range(8)]
-    controller.schedule_chunk(b_actions, b_times, now=now_b)
-    assert controller._last_wp_time[0] == pytest.approx(now_b + 8 * dt)
+    dispatcher.replace_waypoints(b_actions, b_times, now=now_b)
+    assert len(dispatcher._waypoints) == 8
+    assert dispatcher._waypoints[0].target_time == pytest.approx(now_b + dt)
+    assert dispatcher._waypoints[-1].target_time == pytest.approx(now_b + 8 * dt)
+    command = dispatcher._waypoints[0].commands[0]
+    assert command is not None
+    assert command.pose[0] == pytest.approx(100.0)
 
 
 def test_anchor_offset_keeps_first_waypoint_ahead_of_filter() -> None:
     # With inference latency < dt, offset 1 keeps waypoint 0 in the future so the
-    # whole chunk survives the sender's past-filter; offset 0 loses waypoint 0.
+    # whole chunk survives the dispatcher's past-filter; offset 0 loses waypoint 0.
     dt = 0.05
     latency = dt / 2  # inference finished before the k=0 waypoint's target time
     for anchor, expected in ((1, 8), (0, 7)):
         robot = _FakeRobot("F1")
-        controller = _SenderController(
-            [robot], _pose_layout(), 200, threading.Event(), (0.25, 0.6, 1.0, 2.5)
+        dispatcher = _WaypointDispatcher(
+            [robot], _pose_layout(), threading.Event(), (0.25, 0.6, 1.0, 2.5)
         )
         loop_start = 100.0
         actions = [_unit_pose(float(k)) for k in range(8)]
         target_times = [loop_start + (k + anchor) * dt for k in range(8)]
-        controller.schedule_chunk(actions, target_times, now=loop_start + latency)
-        assert controller._last_scheduled == expected
+        dispatcher.replace_waypoints(actions, target_times, now=loop_start + latency)
+        assert dispatcher._last_scheduled == expected
 
 
 def test_n_action_steps_override_applies_clamps_and_skips(tmp_path) -> None:
@@ -525,19 +550,19 @@ def test_n_action_steps_override_applies_clamps_and_skips(tmp_path) -> None:
     # In-range value is applied verbatim.
     policy = _policy()
     rollout_cfg.n_action_steps = 12
-    service._apply_rollout_overrides(policy, rollout_cfg)
+    service._apply_n_action_steps(policy, rollout_cfg)
     assert policy.config.n_action_steps == 12
 
     # Above horizon - n_obs_steps + 1 (= 15) is clamped.
     policy = _policy()
     rollout_cfg.n_action_steps = 20
-    service._apply_rollout_overrides(policy, rollout_cfg)
+    service._apply_n_action_steps(policy, rollout_cfg)
     assert policy.config.n_action_steps == 15
 
     # 0 leaves the checkpoint default untouched.
     policy = _policy()
     rollout_cfg.n_action_steps = 0
-    service._apply_rollout_overrides(policy, rollout_cfg)
+    service._apply_n_action_steps(policy, rollout_cfg)
     assert policy.config.n_action_steps == 8
 
 
