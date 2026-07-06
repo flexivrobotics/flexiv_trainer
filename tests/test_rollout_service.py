@@ -241,7 +241,7 @@ def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
     # Request a DDIM swap explicitly and confirm the override applies it.
     rollout_cfg = service._settings.policies.diffusion.rollout
     rollout_cfg.noise_scheduler_type = "DDIM"
-    rollout_cfg.num_inference_steps = 10
+    rollout_cfg.num_denoise_steps = 10
     service._apply_rollout_overrides(policy, rollout_cfg)
     assert isinstance(policy.diffusion.noise_scheduler, DDIMScheduler)
     assert policy.diffusion.num_inference_steps == 10

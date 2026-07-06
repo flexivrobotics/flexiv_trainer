@@ -111,14 +111,14 @@ class RolloutConfig(BaseModel):
     # Planner-loop tick rate: obs read + action pop per tick. Inference re-runs
     # every ``replan_steps`` ticks (overlapped replanning); set == action_dt_hz
     # so chunks play at real speed.
-    planner_hz: int = Field(default=30, ge=1, le=120)
+    planner_hz: int = Field(default=10, ge=1, le=120)
     max_steps: int = Field(default=0, ge=0)
     # Rate of the background sender that streams the interpolated pose spline to
     # the robot; SendCartesianMotionForce handles up to 1000 Hz, 100-200 is ideal.
     sender_hz: int = Field(default=200, ge=1, le=1000)
     # Time-spacing of poses within one predicted chunk = the training data rate.
     # A checkpoint property, not a loop rate; set to match the checkpoint.
-    action_dt_hz: int = Field(default=30, ge=1, le=120)
+    action_dt_hz: int = Field(default=10, ge=1, le=120)
     max_linear_vel: float = Field(default=0.25, gt=0)  # m/s
     max_angular_vel: float = Field(default=0.6, gt=0)  # rad/s
     max_linear_acc: float = Field(default=1.0, gt=0)  # m/s^2

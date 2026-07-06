@@ -34,7 +34,7 @@ class TrainingConfig(BaseModel):
     # steps than DDPM for the same weights -- fast enough to rollout in real time.
     noise_scheduler_type: Literal["DDPM", "DDIM"] = "DDIM"
     # Reverse-diffusion steps at inference; tunable without retraining.
-    num_inference_steps: int = Field(default=8, ge=1, le=1000)
+    num_denoise_steps: int = Field(default=8, ge=1, le=1000)
 
 
 class RolloutConfig(SharedRolloutConfig):
@@ -53,4 +53,4 @@ class RolloutConfig(SharedRolloutConfig):
 
     # "" = leave the checkpoint's own sampler/steps untouched.
     noise_scheduler_type: Literal["", "DDPM", "DDIM"] = "DDIM"
-    num_inference_steps: int = Field(default=5, ge=1, le=1000)
+    num_denoise_steps: int = Field(default=16, ge=1, le=1000)

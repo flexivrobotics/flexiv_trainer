@@ -497,7 +497,7 @@ class TrainingService:
                         "--policy.noise_scheduler_type",
                         diffusion.noise_scheduler_type,
                         "--policy.num_inference_steps",
-                        str(diffusion.num_inference_steps),
+                        str(diffusion.num_denoise_steps),
                     ]
                 )
             if extra_args:

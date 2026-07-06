@@ -567,7 +567,7 @@ class RolloutService:
         existing = getattr(diffusion, "noise_scheduler", None)
         if diffusion is None or existing is None:
             return  # not a diffusion policy; nothing to override
-        steps = getattr(rollout_cfg, "num_inference_steps", 0)
+        steps = getattr(rollout_cfg, "num_denoise_steps", 0)
         try:
             from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
                 _make_noise_scheduler,

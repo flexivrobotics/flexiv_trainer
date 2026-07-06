@@ -698,6 +698,13 @@ button:disabled {
     padding-left: 0.4rem;
 }
 
+.rollout-cameras {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    gap: 1rem;
+    min-width: 0;
+}
+
 .feed {
     --feed-media-aspect-ratio: 16 / 9;
     --teleop-card-gap: 0.58rem;
@@ -2290,6 +2297,11 @@ button:active {
     display: grid;
     gap: 1rem;
     min-height: 0;
+    min-width: 0;
+}
+
+.training-main > .panel {
+    min-width: 0;
 }
 
 /* Left-side control panel on the Training Run step. */
