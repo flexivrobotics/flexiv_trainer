@@ -116,11 +116,12 @@ def _predict_action_chunk(
     from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
 
     torch_device = torch.device(device)
+    queues = getattr(policy, "_queues", None)
+    action_queue = queues.get(ACTION) if isinstance(queues, dict) else None
+
     if force_refresh:
-        queues = getattr(policy, "_queues", None)
-        queue = queues.get(ACTION) if isinstance(queues, dict) else None
-        if queue is not None:
-            queue.clear()  # LeRobot re-infers from the current obs when empty
+        if action_queue is not None:
+            action_queue.clear()  # LeRobot re-infers from the current obs when empty
         else:
             global _FORCE_REFRESH_WARNED
             if not _FORCE_REFRESH_WARNED:
@@ -129,11 +130,14 @@ def _predict_action_chunk(
                     "Cannot force a fresh rollout inference",
                     "policy has no _queues[ACTION]; falling back to drain-refill",
                 )
-    fresh = len(policy._queues.get(ACTION, [])) == 0
+
+    # Policies without an ACTION queue (e.g. ACT) must be treated as always-fresh.
+    fresh = action_queue is None or len(action_queue) == 0
+
     first = predict_action(
         observation, policy, torch_device, preprocessor, postprocessor, use_amp=False
     )
-    tail = list(policy._queues.get(ACTION, []))
+    tail = list(action_queue) if action_queue is not None else []
     if not tail:
         return first.reshape(1, -1), fresh
     with torch.inference_mode():
