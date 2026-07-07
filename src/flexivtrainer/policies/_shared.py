@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Training-loop knobs shared by every policy (top-level ``lerobot-train`` flags)."""
+"""Config knobs shared by every policy family.
+
+``SharedTrainingConfig`` holds the train-loop knobs common to all families
+(top-level ``lerobot-train`` flags); each family's ``TrainingConfig`` subclasses
+it and adds family-specific knobs. ``SharedRolloutConfig`` holds the rollout
+knobs applied at load / in the planner loop; each family's ``RolloutConfig``
+subclasses it and adds its own sampler knobs (a bare ``SharedRolloutConfig`` is
+the default for families without their own rollout overrides).
+"""
 
 from __future__ import annotations
 
@@ -40,3 +48,17 @@ class SharedTrainingConfig(BaseModel):
         4, ge=0, le=32, description="dataloader procs; lower if /dev/shm errors",
         json_schema_extra={"flag": "--num_workers"},
     )
+
+
+class SharedRolloutConfig(BaseModel):
+    # Override the checkpoint's action-chunk length at load; 0 = keep the
+    # checkpoint default. Clamped best-effort to the family's valid range.
+    n_action_steps: int = Field(default=14, ge=0, le=64)
+    # Force a fresh inference every N planner ticks so a committed path always
+    # remains while the next chunk computes (overlapped replanning, as in the
+    # original diffusion_policy runner). 0 = auto (half the effective chunk,
+    # min 1).
+    replan_steps: int = Field(default=10, ge=0, le=64)
+    # Waypoint k targets loop_start + (k + offset) * dt; offset >= 1 keeps
+    # waypoint 0 ahead of the past-filter (inference latency would drop it).
+    action_anchor_offset_steps: int = Field(default=1, ge=0, le=8)

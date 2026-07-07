@@ -743,6 +743,13 @@ button:disabled {
     padding-left: 0.4rem;
 }
 
+.rollout-cameras {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    gap: 1rem;
+    min-width: 0;
+}
+
 .feed {
     --feed-media-aspect-ratio: 16 / 9;
     --teleop-card-gap: 0.58rem;
@@ -2335,6 +2342,11 @@ button:active {
     display: grid;
     gap: 1rem;
     min-height: 0;
+    min-width: 0;
+}
+
+.training-main > .panel {
+    min-width: 0;
 }
 
 /* Left-side control panel on the Training Run step. */
@@ -2409,6 +2421,36 @@ button:active {
 #training-content {
     display: grid;
     gap: 0.95rem;
+}
+
+#rollout-content {
+    display: grid;
+    gap: 0.95rem;
+}
+
+.rollout-checkpoint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+}
+
+.rollout-checkpoint__path {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rollout-checkpoint__full {
+    margin: 0.55rem 0 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    word-break: break-all;
+}
+
+.rollout-error {
+    color: #c0392b;
 }
 
 /* Reserve just enough space so the fixed floating playback bar never covers

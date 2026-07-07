@@ -14,18 +14,36 @@
 
 """Per-policy configuration, one module per policy family (diffusion, act, ...).
 
-Each family owns a ``TrainingConfig`` (train-time knobs, emitted as ``lerobot-train``
-flags) and a ``RolloutConfig`` (inference-time knobs). Field metadata (default, bounds,
-description) doubles as the Web UI form schema via ``training_field_schema``.
+Each family owns a ``TrainingConfig`` (train-time knobs, emitted as
+``lerobot-train`` flags) and a ``RolloutConfig`` (inference-time knobs). Field
+metadata (default, bounds, description) on the training config doubles as the
+Web UI form schema via ``training_field_schema``.
+
+``PolicyConfig`` is the tree the app settings mount under ``policies``: the main
+config only selects a policy, all family knobs live here. Callers reach a
+family's config through ``policies.<family>`` and share the family-agnostic
+rollout knobs via ``SharedRolloutConfig`` (``rollout_for``).
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal, get_args, get_origin
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from flexivtrainer.policies import act, diffusion, pi0, smolvla
+from flexivtrainer.policies._shared import SharedRolloutConfig
+
+__all__ = [
+    "PolicyConfig",
+    "SharedRolloutConfig",
+    "TRAINING_CONFIGS",
+    "training_field_schema",
+    "act",
+    "diffusion",
+    "pi0",
+    "smolvla",
+]
 
 TRAINING_CONFIGS: dict[str, type[BaseModel]] = {
     "diffusion": diffusion.TrainingConfig,
@@ -85,3 +103,23 @@ def training_field_schema(policy_type: str) -> list[dict[str, Any]]:
             }
         )
     return schema
+
+
+class DiffusionConfig(BaseModel):
+    """Training knobs (baked into checkpoint) + rollout knobs (applied at load)."""
+
+    training: diffusion.TrainingConfig = Field(
+        default_factory=diffusion.TrainingConfig
+    )
+    rollout: diffusion.RolloutConfig = Field(default_factory=diffusion.RolloutConfig)
+
+
+class PolicyConfig(BaseModel):
+    """Per-policy-family knobs; one sub-model per family."""
+
+    diffusion: DiffusionConfig = Field(default_factory=DiffusionConfig)
+
+    def rollout_for(self, policy_type: str) -> SharedRolloutConfig:
+        family = getattr(self, policy_type, None)
+        rollout = getattr(family, "rollout", None)
+        return rollout if rollout is not None else SharedRolloutConfig()

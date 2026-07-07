@@ -495,6 +495,10 @@ class TrainingService:
                     str(self._settings.training.save_frequency),
                 ]
             )
+            # Per-policy knobs (incl. the diffusion sampler baked into the
+            # checkpoint) come from the Web UI form as --policy.* flags via
+            # extra_args; training_field_schema() is the single source of the
+            # form's fields, flags and defaults.
             if extra_args:
                 command.extend(extra_args)
 

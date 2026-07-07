@@ -84,6 +84,23 @@ class _UnavailableRecordingService:
         return None
 
 
+class _UnavailableRolloutService:
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def status(self) -> dict[str, Any]:
+        return {"status": "idle", "checkpoint_path": None, "error": self._reason}
+
+    def start(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
+    def stop(self) -> dict[str, Any]:
+        return self.status()
+
+    def shutdown(self) -> None:
+        return None
+
+
 class RuntimeManager:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
@@ -110,6 +127,20 @@ class RuntimeManager:
                 settings, self.teleop, self.cameras, self.get_active_sides
             )
         self.training = TrainingService(settings)
+        try:
+            from flexivtrainer.rollout.service import RolloutService
+        except ImportError as exc:
+            self.rollout = _UnavailableRolloutService(
+                _optional_dependency_error("Policy rollout", exc)
+            )
+        else:
+            self.rollout = RolloutService(
+                settings,
+                self.cameras,
+                self.teleop,
+                self.get_teleop_robot_pairs,
+                self.get_active_sides,
+            )
         # Cache of constructed LeRobotDataset objects keyed by resolved path.
         # Building one parses metadata and the parquet index, which is far too
         # costly to repeat for every frame request during preview playback.
@@ -379,6 +410,7 @@ class RuntimeManager:
     def shutdown(self) -> None:
         shutdown_steps = [
             ("Training service", self.training.shutdown),
+            ("Rollout service", self.rollout.shutdown),
             ("Recording service", self.recording.shutdown),
             ("Teleoperation service", self.teleop.shutdown),
             ("Camera service", self.cameras.stop_streams),

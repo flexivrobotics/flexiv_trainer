@@ -12,31 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion-policy configuration.
+"""Diffusion-policy configuration: training knobs + rollout overrides.
 
-Defaults track the reference diffusion_policy recipe (DDIM sampler, resize+crop
-augmentation, compact U-Net) rather than LeRobot's larger defaults.
+``TrainingConfig`` holds the train-time knobs, emitted as ``lerobot-train``
+flags and rendered as the Web UI form (defaults track the reference
+diffusion_policy recipe -- DDIM sampler, resize+crop augmentation, compact
+U-Net -- rather than LeRobot's larger defaults). The denoising sampler is a
+policy property baked into the checkpoint at training time (LeRobot's
+``--policy.noise_scheduler_type``); training with DDIM lets rollout sample the
+same weights in far fewer steps without a DDPM->DDIM swap at load.
+
+``RolloutConfig`` holds the inference-time overrides applied when a checkpoint
+is loaded for rollout (``apply_rollout_overrides``), letting the sampler / step
+count be retuned without retraining.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
-from flexivtrainer.policies._shared import SharedTrainingConfig
-
-
-class RolloutConfig(BaseModel):
-    # Sampler baked into the checkpoint at train time. DDIM samples in far fewer
-    # steps than DDPM for the same weights -- fast enough to rollout in real time.
-    noise_scheduler_type: Literal["DDPM", "DDIM"] = "DDIM"
-    # Reverse-diffusion steps at inference; tunable without retraining.
-    num_inference_steps: int = Field(default=8, ge=1, le=1000)
+from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.policies._shared import SharedRolloutConfig, SharedTrainingConfig
 
 
 class TrainingConfig(SharedTrainingConfig):
-    # Diffusion policy knobs (mapped to --policy.<name>).
+    # Diffusion policy knobs (mapped to --policy.<name>). The sampler + step
+    # count are baked into the checkpoint at train time; both are UI-selectable
+    # here (defaults pre-filled) and emitted as --policy.* flags.
     noise_scheduler_type: Literal["DDIM", "DDPM"] = Field(
         "DDIM", description="DDIM or DDPM"
     )
@@ -53,3 +57,47 @@ class TrainingConfig(SharedTrainingConfig):
     down_dims: tuple[int, int, int] = Field(
         (256, 512, 1024), description="U-Net widths; smaller = less overfit"
     )
+
+
+class RolloutConfig(SharedRolloutConfig):
+    """Diffusion-policy rollout overrides applied at load."""
+
+    # "" = leave the checkpoint's own sampler/steps untouched.
+    noise_scheduler_type: Literal["", "DDPM", "DDIM"] = "DDIM"
+    num_denoise_steps: int = Field(default=16, ge=1, le=1000)
+
+
+def apply_rollout_overrides(policy: Any, rollout_cfg: RolloutConfig) -> bool:
+    """Apply diffusion-specific rollout overrides to a freshly loaded policy."""
+    scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
+    if not scheduler:
+        return False
+    diffusion = getattr(policy, "diffusion", None)
+    existing = getattr(diffusion, "noise_scheduler", None)
+    if diffusion is None or existing is None:
+        return False
+    steps = getattr(rollout_cfg, "num_denoise_steps", 0)
+    try:
+        from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
+            _make_noise_scheduler,
+        )
+
+        # Reuse the trained schedule so only the sampler family changes. A
+        # scheduler's full config carries family-specific keys the other family
+        # rejects, so pass the same kwargs LeRobot uses when building one.
+        cfg = existing.config
+        kwargs = dict(
+            num_train_timesteps=cfg.num_train_timesteps,
+            beta_start=cfg.beta_start,
+            beta_end=cfg.beta_end,
+            beta_schedule=cfg.beta_schedule,
+            clip_sample=cfg.clip_sample,
+            clip_sample_range=cfg.clip_sample_range,
+            prediction_type=cfg.prediction_type,
+        )
+        diffusion.noise_scheduler = _make_noise_scheduler(scheduler, **kwargs)
+        diffusion.num_inference_steps = steps
+    except Exception as exc:
+        warn("Failed to override diffusion scheduler", describe_exception(exc))
+        return False
+    return True

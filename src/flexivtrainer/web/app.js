@@ -24,7 +24,14 @@ const state = {
     trainingPolicies: null,
     trainingStatus: null,
     trainingDevices: null,
+    // Policy Rollout page state: selected checkpoint folder, the rollout
+    // service status snapshot, and its device selection (reuses the training
+    // device probe/state on the backend).
+    rolloutCheckpointPath: "",
+    rolloutStatus: null,
+    rolloutDevices: null,
     teleopBootstrapped: false,
+    rolloutBootstrapped: false,
     trainingBootstrapped: false,
     processingBootstrapped: false,
     processingStep: 1,
@@ -97,6 +104,7 @@ const state = {
     intervals: {
         teleop: null,
         training: null,
+        rollout: null,
         recordingSave: null,
         // View-independent robot-fault watcher (1s); the floating fault widget
         // must surface a fault no matter which page the user is on.
@@ -1982,7 +1990,9 @@ function setTrainingDeviceEvalBusy(busy) {
 
 function setActiveView(view) {
     state.activeView = view;
-    if (view !== "teleoperation") {
+    // Both the teleoperation and rollout views show live camera feeds; stop the
+    // frame pumps when navigating to any other view.
+    if (view !== "teleoperation" && view !== "rollout") {
         stopAllCameraFeeds();
     }
     document.querySelectorAll(".view").forEach((element) => {
@@ -1996,6 +2006,9 @@ function setActiveView(view) {
     });
     if (view === "teleoperation" && state.teleopStatus) {
         renderTeleop();
+    }
+    if (view === "rollout" && state.rolloutBootstrapped) {
+        renderRollout();
     }
 }
 
@@ -3966,6 +3979,9 @@ async function controlHomeService(serviceName, action, options = {}) {
 }
 
 function renderTeleop() {
+    if (state.activeView !== "teleoperation") {
+        return;
+    }
     const teleopStatus = state.teleopStatus || {
         teleop: { started: false, initialized: false, error: null },
         robot_data: { robots: {}, errors: {} },
@@ -5624,6 +5640,298 @@ async function bootstrapTraining() {
     refreshTrainingDevices({ silent: true }).catch((error) => showToast(error.message, true));
 }
 
+// ---------------------------------------------------------------------------
+// Policy Rollout
+// ---------------------------------------------------------------------------
+
+async function bootstrapRollout() {
+    if (!state.rolloutBootstrapped) {
+        try {
+            state.rolloutStatus = await api("/rollout/status");
+        } catch (error) {
+            showToast(error.message, true);
+        }
+        state.rolloutBootstrapped = true;
+    }
+    if (state.activeView === "rollout") {
+        renderRollout();
+    }
+    // Warm the device list (reuses the training device probe on the backend).
+    refreshRolloutDevices({ silent: true }).catch((error) => showToast(error.message, true));
+    startRolloutPolling();
+}
+
+async function refreshRolloutDevices(options = {}) {
+    const previous = state.rolloutDevices;
+    try {
+        state.rolloutDevices = await api(options.force ? "/rollout/devices?force=true" : "/rollout/devices");
+        return state.rolloutDevices;
+    } catch (error) {
+        state.rolloutDevices = previous;
+        if (!options.silent) {
+            throw error;
+        }
+        return state.rolloutDevices;
+    } finally {
+        if (state.activeView === "rollout") {
+            renderRollout();
+        }
+    }
+}
+
+function startRolloutPolling() {
+    window.clearInterval(state.intervals.rollout);
+    state.intervals.rollout = window.setInterval(async () => {
+        if (state.activeView !== "rollout") {
+            return;
+        }
+        try {
+            state.rolloutStatus = await api("/rollout/status");
+        } catch (_) {
+            return;
+        }
+        refreshTeleopStatus().catch(() => { });
+        renderRollout();
+    }, 1000);
+}
+
+function openCheckpointBrowser() {
+    const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "/";
+    openBrowser({
+        mode: "generic",
+        title: "Select Checkpoint",
+        startPath: trainingRoot,
+        rootPath: trainingRoot,
+        directoriesOnly: true,
+        multiSelect: false,
+        allowNavigation: true,
+        requireSelection: true,
+        emptyMessage: "No folders found.",
+        confirmLabel: "Select",
+        pathNote: "Training outputs directory",
+        eyebrow: "Select a trained policy",
+        onConfirm: async (paths) => {
+            const path = paths[0];
+            if (!path) {
+                return;
+            }
+            state.rolloutCheckpointPath = path;
+            closeBrowser();
+            renderRollout();
+        },
+    }).catch((error) => showToast(error.message, true));
+}
+
+async function startRolloutRun() {
+    const checkpoint = state.rolloutCheckpointPath;
+    if (!checkpoint) {
+        return;
+    }
+    state.rolloutStatus = await api("/rollout/start", {
+        method: "POST",
+        body: JSON.stringify({ checkpoint_path: checkpoint }),
+    });
+    renderRollout();
+}
+
+function renderRollout() {
+    const container = byId("rollout-content");
+    if (!container) {
+        return;
+    }
+    const status = state.rolloutStatus || { status: "idle", error: null };
+    const isRunning = status.status === "running";
+    const checkpoint = state.rolloutCheckpointPath;
+    const checkpointName = checkpoint ? checkpoint.split("/").pop() : "";
+    const canStart = !!checkpoint && !isRunning;
+
+    const devices = state.rolloutDevices || { configured: "auto", resolved: "cpu", devices: [] };
+    const configuredDevice = devices.configured || "auto";
+    const deviceOptions = (devices.devices || []).map((entry) => {
+        const selected = entry.name === configuredDevice ? " selected" : "";
+        const disabled = entry.name !== "auto" && !entry.available ? " disabled" : "";
+        return `<option value="${escapeHtml(entry.name)}"${selected}${disabled}>${escapeHtml(entry.name)}</option>`;
+    }).join("");
+    const selectedDevice = (devices.devices || []).find((entry) => entry.name === configuredDevice);
+    const deviceDetail = selectedDevice?.detail
+        || (configuredDevice === "auto" ? `Resolves to ${devices.resolved || "cpu"}` : "Select a device for inference");
+
+    const stateLabel = isRunning
+        ? "Running"
+        : status.status === "failed"
+            ? "Failed"
+            : status.stop_reason === "timeout"
+                ? "Stopped (step limit reached)"
+                : status.stop_reason === "stopped"
+                    ? "Stopped"
+                    : "Idle";
+    const primaryMarkup = isRunning ? TELEOP_STOP_MARKUP : TRAINING_START_MARKUP;
+    const primaryClass = isRunning ? "stop-button" : "start-button";
+
+    // Rebuild the content only when something it renders changed. The 1s poll
+    // calls this every tick; rebuilding unconditionally would destroy and
+    // recreate the camera container's live <img>, flashing it black each poll.
+    const renderKey = [
+        status.status, status.stop_reason || "", status.error || "",
+        checkpoint, configuredDevice, deviceOptions, deviceDetail,
+    ].join("|");
+    if (container.dataset.renderKey === renderKey) {
+        renderRolloutCameras();
+        renderRolloutTerminal();
+        return;
+    }
+    container.dataset.renderKey = renderKey;
+
+    container.innerHTML = `
+        <div class="training-layout">
+            <div class="training-sidebar">
+                <aside class="panel panel--soft control-panel training-device-panel">
+                    <div class="panel-header"><h2>Computation Device</h2></div>
+                    <div class="training-device-row">
+                        <label class="training-device-field" for="rollout-device-select">
+                            <select id="rollout-device-select" ${isRunning ? "disabled" : ""}>
+                                ${deviceOptions || `<option value="auto" selected>auto</option><option value="cpu">cpu</option>`}
+                            </select>
+                        </label>
+                        <button class="secondary-button icon-button training-device-reload" id="rollout-device-reload" type="button" aria-label="Evaluate devices" title="Evaluate devices">
+                            ${RESET_ICON_SVG}
+                        </button>
+                    </div>
+                    <p class="training-device-detail">${escapeHtml(deviceDetail)}</p>
+                </aside>
+                <aside class="panel panel--soft control-panel training-controls">
+                    <div class="panel-header"><h2>Rollout Control</h2></div>
+                    <div class="control-stack">
+                        <button id="rollout-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
+                            ${primaryMarkup}
+                        </button>
+                    </div>
+                    <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
+                    ${status.error ? `<p class="training-controls__state rollout-error">${escapeHtml(status.error)}</p>` : ""}
+                </aside>
+            </div>
+            <div class="training-main">
+                <section class="panel panel--soft">
+                    <div class="panel-header"><h2>Policy Checkpoint</h2></div>
+                    <div class="rollout-checkpoint">
+                        <code class="rollout-checkpoint__path">${checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected"}</code>
+                        <button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>
+                    </div>
+                    ${checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
+                </section>
+                <section class="panel panel--soft">
+                    <div class="panel-header"><h2>Policy Camera Input</h2></div>
+                    <div id="rollout-cameras" class="rollout-cameras"></div>
+                </section>
+                <section class="panel panel--soft">
+                    <div class="panel-header"><h2>Rollout Log</h2></div>
+                    <div class="log-pane" id="rollout-terminal-pane"></div>
+                </section>
+            </div>
+        </div>
+    `;
+
+    renderRolloutCameras();
+    renderRolloutTerminal();
+
+    const browseBtn = byId("rollout-browse");
+    if (browseBtn) {
+        browseBtn.onclick = () => openCheckpointBrowser();
+    }
+    const deviceSelect = byId("rollout-device-select");
+    if (deviceSelect) {
+        deviceSelect.onchange = async () => {
+            try {
+                state.rolloutDevices = await api("/rollout/devices", {
+                    method: "PUT",
+                    body: JSON.stringify({ device: deviceSelect.value || "auto" }),
+                });
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            renderRollout();
+        };
+    }
+    const deviceReload = byId("rollout-device-reload");
+    if (deviceReload) {
+        deviceReload.onclick = () => {
+            refreshRolloutDevices({ force: true }).catch((error) => showToast(error.message, true));
+        };
+    }
+    const primaryBtn = byId("rollout-primary-action");
+    if (primaryBtn) {
+        primaryBtn.onclick = async () => {
+            primaryBtn.disabled = true;
+            try {
+                if (isRunning) {
+                    state.rolloutStatus = await api("/rollout/stop", { method: "POST" });
+                } else {
+                    await startRolloutRun();
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+            renderRollout();
+        };
+    }
+}
+
+// Render the live camera feeds the policy consumes during rollout, using the
+// same /teleop/cameras/<name>/frame endpoint the rollout loop reads from, so
+// the operator sees exactly what the policy sees. The active cameras follow the
+// rollout's observation layout: the shared ego plus each active side's wrist.
+function renderRolloutCameras() {
+    const container = byId("rollout-cameras");
+    if (!container) {
+        return;
+    }
+    const cameraNames = ["ego", ...getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side])];
+    // Only rebuild the feed elements when the camera set changes; rebuilding on
+    // every poll would tear down the live <img> and restart the frame pump.
+    const renderKey = cameraNames.join(",");
+    if (container.dataset.renderKey !== renderKey) {
+        container.dataset.renderKey = renderKey;
+        container.innerHTML = cameraNames.map((name) => `
+            <div class="feed">
+                <div class="feed__header">
+                    <span class="feed__title">${escapeHtml(name)}</span>
+                    <strong class="feed__fps" id="rollout-${escapeHtml(name)}-fps">0.0 FPS</strong>
+                </div>
+                <div class="feed__placeholder feed__placeholder--awaiting" data-render-mode="awaiting">
+                    ${buildAwaitingDataMarkup()}
+                </div>
+            </div>
+        `).join("");
+    }
+    const cameras = state.teleopStatus?.cameras?.cameras || {};
+    cameraNames.forEach((name) => {
+        renderCameraFps(`rollout-${name}-fps`, name, cameras[name]);
+    });
+}
+
+function renderRolloutTerminal() {
+    const pane = byId("rollout-terminal-pane");
+    if (!pane) {
+        return;
+    }
+    const status = state.rolloutStatus || {};
+    const logs = Array.isArray(status.logs) ? status.logs : [];
+    if (!logs.length) {
+        pane.innerHTML = `<div class="terminal-log__empty">Rollout logs will appear here.</div>`;
+        return;
+    }
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
+    pane.innerHTML = logs
+        .map((line) => {
+            const entry = _parseTrainingLogEntry(line);
+            return _terminalLogRow(entry.level, entry.source, entry.message, entry.detail);
+        })
+        .join("");
+    if (atBottom) {
+        pane.scrollTop = pane.scrollHeight;
+    }
+}
+
 function bindGlobalEvents() {
     document.querySelectorAll("[data-nav]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -5640,6 +5948,9 @@ function bindGlobalEvents() {
             }
             if (target === "training") {
                 bootstrapTraining().catch((error) => showToast(error.message, true));
+            }
+            if (target === "rollout") {
+                bootstrapRollout().catch((error) => showToast(error.message, true));
             }
         });
     });
