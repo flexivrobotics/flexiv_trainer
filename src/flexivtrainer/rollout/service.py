@@ -22,6 +22,7 @@ RDK one, so rollout requires teleoperation to be shut down first.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import deque
@@ -54,6 +55,16 @@ _WRENCH_DIM = 6
 _FORCE_REFRESH_WARNED = False
 
 
+def _checkpoint_model_dir(checkpoint_path: str) -> Path:
+    path = Path(checkpoint_path)
+    model_dir = path.parent if path.is_file() else path
+    if not (model_dir / "config.json").exists():
+        nested = model_dir / "pretrained_model"
+        if (nested / "config.json").exists():
+            model_dir = nested
+    return model_dir
+
+
 def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
     """Load a LeRobot policy and its processors from a checkpoint directory."""
     from lerobot.configs.policies import PreTrainedConfig  # noqa: PLC0415
@@ -62,12 +73,7 @@ def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
         make_pre_post_processors,
     )
 
-    path = Path(checkpoint_path)
-    model_dir = path.parent if path.is_file() else path
-    if not (model_dir / "config.json").exists():
-        nested = model_dir / "pretrained_model"
-        if (nested / "config.json").exists():
-            model_dir = nested
+    model_dir = _checkpoint_model_dir(checkpoint_path)
     config = PreTrainedConfig.from_pretrained(model_dir)
     policy = get_policy_class(config.type).from_pretrained(model_dir)
     policy.to(device)
@@ -82,6 +88,55 @@ def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
         postprocessor_overrides=device_override,
     )
     return policy, preprocessor, postprocessor
+
+
+def _positive_float(value: Any) -> float | None:
+    if not isinstance(value, int | float):
+        return None
+    value = float(value)
+    return value if value > 0 else None
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _checkpoint_target_hz(checkpoint_path: str) -> float | None:
+    """Best-effort read of the dataset FPS baked into a LeRobot checkpoint."""
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+
+    train_config = _read_json(model_dir / "train_config.json") or {}
+    dataset = train_config.get("dataset") if isinstance(train_config, dict) else None
+    if isinstance(dataset, dict):
+        if fps := _positive_float(dataset.get("fps")):
+            return fps
+        root = dataset.get("root")
+        if isinstance(root, str) and root.strip():
+            dataset_root = Path(root).expanduser()
+            candidates = [dataset_root]
+            if not dataset_root.is_absolute():
+                candidates.append(Path.cwd() / dataset_root)
+                candidates.extend(parent / dataset_root for parent in model_dir.parents)
+            seen: set[Path] = set()
+            for candidate in candidates:
+                candidate = candidate.resolve(strict=False)
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                info = _read_json(candidate / "meta" / "info.json") or {}
+                if fps := _positive_float(info.get("fps")):
+                    return fps
+
+    # Future/alternate checkpoint formats may carry this directly.
+    config = _read_json(model_dir / "config.json") or {}
+    for key in ("fps", "dataset_fps", "action_dt_hz"):
+        if fps := _positive_float(config.get(key)):
+            return fps
+    return None
 
 
 def _default_robot_factory(serial: str) -> Any:
@@ -338,11 +393,14 @@ class RolloutService:
         self._robots: list[Any] = []
         self._device = "cpu"
         self._thread: threading.Thread | None = None
+        self._target_hz: float | None = None
         # Held so stop() can join the dispatcher before releasing the robots.
         self._dispatcher: _WaypointDispatcher | None = None
         self._stop_event = threading.Event()
         # UI-encoded log ring buffer exposed through status().
         self._logs: deque[str] = deque(maxlen=2000)
+        # Per-tick samples for the UI frequency chart.
+        self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
 
     # -- status -------------------------------------------------------------
 
@@ -361,6 +419,8 @@ class RolloutService:
                 "stop_reason": self._stop_reason,
                 "logs": list(self._logs),
                 "log_lines": len(self._logs),
+                "metrics": list(self._metrics),
+                "target_hz": self._target_hz,
             }
 
     def _append_log(
@@ -394,6 +454,13 @@ class RolloutService:
         ]
         if not followers:
             raise RuntimeError("No follower robot serial is configured")
+        target_hz = _checkpoint_target_hz(checkpoint_path)
+        if target_hz is None:
+            target_hz = float(self._settings.rollout.action_dt_hz)
+            warn(
+                "Checkpoint FPS metadata not found",
+                f"falling back to rollout.action_dt_hz={target_hz:.1f}",
+            )
 
         try:
             policy, preprocessor, postprocessor = self._policy_loader(
@@ -428,8 +495,10 @@ class RolloutService:
             self._stop_reason = None
             self._robots = robots
             self._device = device
+            self._target_hz = target_hz
             self._running = True
             self._logs.clear()
+            self._metrics.clear()
             self._logs.append(
                 _encode_ui_log(
                     "INFO",
@@ -451,7 +520,10 @@ class RolloutService:
                 )
         thread = threading.Thread(
             target=self._planner_loop,
-            args=(policy, preprocessor, postprocessor, robots, sides, rollout_cfg),
+            args=(
+                policy, preprocessor, postprocessor, robots, sides,
+                rollout_cfg, target_hz,
+            ),
             daemon=True,
             name="rollout-planner",
         )
@@ -633,13 +705,14 @@ class RolloutService:
         robots: list[Any],
         sides: list[str],
         rollout_cfg: Any,
+        target_hz: float,
     ) -> None:
         # Overrides run in start() before this reset(): reset() rebuilds the
         # ACTION deque at the (possibly overridden) n_action_steps maxlen.
         policy.reset()
         period = self._loop_period()
         # Chunk pose spacing: the dataset's recording period, not the loop period.
-        dt = 1.0 / float(self._settings.rollout.action_dt_hz)
+        dt = 1.0 / float(target_hz)
         anchor = rollout_cfg.action_anchor_offset_steps
         # Resolved on the first fresh chunk once its length is known (auto =
         # half the effective chunk); None means force every tick until then.
@@ -649,8 +722,7 @@ class RolloutService:
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
         log_every = max(1, int(self._settings.rollout.planner_hz // 2))
-        # Recent per-step work times (sleep excluded) for a smoothed actual Hz,
-        # plus the same window per pipeline stage for the timing breakdown.
+        # Recent per-step work times (sleep excluded) for the timing breakdown.
         work_times: deque[float] = deque(maxlen=10)
         stage_times: dict[str, deque[float]] = {
             name: deque(maxlen=10)
@@ -663,10 +735,18 @@ class RolloutService:
         # expose the 1-in-replan_steps refill spike that the smoothed window hides.
         infer_raw: deque[float] = deque(maxlen=log_every)
         dispatcher: _WaypointDispatcher | None = None
+        previous_loop_start: float | None = None
         step = 0
         try:
             while not self._stop_event.is_set():
                 loop_start = time.monotonic()
+                loop_period = (
+                    loop_start - previous_loop_start
+                    if previous_loop_start is not None
+                    else 0.0
+                )
+                actual_hz = 1.0 / loop_period if loop_period > 0 else 0.0
+                previous_loop_start = loop_start
                 # ``mark`` advances after each stage; ``now - mark`` is that
                 # stage's duration, recorded into its rolling window.
                 mark = loop_start
@@ -731,8 +811,9 @@ class RolloutService:
                 # device->host copy.
                 _cuda_sync(self._device)
                 now = time.monotonic()
-                stage_times["inference"].append(now - mark)
-                infer_raw.append(now - mark)
+                infer_seconds = now - mark
+                stage_times["inference"].append(infer_seconds)
+                infer_raw.append(infer_seconds)
                 mark = now
 
                 action_lists = self._actions_to_lists(actions)
@@ -768,9 +849,14 @@ class RolloutService:
                 stage_times["dispatch"].append(time.monotonic() - mark)
 
                 work_times.append(time.monotonic() - loop_start)
+                self._metrics.append({
+                    "t": round(loop_start, 3),
+                    "step": step,
+                    "hz": round(actual_hz, 2),
+                    "infer_ms": round(infer_seconds * 1000.0, 1),
+                    "fresh": bool(fresh),
+                })
                 if step % log_every == 0:
-                    mean_work = sum(work_times) / len(work_times)
-                    actual_hz = 1.0 / mean_work if mean_work > 0 else 0.0
                     self._log_timing(
                         step, stage_times, infer_raw, dispatcher._last_scheduled
                     )
@@ -911,7 +997,7 @@ class RolloutService:
                 cam_parts.append(f"{name}=MISSING")
             else:
                 cam_parts.append(f"{name}=ok(mean={float(np.asarray(image).mean()):.1f})")
-        expected_hz = float(self._settings.rollout.planner_hz)
+        expected_hz = float(self._target_hz or self._settings.rollout.action_dt_hz)
         cam_parts.append(f"freq={actual_hz:.1f}/{expected_hz:.1f}Hz")
         self._append_log("INFO", "ROLLOUT", f"step={step} obs", " ".join(cam_parts))
 
