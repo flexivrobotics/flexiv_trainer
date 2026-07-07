@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -21,7 +22,11 @@ import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
 from flexivtrainer.policies import diffusion as diffusion_policy
-from flexivtrainer.rollout.service import RolloutService, _WaypointDispatcher
+from flexivtrainer.rollout.service import (
+    RolloutService,
+    _checkpoint_target_hz,
+    _WaypointDispatcher,
+)
 
 
 class _FakeRobotStates:
@@ -147,6 +152,24 @@ def _checkpoint(tmp_path) -> str:
     path = tmp_path / "ckpt"
     path.mkdir()
     return str(path)
+
+
+def _checkpoint_with_dataset_fps(tmp_path, fps: int = 10) -> str:
+    dataset = tmp_path / "dataset"
+    meta = dataset / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"fps": fps}), encoding="utf-8")
+
+    model = tmp_path / "ckpt" / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(
+        json.dumps({"type": "diffusion"}), encoding="utf-8"
+    )
+    (model / "train_config.json").write_text(
+        json.dumps({"dataset": {"root": str(dataset)}}),
+        encoding="utf-8",
+    )
+    return str(tmp_path / "ckpt")
 
 
 def _make_service(tmp_path, *, policy, robot):
@@ -280,6 +303,12 @@ def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
     assert policy.diffusion.num_inference_steps == 100
 
 
+def test_checkpoint_target_hz_reads_training_dataset_fps(tmp_path) -> None:
+    checkpoint = _checkpoint_with_dataset_fps(tmp_path, fps=12)
+
+    assert _checkpoint_target_hz(checkpoint) == 12.0
+
+
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:
     """Start the loop and stop it after at least one command is sent."""
     service.start(checkpoint)
@@ -375,17 +404,24 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
-    _run_one_tick(service, robot, _checkpoint(tmp_path))
+    _run_one_tick(service, robot, _checkpoint_with_dataset_fps(tmp_path, fps=12))
 
-    expected_hz = service._settings.rollout.planner_hz
-    logs = service.status()["logs"]
-    # An obs row is logged on step 0 (0 % log_every == 0) carrying the expected
-    # frequency and a measured actual frequency, e.g. "freq=123.4/30.0Hz".
-    assert any(f"/{float(expected_hz):.1f}Hz" in line for line in logs)
+    status = service.status()
+    logs = status["logs"]
+    # An obs row is logged on step 0 (0 % log_every == 0) carrying the checkpoint
+    # target frequency and a measured actual frequency, e.g. "freq=9.8/12.0Hz".
+    assert any("/12.0Hz" in line for line in logs)
     assert any(
         "cmd_twist=[7.000, 8.000, 9.000, 10.000, 11.000, 12.000]" in line
         for line in logs
     )
+    metrics = status["metrics"]
+    assert isinstance(metrics, list) and metrics
+    for sample in metrics:
+        assert set(sample) >= {"t", "step", "hz", "infer_ms", "fresh"}
+        assert "sched" not in sample
+    assert any(sample["fresh"] is True for sample in metrics)
+    assert status["target_hz"] == 12.0
 
 
 def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:

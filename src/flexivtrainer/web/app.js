@@ -5716,6 +5716,8 @@ async function refreshRolloutDevices(options = {}) {
 
 function startRolloutPolling() {
     window.clearInterval(state.intervals.rollout);
+    // 330 ms keeps the Hz chart live; teleop status only needs ~1 Hz.
+    let tick = 0;
     state.intervals.rollout = window.setInterval(async () => {
         if (state.activeView !== "rollout") {
             return;
@@ -5725,9 +5727,12 @@ function startRolloutPolling() {
         } catch (_) {
             return;
         }
-        refreshTeleopStatus().catch(() => { });
+        if (tick % 3 === 0) {
+            refreshTeleopStatus().catch(() => { });
+        }
+        tick += 1;
         renderRollout();
-    }, 1000);
+    }, 330);
 }
 
 function openCheckpointBrowser() {
@@ -5813,6 +5818,7 @@ function renderRollout() {
     if (container.dataset.renderKey === renderKey) {
         renderRolloutCameras();
         renderRolloutTerminal();
+        renderRolloutMetrics();
         return;
     }
     container.dataset.renderKey = renderKey;
@@ -5859,6 +5865,13 @@ function renderRollout() {
                     <div id="rollout-cameras" class="rollout-cameras"></div>
                 </section>
                 <section class="panel panel--soft">
+                    <div class="panel-header">
+                        <h2>Inference Frequency</h2>
+                        <span class="feed__fps rollout-hz-badge" id="rollout-hz-badge"></span>
+                    </div>
+                    <div class="trend-chart rollout-hz-chart" id="rollout-hz-chart"></div>
+                </section>
+                <section class="panel panel--soft">
                     <div class="panel-header"><h2>Rollout Log</h2></div>
                     <div class="log-pane" id="rollout-terminal-pane"></div>
                 </section>
@@ -5868,6 +5881,7 @@ function renderRollout() {
 
     renderRolloutCameras();
     renderRolloutTerminal();
+    renderRolloutMetrics();
 
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {
@@ -5964,6 +5978,142 @@ function renderRolloutTerminal() {
         .join("");
     if (atBottom) {
         pane.scrollTop = pane.scrollHeight;
+    }
+}
+
+const ROLLOUT_HZ_CHART_WIDTH = 960;
+const ROLLOUT_HZ_CHART_HEIGHT = 300;
+const ROLLOUT_HZ_CHART_MARGIN = { left: 64, right: 22, top: 18, bottom: 46 };
+const ROLLOUT_HZ_CHART_SECONDS = 5;
+
+function niceRolloutHzTickStep(maxHz) {
+    const rawStep = Math.max(maxHz / 6, 1);
+    const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+    const scaled = rawStep / magnitude;
+    const nice = scaled <= 1 ? 1 : (scaled <= 2 ? 2 : (scaled <= 5 ? 5 : 10));
+    return nice * magnitude;
+}
+
+function formatRolloutHzTick(value) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function buildRolloutHzSvg(metrics, targetHz) {
+    const width = ROLLOUT_HZ_CHART_WIDTH;
+    const height = ROLLOUT_HZ_CHART_HEIGHT;
+    const { left, right, top, bottom } = ROLLOUT_HZ_CHART_MARGIN;
+    const innerWidth = width - left - right;
+    const innerHeight = height - top - bottom;
+    const lastT = metrics[metrics.length - 1].t;
+    const windowStart = Number.isFinite(lastT)
+        ? lastT - ROLLOUT_HZ_CHART_SECONDS
+        : 0;
+    const visibleMetrics = Number.isFinite(lastT)
+        ? metrics.filter((sample) => Number.isFinite(sample.t) && sample.t >= windowStart)
+        : metrics.slice(-Math.max(1, ROLLOUT_HZ_CHART_SECONDS * 10));
+
+    const hzValues = visibleMetrics.map((m) => m.hz).filter((v) => Number.isFinite(v));
+    const target = Number.isFinite(targetHz) && targetHz > 0 ? targetHz : 0;
+    const maxHz = Math.max(target, ...(hzValues.length ? hzValues : [0]));
+    const tickStep = niceRolloutHzTickStep(maxHz > 0 ? maxHz : 1);
+    const maxY = Math.max(tickStep, Math.ceil(maxHz / tickStep) * tickStep);
+    const xForSample = (sample, index) => {
+        if (Number.isFinite(lastT) && Number.isFinite(sample.t)) {
+            const ratio = Math.max(0, Math.min(1, (sample.t - windowStart) / ROLLOUT_HZ_CHART_SECONDS));
+            return left + innerWidth * ratio;
+        }
+        return left + (visibleMetrics.length === 1
+            ? innerWidth
+            : (innerWidth * index) / (visibleMetrics.length - 1));
+    };
+    const yFor = (hz) => top + (1 - hz / maxY) * innerHeight;
+
+    const lines = [];
+    const labels = [];
+
+    for (let index = 0; index <= ROLLOUT_HZ_CHART_SECONDS; index += 1) {
+        const x = left + (innerWidth * index) / ROLLOUT_HZ_CHART_SECONDS;
+        lines.push(`<line class="trend-chart__grid-line" x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}"></line>`);
+        const secondsAgo = ROLLOUT_HZ_CHART_SECONDS - index;
+        const tick = secondsAgo === 0 ? "0" : `-${secondsAgo}`;
+        labels.push(`<text class="trend-chart__axis" x="${x.toFixed(1)}" y="${height - bottom + 18}" text-anchor="middle">${tick}</text>`);
+    }
+    const yTickCount = Math.round(maxY / tickStep);
+    for (let index = 0; index <= yTickCount; index += 1) {
+        const value = maxY - tickStep * index;
+        const y = yFor(value);
+        lines.push(`<line class="trend-chart__grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}"></line>`);
+        labels.push(`<text class="trend-chart__axis" x="${left - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end">${formatRolloutHzTick(value)}</text>`);
+    }
+
+    labels.push(`<text class="trend-chart__axis-title" x="${(left + innerWidth / 2).toFixed(1)}" y="${height - 8}" text-anchor="middle">Time (s)</text>`);
+    const titleX = 16;
+    const titleY = top + innerHeight / 2;
+    labels.push(`<text class="trend-chart__axis-title" x="${titleX}" y="${titleY.toFixed(1)}" text-anchor="middle" transform="rotate(-90 ${titleX} ${titleY.toFixed(1)})">Actual rate (Hz)</text>`);
+
+    const targetMarkup = target > 0
+        ? `<line class="rollout-hz-chart__target" x1="${left}" y1="${yFor(target).toFixed(1)}" x2="${width - right}" y2="${yFor(target).toFixed(1)}"></line>`
+        : "";
+
+    let drawing = false;
+    let path = "";
+    visibleMetrics.forEach((sample, index) => {
+        if (!Number.isFinite(sample.hz)) {
+            drawing = false;
+            return;
+        }
+        const x = xForSample(sample, index);
+        const y = yFor(sample.hz);
+        path += `${drawing ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)} `;
+        drawing = true;
+    });
+    const lineMarkup = path.trim()
+        ? `<path class="trend-chart__line" style="--trend-color:#8de0ff" d="${path.trim()}"></path>`
+        : "";
+
+    return `
+        <svg class="trend-chart__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true">
+            <g>${lines.join("")}${labels.join("")}</g>
+            ${targetMarkup}
+            ${lineMarkup}
+        </svg>
+    `;
+}
+
+function renderRolloutMetrics() {
+    const chart = byId("rollout-hz-chart");
+    const badge = byId("rollout-hz-badge");
+    if (!chart) {
+        return;
+    }
+    const status = state.rolloutStatus || {};
+    const metrics = Array.isArray(status.metrics) ? status.metrics : [];
+    const targetHz = Number.isFinite(status.target_hz) ? status.target_hz : 0;
+    const latest = metrics.length ? metrics[metrics.length - 1] : null;
+    const latestHz = latest && Number.isFinite(latest.hz) ? latest.hz : 0;
+
+    if (!metrics.length) {
+        setMarkupIfChanged(
+            chart,
+            "rollout-hz:awaiting",
+            `<div class="trend-chart__empty">${buildAwaitingDataMarkup()}</div>`,
+        );
+        if (badge) {
+            badge.innerHTML = "";
+        }
+        return;
+    }
+
+    delete chart.dataset.renderKey;
+    chart.innerHTML = buildRolloutHzSvg(metrics, targetHz);
+
+    if (badge) {
+        const tone = resolveFpsTone(latestHz, targetHz * 0.9);
+        badge.className = `feed__fps rollout-hz-badge feed__fps--${tone}`;
+        badge.innerHTML = `
+            <span class="feed__fps-dot" aria-hidden="true"></span>
+            <span>${latestHz.toFixed(1)} / ${targetHz.toFixed(1)} Hz</span>
+        `;
     }
 }
 
