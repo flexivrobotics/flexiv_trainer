@@ -629,6 +629,34 @@ button:disabled {
     font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
     font-size: 0.9rem;
 }
+.policy-config-panel .text-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+.policy-config-panel .field-label--toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+}
+.policy-config-panel .field-label__text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.policy-config-panel .config-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex: none;
+    text-transform: none;
+    letter-spacing: normal;
+    font-size: 0.72rem;
+    cursor: pointer;
+}
+.policy-config-panel .config-toggle input {
+    cursor: pointer;
+}
 .policy-config-panel .config-tuple-row {
     display: flex;
     gap: 0.4rem;

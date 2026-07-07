@@ -4821,6 +4821,8 @@ function renderPolicyConfigPanel(policy) {
     const panel = byId("policy-config-panel");
     if (!panel || !policy || !Array.isArray(policy.fields)) return;
     const key = state.selectedPolicy;
+    const edits = (state.policyConfig[key] = state.policyConfig[key] || {});
+    const ensembleOn = !!edits.__temporal_ensemble;
     const rows = policy.fields.map((field) => {
         const value = policyFieldValue(key, field);
         const hint = field.min != null && field.max != null
@@ -4837,14 +4839,25 @@ function renderPolicyConfigPanel(policy) {
         } else if (field.type === "tuple") {
             control = `<div class="config-tuple-row">` + Array.from({ length: field.arity }, (_, i) =>
                 `<input class="text-input" type="number" data-field="${field.name}" data-index="${i}" value="${value[i]}" />`).join("") + `</div>`;
+        } else if (field.name === "temporal_ensemble_coeff") {
+            // Coeff input; checkbox rides in the label row (below).
+            control = `<input class="text-input" type="number" step="any" data-field="${field.name}" value="${value}" ${ensembleOn ? "" : "disabled"} />`;
+        } else if (field.name === "n_action_steps" && ensembleOn) {
+            control = `<input class="text-input" type="number" step="1" data-field="${field.name}" value="1" disabled />`;
         } else {
             const step = field.type === "float" ? "any" : "1";
             control = `<input class="text-input" type="number" step="${step}" data-field="${field.name}" value="${value}" />`;
         }
         const readout = field.name === "epochs"
             ? `<small class="field-hint" id="steps-readout"></small>` : "";
+        const label = field.name === "temporal_ensemble_coeff"
+            ? `<label class="field-label field-label--toggle">
+                <span class="field-label__text">${field.name}</span>
+                <span class="config-toggle"><input type="checkbox" data-toggle="temporal_ensemble" ${ensembleOn ? "checked" : ""} /> enable</span>
+            </label>`
+            : `<label class="field-label">${field.name}</label>`;
         return `<div class="config-field">
-            <label class="field-label">${field.name}</label>
+            ${label}
             ${control}
             ${hint ? `<small class="field-hint">${hint}</small>` : ""}
             ${readout}
@@ -4854,7 +4867,6 @@ function renderPolicyConfigPanel(policy) {
     panel.innerHTML = `<p class="eyebrow">Training Configuration</p>
         <div class="config-grid">${rows}</div>`;
 
-    const edits = (state.policyConfig[key] = state.policyConfig[key] || {});
     const updateStepsReadout = () => {
         const el = byId("steps-readout");
         if (!el) return;
@@ -4865,7 +4877,7 @@ function renderPolicyConfigPanel(policy) {
             : "load a dataset to compute steps";
     };
     panel.querySelectorAll("[data-field]").forEach((el) => {
-        el.oninput = el.onchange = () => {
+        el.oninput = el.onchange = (ev) => {
             const field = el.dataset.field;
             const idxAttr = el.dataset.index;
             if (idxAttr != null) {
@@ -4881,29 +4893,52 @@ function renderPolicyConfigPanel(policy) {
                 edits[field] = el.value;
             }
             if (field === "epochs" || field === "batch_size") updateStepsReadout();
+            // Clamp n_action_steps down to chunk_size on commit (n_action_steps <= chunk_size).
+            if (field === "chunk_size" && ev.type === "change" && !ensembleOn) {
+                const chunk = Number(edits.chunk_size);
+                const stepsField = policy.fields.find((f) => f.name === "n_action_steps");
+                const steps = Number(edits.n_action_steps ?? stepsField.default);
+                if (chunk >= 1 && steps > chunk) {
+                    edits.n_action_steps = chunk;
+                    renderPolicyConfigPanel(policy);
+                }
+            }
         };
     });
+    const toggle = panel.querySelector("[data-toggle='temporal_ensemble']");
+    if (toggle) {
+        toggle.onchange = () => {
+            edits.__temporal_ensemble = toggle.checked;
+            if (toggle.checked) edits.n_action_steps = 1;
+            else delete edits.n_action_steps;
+            renderPolicyConfigPanel(policy);
+        };
+    }
     updateStepsReadout();
 }
 
-// Diff each field against its schema default; emit [flag, value] for changed ones.
-// epochs -> --steps (converted); tuple -> "[a, b]"; bool/enum/number -> string.
+// Emit [flag, value] for every field so the form value is always authoritative
+// (never silently falls back to lerobot's default). tuple -> "[a, b]"; else string.
 function buildTrainingExtraArgs(policy) {
     const entry = state.trainingPolicies && state.trainingPolicies.policies[policy];
     if (!entry || !Array.isArray(entry.fields)) return [];
     const edits = state.policyConfig[policy] || {};
     const args = [];
     entry.fields.forEach((field) => {
-        // epochs always maps to a concrete --steps (default 100 epochs is intentional,
-        // not LeRobot's 100k step default), so always emit it when computable.
+        // epochs is converted to a concrete --steps rather than sent as-is.
         if (field.name === "epochs") {
             const steps = computeTrainingSteps(policy);
             if (steps) args.push(field.flag, String(steps));
             return;
         }
-        if (!(field.name in edits)) return;
-        const value = edits[field.name];
-        if (JSON.stringify(value) === JSON.stringify(field.default)) return;
+        // Coeff is emitted only when the ensemble checkbox is on (off = leave unset).
+        if (field.name === "temporal_ensemble_coeff") {
+            if (edits.__temporal_ensemble) {
+                args.push(field.flag, String(edits.temporal_ensemble_coeff ?? field.default));
+            }
+            return;
+        }
+        const value = field.name in edits ? edits[field.name] : field.default;
         if (field.type === "tuple") {
             args.push(field.flag, `[${value.join(", ")}]`);
         } else {

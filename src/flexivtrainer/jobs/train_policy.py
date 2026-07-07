@@ -491,14 +491,13 @@ class TrainingService:
                     str(output_dir),
                     "--job_name",
                     output_dir.name,
-                    "--save_freq",
-                    str(self._settings.training.save_frequency),
                 ]
             )
-            # Per-policy knobs (incl. the diffusion sampler baked into the
-            # checkpoint) come from the Web UI form as --policy.* flags via
-            # extra_args; training_field_schema() is the single source of the
-            # form's fields, flags and defaults.
+            # All tunable knobs (save_freq, batch, per-policy --policy.* flags, incl.
+            # the diffusion sampler baked into the checkpoint) come from the Web UI
+            # form via extra_args; training_field_schema() is the single source of the
+            # form's fields, flags and defaults. The form always emits every field, so
+            # nothing here needs a fixed fallback.
             if extra_args:
                 command.extend(extra_args)
 
