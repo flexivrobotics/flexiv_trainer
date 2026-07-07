@@ -12,17 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Rollout knobs common to every policy family.
+"""Config knobs shared by every policy family.
 
-Each family's ``RolloutConfig`` subclasses ``SharedRolloutConfig`` and adds its
-own sampler knobs; these three are applied at load / in the planner loop and
-apply to any family (a bare ``SharedRolloutConfig`` is the default for families
-without their own rollout overrides).
+``SharedTrainingConfig`` holds the train-loop knobs common to all families
+(top-level ``lerobot-train`` flags); each family's ``TrainingConfig`` subclasses
+it and adds family-specific knobs. ``SharedRolloutConfig`` holds the rollout
+knobs applied at load / in the planner loop; each family's ``RolloutConfig``
+subclasses it and adds its own sampler knobs (a bare ``SharedRolloutConfig`` is
+the default for families without their own rollout overrides).
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+
+
+class SharedTrainingConfig(BaseModel):
+    batch_size: int = Field(
+        64, ge=1, le=512, description="8-128; GPU-memory bound",
+        json_schema_extra={"flag": "--batch_size"},
+    )
+    epochs: int = Field(
+        100, ge=1, le=1000, description="50-300 typical; converted to --steps",
+        json_schema_extra={"flag": "--steps"},
+    )
+    save_freq: int = Field(
+        5000, ge=100, le=100000, description="checkpoint every N steps",
+        json_schema_extra={"flag": "--save_freq"},
+    )
+    log_freq: int = Field(
+        200, ge=1, le=10000, description="log every N steps",
+        json_schema_extra={"flag": "--log_freq"},
+    )
+    num_workers: int = Field(
+        4, ge=0, le=32, description="dataloader procs; lower if /dev/shm errors",
+        json_schema_extra={"flag": "--num_workers"},
+    )
 
 
 class SharedRolloutConfig(BaseModel):

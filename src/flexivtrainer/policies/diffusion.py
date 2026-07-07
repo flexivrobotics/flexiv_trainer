@@ -14,28 +14,49 @@
 
 """Diffusion-policy configuration: training knobs + rollout overrides.
 
-The denoising sampler is a policy property baked in at training time (LeRobot's
-``--policy.noise_scheduler_type``). Training with DDIM lets rollout sample the
-same weights in far fewer steps without the DDPM->DDIM swap at load; the step
-count is tunable at inference without retraining.
+``TrainingConfig`` holds the train-time knobs, emitted as ``lerobot-train``
+flags and rendered as the Web UI form (defaults track the reference
+diffusion_policy recipe -- DDIM sampler, resize+crop augmentation, compact
+U-Net -- rather than LeRobot's larger defaults). The denoising sampler is a
+policy property baked into the checkpoint at training time (LeRobot's
+``--policy.noise_scheduler_type``); training with DDIM lets rollout sample the
+same weights in far fewer steps without a DDPM->DDIM swap at load.
+
+``RolloutConfig`` holds the inference-time overrides applied when a checkpoint
+is loaded for rollout (``apply_rollout_overrides``), letting the sampler / step
+count be retuned without retraining.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from flexivtrainer.observability import describe_exception, warn
-from flexivtrainer.policies._shared import SharedRolloutConfig
+from flexivtrainer.policies._shared import SharedRolloutConfig, SharedTrainingConfig
 
 
-class TrainingConfig(BaseModel):
-    # Sampler baked into the checkpoint at train time. DDIM samples in far fewer
-    # steps than DDPM for the same weights -- fast enough to rollout in real time.
-    noise_scheduler_type: Literal["DDPM", "DDIM"] = "DDIM"
-    # Reverse-diffusion steps at inference; tunable without retraining.
-    num_denoise_steps: int = Field(default=8, ge=1, le=1000)
+class TrainingConfig(SharedTrainingConfig):
+    # Diffusion policy knobs (mapped to --policy.<name>). The sampler + step
+    # count are baked into the checkpoint at train time; both are UI-selectable
+    # here (defaults pre-filled) and emitted as --policy.* flags.
+    noise_scheduler_type: Literal["DDIM", "DDPM"] = Field(
+        "DDIM", description="DDIM or DDPM"
+    )
+    num_inference_steps: int = Field(8, ge=1, le=100, description="baked default; 5-16")
+    horizon: int = Field(16, ge=2, le=64, description="action-chunk length")
+    n_obs_steps: int = Field(2, ge=1, le=8, description="observation frames fed in")
+    n_action_steps: int = Field(
+        8, ge=1, le=48, description="<= horizon - n_obs_steps + 1"
+    )
+    resize_shape: tuple[int, int] = Field(
+        (240, 320), description="H,W; ~1/2 camera dims"
+    )
+    crop_shape: tuple[int, int] = Field((216, 288), description="H,W; ~90% of resize")
+    down_dims: tuple[int, int, int] = Field(
+        (256, 512, 1024), description="U-Net widths; smaller = less overfit"
+    )
 
 
 class RolloutConfig(SharedRolloutConfig):

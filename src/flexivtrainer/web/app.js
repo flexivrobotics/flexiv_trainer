@@ -67,6 +67,10 @@ const state = {
     mergedDatasetEpisodes: [],
     mergedDatasetScopeCache: {},
     selectedPolicy: "diffusion",
+    // Per-policy training-config edits, keyed by policy -> field name -> value.
+    // Seeded from each policy's schema defaults; only values differing from the
+    // default are sent as extra_args on start.
+    policyConfig: {},
     trainingOutputStamp: "",
     trainingLogView: {
         stickToBottom: true,
@@ -4464,6 +4468,7 @@ function renderTraining() {
                 <div class="policy-grid" id="policy-grid"></div>
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
             </div>
+            <div id="policy-config-panel"></div>
             <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
             <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
         `;
@@ -4479,6 +4484,7 @@ function renderTraining() {
             };
             grid.appendChild(card);
         });
+        renderPolicyConfigPanel(catalog.policies[state.selectedPolicy]);
         byId("policy-prev").onclick = () => {
             state.trainingStep = 2;
             renderTraining();
@@ -4795,6 +4801,153 @@ function getTrainingOutputDir() {
         : trainingRoot;
 }
 
+// Value stored for a field: the user's edit if present, else the schema default.
+function policyFieldValue(policy, field) {
+    const edits = state.policyConfig[policy] || {};
+    return field.name in edits ? edits[field.name] : field.default;
+}
+
+// steps = epochs * ceil(frames / batch_size); shown live under the epochs box.
+function computeTrainingSteps(policy) {
+    const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+    const edits = state.policyConfig[policy] || {};
+    const batch = Number(edits.batch_size ?? 64);
+    const epochs = Number(edits.epochs ?? 100);
+    if (!frames || !batch || !epochs) return 0;
+    return epochs * Math.ceil(frames / batch);
+}
+
+function renderPolicyConfigPanel(policy) {
+    const panel = byId("policy-config-panel");
+    if (!panel || !policy || !Array.isArray(policy.fields)) return;
+    const key = state.selectedPolicy;
+    const edits = (state.policyConfig[key] = state.policyConfig[key] || {});
+    const ensembleOn = !!edits.__temporal_ensemble;
+    const rows = policy.fields.map((field) => {
+        const value = policyFieldValue(key, field);
+        const hint = field.min != null && field.max != null
+            ? `Range: ${field.min}–${field.max}` : "";
+        let control;
+        if (field.type === "enum") {
+            const opts = (field.choices || []).map((c) =>
+                `<option value="${c}" ${c === value ? "selected" : ""}>${c}</option>`).join("");
+            control = `<select class="text-input" data-field="${field.name}">${opts}</select>`;
+        } else if (field.type === "bool") {
+            control = `<select class="text-input" data-field="${field.name}">
+                <option value="true" ${value ? "selected" : ""}>true</option>
+                <option value="false" ${!value ? "selected" : ""}>false</option></select>`;
+        } else if (field.type === "tuple") {
+            control = `<div class="config-tuple-row">` + Array.from({ length: field.arity }, (_, i) =>
+                `<input class="text-input" type="number" data-field="${field.name}" data-index="${i}" value="${value[i]}" />`).join("") + `</div>`;
+        } else if (field.name === "temporal_ensemble_coeff") {
+            // Coeff input; checkbox rides in the label row (below).
+            control = `<input class="text-input" type="number" step="any" data-field="${field.name}" value="${value}" ${ensembleOn ? "" : "disabled"} />`;
+        } else if (field.name === "n_action_steps" && ensembleOn) {
+            control = `<input class="text-input" type="number" step="1" data-field="${field.name}" value="1" disabled />`;
+        } else {
+            const step = field.type === "float" ? "any" : "1";
+            control = `<input class="text-input" type="number" step="${step}" data-field="${field.name}" value="${value}" />`;
+        }
+        const readout = field.name === "epochs"
+            ? `<small class="field-hint" id="steps-readout"></small>` : "";
+        const label = field.name === "temporal_ensemble_coeff"
+            ? `<label class="field-label field-label--toggle">
+                <span class="field-label__text">${field.name}</span>
+                <span class="config-toggle"><input type="checkbox" data-toggle="temporal_ensemble" ${ensembleOn ? "checked" : ""} /> enable</span>
+            </label>`
+            : `<label class="field-label">${field.name}</label>`;
+        return `<div class="config-field">
+            ${label}
+            ${control}
+            ${hint ? `<small class="field-hint">${hint}</small>` : ""}
+            ${readout}
+        </div>`;
+    }).join("");
+    panel.className = "policy-config-panel";
+    panel.innerHTML = `<p class="eyebrow">Training Configuration</p>
+        <div class="config-grid">${rows}</div>`;
+
+    const updateStepsReadout = () => {
+        const el = byId("steps-readout");
+        if (!el) return;
+        const steps = computeTrainingSteps(key);
+        const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+        el.textContent = steps
+            ? `= ${steps.toLocaleString()} steps (${edits.epochs ?? 100} epochs × ⌈${frames.toLocaleString()} frames / batch⌉)`
+            : "load a dataset to compute steps";
+    };
+    panel.querySelectorAll("[data-field]").forEach((el) => {
+        el.oninput = el.onchange = (ev) => {
+            const field = el.dataset.field;
+            const idxAttr = el.dataset.index;
+            if (idxAttr != null) {
+                const cur = Array.isArray(edits[field]) ? edits[field].slice()
+                    : policy.fields.find((f) => f.name === field).default.slice();
+                cur[Number(idxAttr)] = Number(el.value);
+                edits[field] = cur;
+            } else if (el.tagName === "SELECT" && (el.value === "true" || el.value === "false")) {
+                edits[field] = el.value === "true";
+            } else if (el.type === "number") {
+                edits[field] = Number(el.value);
+            } else {
+                edits[field] = el.value;
+            }
+            if (field === "epochs" || field === "batch_size") updateStepsReadout();
+            // Clamp n_action_steps down to chunk_size on commit (n_action_steps <= chunk_size).
+            if (field === "chunk_size" && ev.type === "change" && !ensembleOn) {
+                const chunk = Number(edits.chunk_size);
+                const stepsField = policy.fields.find((f) => f.name === "n_action_steps");
+                const steps = Number(edits.n_action_steps ?? stepsField.default);
+                if (chunk >= 1 && steps > chunk) {
+                    edits.n_action_steps = chunk;
+                    renderPolicyConfigPanel(policy);
+                }
+            }
+        };
+    });
+    const toggle = panel.querySelector("[data-toggle='temporal_ensemble']");
+    if (toggle) {
+        toggle.onchange = () => {
+            edits.__temporal_ensemble = toggle.checked;
+            if (toggle.checked) edits.n_action_steps = 1;
+            else delete edits.n_action_steps;
+            renderPolicyConfigPanel(policy);
+        };
+    }
+    updateStepsReadout();
+}
+
+// Emit [flag, value] for every field so the form value is always authoritative
+// (never silently falls back to lerobot's default). tuple -> "[a, b]"; else string.
+function buildTrainingExtraArgs(policy) {
+    const entry = state.trainingPolicies && state.trainingPolicies.policies[policy];
+    if (!entry || !Array.isArray(entry.fields)) return [];
+    const edits = state.policyConfig[policy] || {};
+    const args = [];
+    entry.fields.forEach((field) => {
+        // epochs is converted to a concrete --steps rather than sent as-is.
+        if (field.name === "epochs") {
+            const steps = computeTrainingSteps(policy);
+            if (steps) args.push(field.flag, String(steps));
+            return;
+        }
+        // Coeff is emitted only when the ensemble checkbox is on (off = leave unset).
+        if (field.name === "temporal_ensemble_coeff") {
+            if (edits.__temporal_ensemble) {
+                args.push(field.flag, String(edits.temporal_ensemble_coeff ?? field.default));
+            }
+            return;
+        }
+        const value = field.name in edits ? edits[field.name] : field.default;
+        if (field.type === "tuple") {
+            args.push(field.flag, `[${value.join(", ")}]`);
+        } else {
+            args.push(field.flag, String(value));
+        }
+    });
+    return args;
+}
+
 async function startTrainingRun(outputDir) {
     state.trainingOutputStamp = "";
     try {
@@ -4806,6 +4959,7 @@ async function startTrainingRun(outputDir) {
                 dataset_path: state.mergedDatasetPath,
                 output_dir: outputDir,
                 policy_type: state.selectedPolicy,
+                extra_args: buildTrainingExtraArgs(state.selectedPolicy),
             }),
         });
         renderTraining();

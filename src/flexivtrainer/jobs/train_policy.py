@@ -38,6 +38,7 @@ from flexivtrainer.observability import (
     stream,
     warn,
 )
+from flexivtrainer.policies import training_field_schema
 
 POLICY_CATALOG = {
     "diffusion": {
@@ -227,9 +228,15 @@ class TrainingService:
         self._device_probe_lock = threading.Lock()
 
     def list_policies(self) -> dict[str, Any]:
+        # Attach each policy's UI form schema (derived from its TrainingConfig) so
+        # the frontend can render config inputs without duplicating defaults.
+        policies = {
+            key: {**entry, "fields": training_field_schema(key)}
+            for key, entry in POLICY_CATALOG.items()
+        }
         return {
             "default": self._settings.training.default_policy,
-            "policies": POLICY_CATALOG,
+            "policies": policies,
             "device": self._settings.training.default_device,
         }
 
@@ -484,22 +491,13 @@ class TrainingService:
                     str(output_dir),
                     "--job_name",
                     output_dir.name,
-                    "--save_freq",
-                    str(self._settings.training.save_frequency),
                 ]
             )
-            if policy_type == "diffusion":
-                # Bake the sampler into the checkpoint (DDIM by default) so rollout
-                # samples in few steps without a load-time scheduler swap.
-                diffusion = self._settings.policies.diffusion.training
-                command.extend(
-                    [
-                        "--policy.noise_scheduler_type",
-                        diffusion.noise_scheduler_type,
-                        "--policy.num_inference_steps",
-                        str(diffusion.num_denoise_steps),
-                    ]
-                )
+            # All tunable knobs (save_freq, batch, per-policy --policy.* flags, incl.
+            # the diffusion sampler baked into the checkpoint) come from the Web UI
+            # form via extra_args; training_field_schema() is the single source of the
+            # form's fields, flags and defaults. The form always emits every field, so
+            # nothing here needs a fixed fallback.
             if extra_args:
                 command.extend(extra_args)
 
