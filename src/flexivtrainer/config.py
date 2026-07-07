@@ -21,6 +21,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from flexivtrainer.policies import PolicyConfig
+
 
 class TeleopRobotPair(BaseModel):
     leader_serial: str = ""
@@ -103,6 +105,21 @@ class TrainingConfig(BaseModel):
     # "mps" / "cpu" to force one.
     default_device: str = "auto"
     save_frequency: int = 5_000
+
+
+class RolloutConfig(BaseModel):
+    # Planner-loop tick rate: obs read + action pop per tick. Inference re-runs
+    # every ``replan_steps`` ticks (overlapped replanning); set == action_dt_hz
+    # so chunks play at real speed.
+    planner_hz: int = Field(default=10, ge=1, le=120)
+    max_steps: int = Field(default=0, ge=0)
+    # Time-spacing of poses within one predicted chunk = the training data rate.
+    # A checkpoint property, not a loop rate; set to match the checkpoint.
+    action_dt_hz: int = Field(default=10, ge=1, le=120)
+    max_linear_vel: float = Field(default=0.25, gt=0)  # m/s
+    max_angular_vel: float = Field(default=0.6, gt=0)  # rad/s
+    max_linear_acc: float = Field(default=1.0, gt=0)  # m/s^2
+    max_angular_acc: float = Field(default=2.5, gt=0)  # rad/s^2
 
 
 class EndEffectorSideConfig(BaseModel):
@@ -216,6 +233,8 @@ class AppSettings(BaseSettings):
     )
     storage: StorageConfig = Field(default_factory=StorageConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
+    policies: PolicyConfig = Field(default_factory=PolicyConfig)
+    rollout: RolloutConfig = Field(default_factory=RolloutConfig)
 
     @property
     def follower_robot_serials(self) -> list[str]:
