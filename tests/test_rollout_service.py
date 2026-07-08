@@ -27,6 +27,7 @@ from flexivtrainer.rollout.service import (
     RolloutService,
     _checkpoint_target_hz,
     _WaypointDispatcher,
+    _zero_ft_sensor,
 )
 
 
@@ -44,6 +45,8 @@ class _FakeRobot:
         self.serial = serial
         self.enabled = False
         self.mode = None
+        self.mode_history: list = []
+        self.primitives: list = []
         self.commands: list[tuple[list[float], list[float]]] = []
         self._fault = False
 
@@ -62,6 +65,16 @@ class _FakeRobot:
 
     def SwitchMode(self, mode) -> None:  # noqa: N802
         self.mode = mode
+        self.mode_history.append(mode)
+
+    def ExecutePrimitive(self, name, input_params) -> None:  # noqa: N802
+        self.primitives.append((name, input_params))
+
+    def primitive_states(self) -> dict:
+        return {"reachedTarget": 1}
+
+    def busy(self) -> bool:
+        return False
 
     def states(self):
         return _FakeRobotStates(base=1.0)
@@ -184,6 +197,51 @@ def _make_service(tmp_path, *, policy, robot):
         robot_factory=lambda serial: robot,
         resolve_device=lambda configured: "cpu",
     )
+
+
+def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
+    robot = service._connect_robot("F1")
+
+    assert robot.primitives == [("ZeroFTSensor", {})]
+    assert robot.mode_history == ["prim", "cmf"]
+
+
+def test_connect_robot_without_primitive_support(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+    class _NoPrimitiveRobot(_FakeRobot):
+        ExecutePrimitive = None  # firmware/stub lacking the primitive
+
+    robot = _NoPrimitiveRobot("F1")
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
+    connected = service._connect_robot("F1")
+
+    assert connected.mode_history == ["cmf"]
+
+
+def test_zero_ft_sensor_returns_false_without_primitive(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_PRIMITIVE_EXECUTION="prim"),
+    )
+
+    class _NoPrimitiveRobot(_FakeRobot):
+        ExecutePrimitive = None
+
+    assert not _zero_ft_sensor(_NoPrimitiveRobot("F1"), threading.Event())
 
 
 def test_start_refuses_when_teleop_initialized(tmp_path) -> None:

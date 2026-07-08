@@ -186,6 +186,42 @@ def _rdk_mode() -> Any:
     return flexivrdk.Mode
 
 
+def _zero_ft_sensor(
+    robot: Any, stop_event: threading.Event, timeout: float = 3.0
+) -> bool:
+    # Re-zero the F/T sensor bias (stale after a prior faulted rollout) via the
+    # ZeroFTSensor primitive, which requires NRT_PRIMITIVE_EXECUTION mode. A
+    # missing primitive/method degrades to a logged no-op rather than aborting.
+    execute = getattr(robot, "ExecutePrimitive", None)
+    if not callable(execute):
+        return False
+    try:
+        mode = _rdk_mode()
+        robot.SwitchMode(mode.NRT_PRIMITIVE_EXECUTION)
+        execute("ZeroFTSensor", {})
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if stop_event.is_set():
+                break
+            states = getattr(robot, "primitive_states", None)
+            done = False
+            if callable(states):
+                values = states()
+                if isinstance(values, dict):
+                    done = any(
+                        int(values.get(key, 0)) == 1
+                        for key in ("reachedTarget", "terminated")
+                    )
+            busy = getattr(robot, "busy", None)
+            if done or (callable(busy) and not busy()):
+                return True
+            stop_event.wait(0.05)
+    except Exception as exc:
+        warn("Failed to zero F/T sensor", describe_exception(exc))
+        return False
+    return True
+
+
 def _predict_action_chunk(
     observation: dict[str, Any],
     policy: Any,
@@ -654,6 +690,8 @@ class RolloutService:
         while not robot.operational():
             if self._stop_event.wait(0.1):
                 break
+        if _zero_ft_sensor(robot, self._stop_event):
+            self._append_log("INFO", "ROLLOUT", "F/T sensor zeroed", serial)
         mode = _rdk_mode()
         robot.SwitchMode(mode.NRT_CARTESIAN_MOTION_FORCE)
         return robot
