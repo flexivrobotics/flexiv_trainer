@@ -25,6 +25,8 @@ from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
 from flexivtrainer.rollout.service import (
     RolloutService,
+    _checkpoint_policy_type,
+    _checkpoint_requires_task,
     _checkpoint_target_hz,
     _WaypointDispatcher,
     _zero_ft_sensor,
@@ -411,6 +413,30 @@ def test_checkpoint_target_hz_reads_training_dataset_fps(tmp_path) -> None:
     checkpoint = _checkpoint_with_dataset_fps(tmp_path, fps=12)
 
     assert _checkpoint_target_hz(checkpoint) == 12.0
+
+
+def _checkpoint_of_type(tmp_path, policy_type: str) -> str:
+    model = tmp_path / "ckpt" / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(
+        json.dumps({"type": policy_type}), encoding="utf-8"
+    )
+    return str(tmp_path / "ckpt")
+
+
+def test_checkpoint_policy_type_and_requires_task(tmp_path) -> None:
+    vla = _checkpoint_of_type(tmp_path / "a", "multi_task_dit")
+    assert _checkpoint_policy_type(vla) == "multi_task_dit"
+    assert _checkpoint_requires_task(vla) is True
+
+    non_vla = _checkpoint_of_type(tmp_path / "b", "diffusion")
+    assert _checkpoint_policy_type(non_vla) == "diffusion"
+    assert _checkpoint_requires_task(non_vla) is False
+
+    # Unknown/missing type defaults to requiring a task (box stays available).
+    bare = tmp_path / "c"
+    bare.mkdir()
+    assert _checkpoint_requires_task(str(bare)) is True
 
 
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:

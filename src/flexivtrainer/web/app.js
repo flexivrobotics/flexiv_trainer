@@ -29,6 +29,7 @@ const state = {
     // device probe/state on the backend).
     rolloutCheckpointPath: "",
     rolloutTaskText: "",
+    rolloutRequiresTask: true,
     rolloutStatus: null,
     rolloutDevices: null,
     teleopBootstrapped: false,
@@ -5204,6 +5205,10 @@ function isEpisodeBrowserMode() {
     return state.pathBrowser.mode === "episodes";
 }
 
+function isCheckpointBrowserMode() {
+    return state.pathBrowser.mode === "checkpoint";
+}
+
 function getBrowserSelectablePaths() {
     return (state.pathBrowser.items || [])
         .filter((item) => {
@@ -5371,6 +5376,9 @@ async function refreshBrowser(path) {
     if (state.pathBrowser.annotateEpisodeDirs) {
         params.set("annotate_episode_dirs", "true");
     }
+    if (isCheckpointBrowserMode()) {
+        params.set("annotate_checkpoint_dirs", "true");
+    }
     const result = await api(`/datasets/browse?${params.toString()}`);
     state.pathBrowser.currentPath = result.path;
     state.pathBrowser.rootPath = result.root_path || state.pathBrowser.rootPath || result.path;
@@ -5456,10 +5464,19 @@ function renderBrowserList() {
         }
 
         const button = document.createElement("button");
-        button.className = "browser-item";
+        const isCheckpoint = !!item.is_checkpoint;
+        button.className = `browser-item${isCheckpoint ? " browser-item--checkpoint" : ""}`;
         button.type = "button";
         button.dataset.browserPath = item.path;
-        button.innerHTML = `<strong>${escapeHtml(item.name)}</strong><span>${item.is_dir ? "Directory" : "File"}</span>`;
+        if (isCheckpoint) {
+            const type = (item.checkpoint_type || "").toUpperCase();
+            const badge = type ? `<span class="browser-item__badge">(${escapeHtml(type)})</span>` : "";
+            button.innerHTML = `<strong>${escapeHtml(item.name)}</strong>${badge}`;
+        } else if (isCheckpointBrowserMode()) {
+            button.innerHTML = `<strong>${escapeHtml(item.name)}</strong>`;
+        } else {
+            button.innerHTML = `<strong>${escapeHtml(item.name)}</strong><span>${item.is_dir ? "Directory" : "File"}</span>`;
+        }
         button.onclick = () => {
             if (!item.is_dir && state.pathBrowser.directoriesOnly) {
                 return;
@@ -5470,7 +5487,8 @@ function renderBrowserList() {
                 setBrowserSelection([item.path]);
             }
         };
-        if (state.pathBrowser.allowNavigation) {
+        // Checkpoint dirs are terminal: single-click selects, no drilling in.
+        if (state.pathBrowser.allowNavigation && !isCheckpoint) {
             button.ondblclick = () => {
                 if (item.is_dir) {
                     refreshBrowser(item.path).catch((error) => showToast(error.message, true));
@@ -5766,7 +5784,7 @@ function startRolloutPolling() {
 function openCheckpointBrowser() {
     const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "/";
     openBrowser({
-        mode: "generic",
+        mode: "checkpoint",
         title: "Select Checkpoint",
         startPath: trainingRoot,
         rootPath: trainingRoot,
@@ -5774,22 +5792,25 @@ function openCheckpointBrowser() {
         multiSelect: false,
         allowNavigation: true,
         requireSelection: true,
-        emptyMessage: "No folders found.",
+        emptyMessage: "No checkpoints here — go up to a training run's checkpoints folder.",
         confirmLabel: "Select",
         pathNote: "Training outputs directory",
-        eyebrow: "Select a trained policy",
+        eyebrow: "Open a run's checkpoints folder, then pick a step (e.g. 034800)",
         onConfirm: async (paths) => {
             const path = paths[0];
             if (!path) {
                 return;
             }
             state.rolloutCheckpointPath = path;
-            // Prefill the task instruction from the checkpoint's dataset metadata.
+            // Prefill the task instruction from the checkpoint's dataset metadata;
+            // requires_task is false for non-language policies (diffusion, act).
             try {
                 const info = await api(`/rollout/checkpoint-info?path=${encodeURIComponent(path)}`);
                 state.rolloutTaskText = (info && info.task) || "";
+                state.rolloutRequiresTask = !(info && info.requires_task === false);
             } catch (error) {
                 state.rolloutTaskText = "";
+                state.rolloutRequiresTask = true;
             }
             closeBrowser();
             renderRollout();
@@ -5802,9 +5823,10 @@ async function startRolloutRun() {
     if (!checkpoint) {
         return;
     }
+    const task = state.rolloutRequiresTask ? state.rolloutTaskText || "" : "";
     state.rolloutStatus = await api("/rollout/start", {
         method: "POST",
-        body: JSON.stringify({ checkpoint_path: checkpoint, task: state.rolloutTaskText || "" }),
+        body: JSON.stringify({ checkpoint_path: checkpoint, task }),
     });
     renderRollout();
 }
@@ -5849,6 +5871,7 @@ function renderRollout() {
     const renderKey = [
         status.status, status.stop_reason || "", status.error || "",
         checkpoint, configuredDevice, deviceOptions, deviceDetail,
+        state.rolloutRequiresTask,
     ].join("|");
     if (container.dataset.renderKey === renderKey) {
         renderRolloutCameras();
@@ -5896,8 +5919,9 @@ function renderRollout() {
                     ${checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
                     <label class="field-label rollout-task-label" for="rollout-task">Task Instruction</label>
                     <textarea class="rollout-task-input" id="rollout-task" rows="3"
-                        placeholder="Task instruction (optional)" autocomplete="off"
-                        spellcheck="false" ${isRunning ? "disabled" : ""}></textarea>
+                        placeholder="${state.rolloutRequiresTask ? 'Task instruction (optional)' : 'This policy does not take a language input'}"
+                        autocomplete="off" spellcheck="false"
+                        ${isRunning || !state.rolloutRequiresTask ? "disabled" : ""}></textarea>
                 </section>
                 <section class="panel panel--soft">
                     <div class="panel-header"><h2>Policy Camera Input</h2></div>

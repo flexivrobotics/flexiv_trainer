@@ -169,6 +169,29 @@ def test_browse_path_expands_job_folders_into_episodes(tmp_path) -> None:
     assert "job_0" not in items
 
 
+def test_browse_path_annotates_checkpoint_dirs(tmp_path) -> None:
+    manager = _bare_manager(tmp_path)
+    run = manager.settings.storage.root / "run" / "checkpoints"
+    step = run / "034800"
+    model = step / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text('{"type": "diffusion"}', encoding="utf-8")
+    (run / "wandb").mkdir()
+
+    result = manager.browse_path(
+        path=run,
+        directories_only=True,
+        root_path=manager.settings.storage.root,
+        annotate_checkpoint_dirs=True,
+    )
+    items = {item["name"]: item for item in result["items"]}
+
+    assert items["034800"]["is_checkpoint"] is True
+    assert items["034800"]["checkpoint_type"] == "diffusion"
+    # Non-checkpoint siblings are not tagged.
+    assert "is_checkpoint" not in items["wandb"]
+
+
 def test_browse_path_annotates_created_time_for_sorting(tmp_path) -> None:
     # Every browsed entry carries a numeric "created" time so the episode picker
     # can sort by it; the flattened job episodes carry it too.

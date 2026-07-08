@@ -53,6 +53,9 @@ _ROLLOUT_OVERRIDES = {
     "multi_task_dit": dit_policy.apply_rollout_overrides,
 }
 
+# Policy families that condition on a language/task instruction (VLAs).
+_LANGUAGE_POLICY_TYPES = {"multi_task_dit", "smolvla", "pi0", "pi05"}
+
 # Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz]; tcp_twist (velocity) and
 # tcp_wrench are each 6-axis.
 _POSE_DIM = 7
@@ -172,6 +175,19 @@ def _checkpoint_task(checkpoint_path: str) -> str | None:
         if (candidate / "meta").exists():
             return first_dataset_task(candidate)
     return None
+
+
+def _checkpoint_policy_type(checkpoint_path: str) -> str | None:
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    config = _read_json(model_dir / "config.json") or {}
+    value = config.get("type")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _checkpoint_requires_task(checkpoint_path: str) -> bool:
+    # Unknown/missing type defaults to True so the task box stays available.
+    policy_type = _checkpoint_policy_type(checkpoint_path)
+    return policy_type is None or policy_type in _LANGUAGE_POLICY_TYPES
 
 
 def _default_robot_factory(serial: str) -> Any:

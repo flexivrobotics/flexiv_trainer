@@ -71,9 +71,17 @@ def start_rollout(
 
 @router.get("/checkpoint-info")
 def rollout_checkpoint_info(path: str) -> dict:
-    from flexivtrainer.rollout.service import _checkpoint_task
+    from flexivtrainer.rollout.service import (
+        _checkpoint_policy_type,
+        _checkpoint_requires_task,
+        _checkpoint_task,
+    )
 
-    return {"task": _checkpoint_task(path)}
+    return {
+        "task": _checkpoint_task(path),
+        "policy_type": _checkpoint_policy_type(path),
+        "requires_task": _checkpoint_requires_task(path),
+    }
 
 
 @router.post("/stop")

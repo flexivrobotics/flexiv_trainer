@@ -2296,7 +2296,20 @@ button:active {
 }
 
 .browser-item {
+    display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: 0.9rem;
+}
+
+.browser-item__badge {
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.78rem;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.1rem 0.55rem;
+    white-space: nowrap;
 }
 
 .browser-item--episode {
