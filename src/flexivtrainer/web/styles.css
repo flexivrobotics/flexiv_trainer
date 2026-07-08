@@ -1479,6 +1479,44 @@ button:disabled {
     cursor: not-allowed;
 }
 
+.control-stack textarea.text-input {
+    resize: vertical;
+    min-height: 4.4rem;
+}
+
+.rollout-task-label {
+    display: block;
+    margin: 0.75rem 0 0.35rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.rollout-task-input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    padding: 0.78rem 0.9rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.95rem;
+    resize: vertical;
+    min-height: 4.4rem;
+}
+
+.rollout-task-input:focus {
+    outline: none;
+    border-color: rgba(105, 185, 232, 0.55);
+    box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
+}
+
+.rollout-task-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 .record-save-button--progress {
     position: relative;
     overflow: hidden;

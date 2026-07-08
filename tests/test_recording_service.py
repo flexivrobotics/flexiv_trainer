@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -140,6 +142,8 @@ def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
     # The stored values match the snapshot's gripper states, identical in state
     # and action (recording reuses gripper.states() for both).
     frame = dataset[0]
+    # The provided task string is stamped into every recorded frame.
+    assert frame["task"] == "gripper recording test"
     state = np.asarray(frame["observation.state"])
     action = np.asarray(frame["action"])
     assert state[state_names.index("left_arm.gripper.width")] == pytest.approx(0.03)
@@ -209,6 +213,36 @@ def test_save_files_episode_under_job_subfolder(tmp_path) -> None:
     assert (expected_path / "marker").exists()
     # The episode lives under the job folder, not directly under episodes/.
     assert not (episodes_root / "20260101_120000").exists()
+
+
+def test_save_writes_task_description_into_info_json(tmp_path) -> None:
+    service = _awaiting_save_service(tmp_path, job_name="pick_place")
+    service._task = "pick up the red cube"
+    meta = service._staging_path / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(
+        '{"codebase_version": "v3.0", "fps": 10, "splits": {}}', encoding="utf-8"
+    )
+
+    result = service.save()
+
+    info = json.loads(
+        (Path(result["path"]) / "meta" / "info.json").read_text(encoding="utf-8")
+    )
+    assert info["description"] == "pick up the red cube"
+    # Existing keys survive and description lands right after fps.
+    assert info["fps"] == 10
+    keys = list(info)
+    assert keys.index("description") == keys.index("fps") + 1
+
+
+def test_save_skips_description_without_info_json(tmp_path) -> None:
+    service = _awaiting_save_service(tmp_path, job_name="pick_place")
+    service._task = "pick up the red cube"
+
+    result = service.save()
+
+    assert not (Path(result["path"]) / "meta" / "info.json").exists()
 
 
 def test_start_sanitizes_and_reports_job_name(tmp_path) -> None:

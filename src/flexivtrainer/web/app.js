@@ -28,6 +28,7 @@ const state = {
     // service status snapshot, and its device selection (reuses the training
     // device probe/state on the backend).
     rolloutCheckpointPath: "",
+    rolloutTaskText: "",
     rolloutStatus: null,
     rolloutDevices: null,
     teleopBootstrapped: false,
@@ -461,6 +462,29 @@ function saveCachedJobName(jobName) {
     }
     try {
         window.localStorage.setItem(JOB_NAME_STORAGE_KEY, value);
+    } catch (error) {
+        // Persistence is best-effort; ignore storage failures.
+    }
+}
+
+// localStorage key the last-used episode task description is cached under.
+const TASK_STORAGE_KEY = "flexivtrainer.lastTaskDescription";
+
+function loadCachedTask() {
+    try {
+        return (window.localStorage.getItem(TASK_STORAGE_KEY) || "").trim();
+    } catch (error) {
+        return "";
+    }
+}
+
+function saveCachedTask(task) {
+    const value = (task || "").trim();
+    if (!value) {
+        return;
+    }
+    try {
+        window.localStorage.setItem(TASK_STORAGE_KEY, value);
     } catch (error) {
         // Persistence is best-effort; ignore storage failures.
     }
@@ -3236,6 +3260,10 @@ function updateRecordingJobNameField(model) {
         model.kind === "stopped" ||
         !!state.ui.recordingStartBusy;
     field.disabled = locked;
+    const taskField = byId("record-task");
+    if (taskField) {
+        taskField.disabled = locked;
+    }
 }
 
 function updateRecordingToggleButton(model) {
@@ -5756,6 +5784,13 @@ function openCheckpointBrowser() {
                 return;
             }
             state.rolloutCheckpointPath = path;
+            // Prefill the task instruction from the checkpoint's dataset metadata.
+            try {
+                const info = await api(`/rollout/checkpoint-info?path=${encodeURIComponent(path)}`);
+                state.rolloutTaskText = (info && info.task) || "";
+            } catch (error) {
+                state.rolloutTaskText = "";
+            }
             closeBrowser();
             renderRollout();
         },
@@ -5769,7 +5804,7 @@ async function startRolloutRun() {
     }
     state.rolloutStatus = await api("/rollout/start", {
         method: "POST",
-        body: JSON.stringify({ checkpoint_path: checkpoint }),
+        body: JSON.stringify({ checkpoint_path: checkpoint, task: state.rolloutTaskText || "" }),
     });
     renderRollout();
 }
@@ -5859,6 +5894,10 @@ function renderRollout() {
                         <button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>
                     </div>
                     ${checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
+                    <label class="field-label rollout-task-label" for="rollout-task">Task Instruction</label>
+                    <textarea class="rollout-task-input" id="rollout-task" rows="3"
+                        placeholder="Task instruction (optional)" autocomplete="off"
+                        spellcheck="false" ${isRunning ? "disabled" : ""}></textarea>
                 </section>
                 <section class="panel panel--soft">
                     <div class="panel-header"><h2>Policy Camera Input</h2></div>
@@ -5886,6 +5925,14 @@ function renderRollout() {
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {
         browseBtn.onclick = () => openCheckpointBrowser();
+    }
+    const taskInput = byId("rollout-task");
+    if (taskInput) {
+        // Rebuilds re-fill from state; oninput keeps state without a rebuild.
+        taskInput.value = state.rolloutTaskText || "";
+        taskInput.oninput = () => {
+            state.rolloutTaskText = taskInput.value;
+        };
     }
     const deviceSelect = byId("rollout-device-select");
     if (deviceSelect) {
@@ -6267,6 +6314,10 @@ function bindGlobalEvents() {
         // cached, so the very first episode is still grouped.
         jobNameField.value = loadCachedJobName() || DEFAULT_JOB_NAME;
     }
+    const taskField = byId("record-task");
+    if (taskField && !taskField.value) {
+        taskField.value = loadCachedTask();
+    }
     byId("record-toggle").onclick = async () => {
         // The single toggle button stops an in-progress recording and otherwise
         // starts a new one, mirroring the teleop power control.
@@ -6292,13 +6343,19 @@ function bindGlobalEvents() {
             const jobName = (byId("record-job-name")?.value || "").trim() || DEFAULT_JOB_NAME;
             // Remember this job name so the next session resumes it.
             saveCachedJobName(jobName);
+            const task = (byId("record-task")?.value || "").trim();
+            saveCachedTask(task);
+            // Omit task when blank so the server default applies.
+            const startBody = {
+                recording_entries: state.recordingEntries,
+                job_name: jobName,
+            };
+            if (task) {
+                startBody.task = task;
+            }
             await api("/teleop/recording/start", {
                 method: "POST",
-                body: JSON.stringify({
-                    task: "Dual-arm Flexiv teleoperation demonstration",
-                    recording_entries: state.recordingEntries,
-                    job_name: jobName,
-                }),
+                body: JSON.stringify(startBody),
             });
         } catch (error) {
             showToast(error.message, true);

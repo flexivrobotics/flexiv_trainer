@@ -53,6 +53,24 @@ def test_act_field_schema_order_and_flags() -> None:
     assert by_name["n_decoder_layers"]["max"] == 12
 
 
+def test_multi_task_dit_field_schema() -> None:
+    schema = training_field_schema("multi_task_dit")
+    by_name = {f["name"]: f for f in schema}
+
+    assert by_name["objective"]["type"] == "enum"
+    assert by_name["objective"]["choices"] == ["diffusion", "flow_matching"]
+    assert by_name["noise_scheduler_type"]["type"] == "enum"
+    assert by_name["noise_scheduler_type"]["choices"] == ["DDPM", "DDIM"]
+    # Regression: typed as tuple|None these would degrade to type="str".
+    for name in ("image_resize_shape", "image_crop_shape"):
+        assert by_name[name]["type"] == "tuple"
+        assert by_name[name]["arity"] == 2
+    assert by_name["image_resize_shape"]["default"] == [240, 320]
+    assert by_name["horizon"]["flag"] == "--policy.horizon"
+    assert by_name["horizon"]["default"] == 10
+    assert by_name["vision_encoder_name"]["type"] == "str"
+
+
 def test_temporal_ensemble_coeff_is_float_not_optional_string() -> None:
     # Regression guard: modeling the coeff as float | None would make the schema
     # generator misclassify it as type="str" with a null default (a UnionType

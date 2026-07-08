@@ -18,7 +18,7 @@ dependencies = [
   "scipy>=1.11",
   "flexivrdk==1.9.2",
   "flexivtdk==1.6.1",
-  "lerobot==0.5.1",
+  "lerobot[multi-task-dit]==0.5.1",
   "pyrealsense2",
 ]
 

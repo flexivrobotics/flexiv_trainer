@@ -38,11 +38,20 @@ from flexivtrainer.data.lerobot_io import (
     build_features_from_sample,
     extract_recording_frame_values,
     extract_recording_images,
+    first_dataset_task,
     resolve_recording_image_names,
 )
 from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.policies import diffusion as diffusion_policy
+from flexivtrainer.policies import dit as dit_policy
+
+# Per-family rollout override hooks, dispatched by the loaded checkpoint's
+# policy type; the seam a future rollout-config UI can drive.
+_ROLLOUT_OVERRIDES = {
+    "diffusion": diffusion_policy.apply_rollout_overrides,
+    "multi_task_dit": dit_policy.apply_rollout_overrides,
+}
 
 # Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz]; tcp_twist (velocity) and
 # tcp_wrench are each 6-axis.
@@ -139,6 +148,32 @@ def _checkpoint_target_hz(checkpoint_path: str) -> float | None:
     return None
 
 
+def _checkpoint_task(checkpoint_path: str) -> str | None:
+    """Best-effort read of the task string of the dataset a checkpoint trained on."""
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    train_config = _read_json(model_dir / "train_config.json") or {}
+    dataset = train_config.get("dataset") if isinstance(train_config, dict) else None
+    if not isinstance(dataset, dict):
+        return None
+    root = dataset.get("root")
+    if not (isinstance(root, str) and root.strip()):
+        return None
+    dataset_root = Path(root).expanduser()
+    candidates = [dataset_root]
+    if not dataset_root.is_absolute():
+        candidates.append(Path.cwd() / dataset_root)
+        candidates.extend(parent / dataset_root for parent in model_dir.parents)
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve(strict=False)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if (candidate / "meta").exists():
+            return first_dataset_task(candidate)
+    return None
+
+
 def _default_robot_factory(serial: str) -> Any:
     import flexivrdk  # noqa: PLC0415
 
@@ -159,6 +194,7 @@ def _predict_action_chunk(
     postprocessor: Any,
     *,
     force_refresh: bool = False,
+    task: str | None = None,
 ) -> tuple[Any, bool]:
     """Run one inference cycle; return ``(chunk, fresh)``.
 
@@ -190,7 +226,8 @@ def _predict_action_chunk(
     fresh = action_queue is None or len(action_queue) == 0
 
     first = predict_action(
-        observation, policy, torch_device, preprocessor, postprocessor, use_amp=False
+        observation, policy, torch_device, preprocessor, postprocessor,
+        use_amp=False, task=task,
     )
     tail = list(action_queue) if action_queue is not None else []
     if not tail:
@@ -390,6 +427,7 @@ class RolloutService:
         # operator stop, or "timeout" when the max_steps budget was reached.
         self._stop_reason: str | None = None
         self._checkpoint_path: str | None = None
+        self._task: str | None = None
         self._robots: list[Any] = []
         self._device = "cpu"
         self._thread: threading.Thread | None = None
@@ -415,6 +453,7 @@ class RolloutService:
             return {
                 "status": status,
                 "checkpoint_path": self._checkpoint_path,
+                "task": self._task,
                 "error": self._error,
                 "stop_reason": self._stop_reason,
                 "logs": list(self._logs),
@@ -430,7 +469,11 @@ class RolloutService:
 
     # -- lifecycle ----------------------------------------------------------
 
-    def start(self, checkpoint_path: str) -> dict[str, Any]:
+    def start(
+        self, checkpoint_path: str, task: str | None = None
+    ) -> dict[str, Any]:
+        task = task.strip() if isinstance(task, str) else None
+        task = task or None
         with self._lock:
             if self._running:
                 raise RuntimeError("Rollout is already running")
@@ -474,8 +517,9 @@ class RolloutService:
             getattr(policy, "config", None), "type", None
         ) or getattr(policy, "name", "")
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
-        diffusion_overridden = diffusion_policy.apply_rollout_overrides(
-            policy, rollout_cfg
+        override_fn = _ROLLOUT_OVERRIDES.get(policy_type)
+        scheduler_overridden = (
+            override_fn(policy, rollout_cfg) if override_fn is not None else False
         )
         self._apply_n_action_steps(policy, rollout_cfg)
         robots: list[Any] = []
@@ -491,6 +535,7 @@ class RolloutService:
         self._stop_event.clear()
         with self._lock:
             self._checkpoint_path = checkpoint_path
+            self._task = task
             self._error = None
             self._stop_reason = None
             self._robots = robots
@@ -507,12 +552,12 @@ class RolloutService:
                     f"device={device} sides={'+'.join(sides)}",
                 )
             )
-            if diffusion_overridden:
+            if scheduler_overridden:
                 self._logs.append(
                     _encode_ui_log(
                         "INFO",
                         "ROLLOUT",
-                        "Diffusion scheduler overridden",
+                        "Scheduler overridden",
                         "scheduler="
                         f"{rollout_cfg.noise_scheduler_type} "
                         f"inference_steps={rollout_cfg.num_denoise_steps}",
@@ -522,7 +567,7 @@ class RolloutService:
             target=self._planner_loop,
             args=(
                 policy, preprocessor, postprocessor, robots, sides,
-                rollout_cfg, target_hz,
+                rollout_cfg, target_hz, task,
             ),
             daemon=True,
             name="rollout-planner",
@@ -706,6 +751,7 @@ class RolloutService:
         sides: list[str],
         rollout_cfg: Any,
         target_hz: float,
+        task: str | None = None,
     ) -> None:
         # Overrides run in start() before this reset(): reset() rebuilds the
         # ACTION deque at the (possibly overridden) n_action_steps maxlen.
@@ -806,6 +852,7 @@ class RolloutService:
                     preprocessor,
                     postprocessor,
                     force_refresh=force,
+                    task=task,
                 )
                 # Sync so async cuda inference is timed here, not at to_list's
                 # device->host copy.

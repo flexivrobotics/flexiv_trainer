@@ -25,6 +25,7 @@ router = APIRouter(prefix="/rollout", tags=["rollout"])
 
 class StartRolloutRequest(BaseModel):
     checkpoint_path: str
+    task: str = ""
 
 
 class RolloutDeviceRequest(BaseModel):
@@ -61,11 +62,18 @@ def start_rollout(
 ) -> dict:
     info("Rollout requested", f"checkpoint={request.checkpoint_path}")
     try:
-        result = runtime.rollout.start(request.checkpoint_path)
+        result = runtime.rollout.start(request.checkpoint_path, task=request.task)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     ok("Rollout started")
     return result
+
+
+@router.get("/checkpoint-info")
+def rollout_checkpoint_info(path: str) -> dict:
+    from flexivtrainer.rollout.service import _checkpoint_task
+
+    return {"task": _checkpoint_task(path)}
 
 
 @router.post("/stop")

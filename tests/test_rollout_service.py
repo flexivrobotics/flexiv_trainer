@@ -22,6 +22,7 @@ import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
 from flexivtrainer.policies import diffusion as diffusion_policy
+from flexivtrainer.policies import dit as dit_policy
 from flexivtrainer.rollout.service import (
     RolloutService,
     _checkpoint_target_hz,
@@ -303,6 +304,51 @@ def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
     assert policy.diffusion.num_inference_steps == 100
 
 
+def test_dit_scheduler_override_swaps_to_ddim(tmp_path) -> None:
+    pytest.importorskip("diffusers")
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+    from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+
+    ddpm = DDPMScheduler(
+        num_train_timesteps=100,
+        beta_schedule="squaredcos_cap_v2",
+        clip_sample=True,
+        prediction_type="epsilon",
+    )
+    # A DiT stand-in: config.objective string + objective module attributes.
+    policy = SimpleNamespace(
+        config=SimpleNamespace(objective="diffusion"),
+        objective=SimpleNamespace(noise_scheduler=ddpm, num_inference_steps=100),
+    )
+    rollout_cfg = _settings(tmp_path).policies.multi_task_dit.rollout
+    rollout_cfg.noise_scheduler_type = "DDIM"
+    rollout_cfg.num_denoise_steps = 10
+    assert dit_policy.apply_rollout_overrides(policy, rollout_cfg)
+    assert isinstance(policy.objective.noise_scheduler, DDIMScheduler)
+    assert policy.objective.num_inference_steps == 10
+    assert policy.objective.noise_scheduler.config.num_train_timesteps == 100
+
+
+def test_dit_scheduler_override_skips_flow_matching(tmp_path) -> None:
+    sentinel = object()
+    policy = SimpleNamespace(
+        config=SimpleNamespace(objective="flow_matching"),
+        objective=SimpleNamespace(noise_scheduler=sentinel, num_inference_steps=100),
+    )
+    rollout_cfg = _settings(tmp_path).policies.multi_task_dit.rollout
+    rollout_cfg.noise_scheduler_type = "DDIM"
+    assert not dit_policy.apply_rollout_overrides(policy, rollout_cfg)
+    assert policy.objective.noise_scheduler is sentinel
+    assert policy.objective.num_inference_steps == 100
+
+
+def test_rollout_for_multi_task_dit_returns_dit_config(tmp_path) -> None:
+    rollout_cfg = _settings(tmp_path).policies.rollout_for("multi_task_dit")
+    assert isinstance(rollout_cfg, dit_policy.RolloutConfig)
+    assert rollout_cfg.noise_scheduler_type == "DDIM"
+    assert rollout_cfg.num_denoise_steps == 10
+
+
 def test_checkpoint_target_hz_reads_training_dataset_fps(tmp_path) -> None:
     checkpoint = _checkpoint_with_dataset_fps(tmp_path, fps=12)
 
@@ -376,6 +422,64 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
         t.name == "rollout-dispatcher" and t.is_alive()
         for t in threading.enumerate()
     )
+
+
+def test_start_threads_task_into_prediction(tmp_path, monkeypatch) -> None:
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    tasks_seen: list = []
+
+    def _fake_predict(obs, pol, dev, pre, post, **kwargs):
+        tasks_seen.append(kwargs.get("task"))
+        return np.tile(pol.select_action(obs), (8, 1)), True
+
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path), task="pick up the cube")
+    deadline = time.monotonic() + 2.0
+    while not robot.commands and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.status()["task"] == "pick up the cube"
+    service.stop()
+
+    assert tasks_seen and tasks_seen[0] == "pick up the cube"
+
+
+def test_start_normalizes_blank_task_to_none(tmp_path, monkeypatch) -> None:
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    tasks_seen: list = []
+
+    def _fake_predict(obs, pol, dev, pre, post, **kwargs):
+        tasks_seen.append(kwargs.get("task"))
+        return np.tile(pol.select_action(obs), (8, 1)), True
+
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path), task="   ")
+    deadline = time.monotonic() + 2.0
+    while not robot.commands and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.status()["task"] is None
+    service.stop()
+
+    assert tasks_seen and tasks_seen[0] is None
 
 
 def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -> None:

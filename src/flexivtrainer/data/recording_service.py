@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import re
 import shutil
 import sys
@@ -35,6 +36,7 @@ from flexivtrainer.data.lerobot_io import (
     resolve_recording_image_names,
     resolve_recording_vcodec,
 )
+from flexivtrainer.observability import warn
 
 
 # Default training job name shown in the recording panel's Job name box and
@@ -238,6 +240,7 @@ class RecordingService:
             dataset = self._dataset
             frames_captured = self._frames_captured
             job_name = self._job_name or DEFAULT_JOB_NAME
+            task = self._task
             self._save_in_progress = True
             self._save_progress = 0
             self._error = None
@@ -270,6 +273,7 @@ class RecordingService:
             job_root.mkdir(parents=True, exist_ok=True)
             target_path = job_root / episode_name
             shutil.move(str(staging_path), str(target_path))
+            self._write_episode_description(target_path, task)
 
             with self._lock:
                 self._awaiting_save = False
@@ -309,6 +313,27 @@ class RecordingService:
             self._elapsed_s = 0.0
 
         return {"episode_name": episode_name, "discarded": True}
+
+    @staticmethod
+    def _write_episode_description(target_path: Path, task: str | None) -> None:
+        # Best-effort: info.json is LeRobot-owned, so only annotate an existing
+        # file; the same text survives merging via meta/tasks.parquet.
+        info_path = target_path / "meta" / "info.json"
+        if not task or not info_path.exists():
+            return
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            info.pop("description", None)
+            ordered = {}
+            for key, value in info.items():
+                ordered[key] = value
+                if key == "fps":
+                    ordered["description"] = task
+            if "description" not in ordered:
+                ordered["description"] = task
+            info_path.write_text(json.dumps(ordered, indent=2), encoding="utf-8")
+        except Exception as exc:
+            warn("Failed to write episode description", str(exc))
 
     def shutdown(self) -> None:
         if self._active:
