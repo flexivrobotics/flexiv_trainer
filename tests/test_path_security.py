@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from flexivtrainer.config import AppSettings, RobotSerialConfig, StorageConfig
+from flexivtrainer.rollout.service import resolve_checkpoint_path
 from flexivtrainer.runtime.manager import RuntimeManager
 
 
@@ -90,6 +91,22 @@ class TestPreviewDatasetSecurity:
 
         with pytest.raises(ValueError, match="Access denied"):
             manager.preview_dataset(tmp_path / ".." / ".." / "etc" / "passwd")
+
+
+class TestCheckpointPathSecurity:
+    def test_checkpoint_within_storage_root_succeeds(self, tmp_path: Path) -> None:
+        ckpt = tmp_path / "training" / "run" / "checkpoints" / "034800"
+        ckpt.mkdir(parents=True)
+
+        assert resolve_checkpoint_path(str(ckpt), tmp_path) == ckpt.resolve()
+
+    def test_checkpoint_outside_storage_root_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="Access denied"):
+            resolve_checkpoint_path("/etc", tmp_path)
+
+    def test_checkpoint_with_traversal_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="Access denied"):
+            resolve_checkpoint_path(str(tmp_path / ".." / ".." / "etc"), tmp_path)
 
 
 class TestMergeEpisodesSecurity:

@@ -63,6 +63,8 @@ def start_rollout(
     info("Rollout requested", f"checkpoint={request.checkpoint_path}")
     try:
         result = runtime.rollout.start(request.checkpoint_path, task=request.task)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     ok("Rollout started")
@@ -70,12 +72,20 @@ def start_rollout(
 
 
 @router.get("/checkpoint-info")
-def rollout_checkpoint_info(path: str) -> dict:
+def rollout_checkpoint_info(
+    path: str, runtime: RuntimeManager = Depends(get_runtime_manager)
+) -> dict:
     from flexivtrainer.rollout.service import (
         _checkpoint_policy_type,
         _checkpoint_requires_task,
         _checkpoint_task,
+        resolve_checkpoint_path,
     )
+
+    try:
+        resolve_checkpoint_path(path, runtime.settings.storage.root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     return {
         "task": _checkpoint_task(path),

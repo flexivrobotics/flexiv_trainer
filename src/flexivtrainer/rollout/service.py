@@ -77,6 +77,15 @@ def _checkpoint_model_dir(checkpoint_path: str) -> Path:
     return model_dir
 
 
+def resolve_checkpoint_path(checkpoint_path: str, storage_root: Path) -> Path:
+    """Reject a client checkpoint path that escapes the storage root."""
+    resolved = Path(checkpoint_path).expanduser().resolve()
+    root = storage_root.expanduser().resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"Access denied: path must be within storage root ({root})")
+    return resolved
+
+
 def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
     """Load a LeRobot policy and its processors from a checkpoint directory."""
     from lerobot.configs.policies import PreTrainedConfig  # noqa: PLC0415
@@ -537,6 +546,7 @@ class RolloutService:
                     "(it holds the robot connection)."
                 )
 
+        resolve_checkpoint_path(checkpoint_path, self._settings.storage.root)
         if not Path(checkpoint_path).exists():
             raise RuntimeError(f"Checkpoint not found: {checkpoint_path}")
 
