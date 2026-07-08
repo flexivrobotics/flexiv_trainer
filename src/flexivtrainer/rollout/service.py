@@ -739,8 +739,11 @@ class RolloutService:
                 return index
         return None
 
+    def _planner_hz(self) -> float:
+        return float(self._target_hz or self._settings.rollout.planner_hz)
+
     def _loop_period(self) -> float:
-        return 1.0 / float(self._settings.rollout.planner_hz)
+        return 1.0 / self._planner_hz()
 
     def _planner_loop(
         self,
@@ -767,7 +770,7 @@ class RolloutService:
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
-        log_every = max(1, int(self._settings.rollout.planner_hz // 2))
+        log_every = max(1, int(self._planner_hz() // 2))
         # Recent per-step work times (sleep excluded) for the timing breakdown.
         work_times: deque[float] = deque(maxlen=10)
         stage_times: dict[str, deque[float]] = {
