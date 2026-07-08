@@ -5464,13 +5464,13 @@ function renderBrowserList() {
         }
 
         const button = document.createElement("button");
-        const isCheckpoint = !!item.is_checkpoint;
-        button.className = `browser-item${isCheckpoint ? " browser-item--checkpoint" : ""}`;
+        const isStepCheckpoint = !!item.is_checkpoint;
+        const badgeType = (item.checkpoint_type || "").toUpperCase();
+        button.className = `browser-item${isStepCheckpoint ? " browser-item--checkpoint" : ""}`;
         button.type = "button";
         button.dataset.browserPath = item.path;
-        if (isCheckpoint) {
-            const type = (item.checkpoint_type || "").toUpperCase();
-            const badge = type ? `<span class="browser-item__badge">(${escapeHtml(type)})</span>` : "";
+        if (badgeType) {
+            const badge = `<span class="browser-item__badge">(${escapeHtml(badgeType)})</span>`;
             button.innerHTML = `<strong>${escapeHtml(item.name)}</strong>${badge}`;
         } else if (isCheckpointBrowserMode()) {
             button.innerHTML = `<strong>${escapeHtml(item.name)}</strong>`;
@@ -5487,8 +5487,8 @@ function renderBrowserList() {
                 setBrowserSelection([item.path]);
             }
         };
-        // Checkpoint dirs are terminal: single-click selects, no drilling in.
-        if (state.pathBrowser.allowNavigation && !isCheckpoint) {
+        // Step folders are terminal; run folders stay navigable.
+        if (state.pathBrowser.allowNavigation && !isStepCheckpoint) {
             button.ondblclick = () => {
                 if (item.is_dir) {
                     refreshBrowser(item.path).catch((error) => showToast(error.message, true));

@@ -171,25 +171,34 @@ def test_browse_path_expands_job_folders_into_episodes(tmp_path) -> None:
 
 def test_browse_path_annotates_checkpoint_dirs(tmp_path) -> None:
     manager = _bare_manager(tmp_path)
-    run = manager.settings.storage.root / "run" / "checkpoints"
-    step = run / "034800"
-    model = step / "pretrained_model"
+    training = manager.settings.storage.root
+    run = training / "act_run"
+    model = run / "checkpoints" / "034800" / "pretrained_model"
     model.mkdir(parents=True)
-    (model / "config.json").write_text('{"type": "diffusion"}', encoding="utf-8")
+    (model / "config.json").write_text('{"type": "act"}', encoding="utf-8")
     (run / "wandb").mkdir()
 
-    result = manager.browse_path(
-        path=run,
+    # Top level: the run folder is badged with its policy type, not the step.
+    top = manager.browse_path(
+        path=training,
         directories_only=True,
-        root_path=manager.settings.storage.root,
+        root_path=training,
         annotate_checkpoint_dirs=True,
     )
-    items = {item["name"]: item for item in result["items"]}
+    top_items = {item["name"]: item for item in top["items"]}
+    assert top_items["act_run"]["checkpoint_type"] == "act"
+    assert "is_checkpoint" not in top_items["act_run"]
 
-    assert items["034800"]["is_checkpoint"] is True
-    assert items["034800"]["checkpoint_type"] == "diffusion"
-    # Non-checkpoint siblings are not tagged.
-    assert "is_checkpoint" not in items["wandb"]
+    # Step level: the step folder is the terminal target, without a badge.
+    steps = manager.browse_path(
+        path=run / "checkpoints",
+        directories_only=True,
+        root_path=training,
+        annotate_checkpoint_dirs=True,
+    )
+    step_items = {item["name"]: item for item in steps["items"]}
+    assert step_items["034800"]["is_checkpoint"] is True
+    assert "checkpoint_type" not in step_items["034800"]
 
 
 def test_browse_path_annotates_created_time_for_sorting(tmp_path) -> None:

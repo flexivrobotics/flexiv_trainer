@@ -546,16 +546,25 @@ class RuntimeManager:
                 "created": _entry_created_time(child),
             }
             if annotate_checkpoint_dirs and child.is_dir():
-                is_ckpt = (child / "pretrained_model" / "config.json").exists() or (
+                from flexivtrainer.rollout.service import (  # noqa: PLC0415
+                    _checkpoint_policy_type,
+                )
+
+                # Step folder = terminal selection target; run folder = badged
+                # (policy type) but still navigable down to a step.
+                is_step = (child / "pretrained_model" / "config.json").exists() or (
                     child / "config.json"
                 ).exists()
-                if is_ckpt:
-                    from flexivtrainer.rollout.service import (  # noqa: PLC0415
-                        _checkpoint_policy_type,
-                    )
-
+                if is_step:
                     entry["is_checkpoint"] = True
-                    entry["checkpoint_type"] = _checkpoint_policy_type(str(child))
+                else:
+                    run_configs = sorted(
+                        child.glob("checkpoints/*/pretrained_model/config.json")
+                    )
+                    if run_configs:
+                        entry["checkpoint_type"] = _checkpoint_policy_type(
+                            str(run_configs[0].parent)
+                        )
             items.append(entry)
         return {
             "path": str(target),
