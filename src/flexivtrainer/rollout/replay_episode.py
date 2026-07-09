@@ -331,9 +331,11 @@ def _connect_robot(serial: str, stop_event: threading.Event) -> Any:
     """Connect/enable a Flexiv robot and switch to NRT Cartesian motion-force.
 
     Mirrors ``RolloutService._connect_robot``: clear fault, enable, wait until
-    operational, then ``SwitchMode(NRT_CARTESIAN_MOTION_FORCE)``.
+    operational, zero the F/T sensor, then ``SwitchMode(NRT_CARTESIAN_MOTION_FORCE)``.
     """
     import flexivrdk  # noqa: PLC0415
+
+    from flexivtrainer.rollout.service import _zero_ft_sensor  # noqa: PLC0415
 
     robot = flexivrdk.Robot(serial)
     if robot.fault():
@@ -342,6 +344,7 @@ def _connect_robot(serial: str, stop_event: threading.Event) -> Any:
     while not robot.operational():
         if stop_event.wait(0.1):
             break
+    _zero_ft_sensor(robot, stop_event)
     robot.SwitchMode(flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
     return robot
 

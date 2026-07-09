@@ -31,7 +31,7 @@ from typing import Any, Literal, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
-from flexivtrainer.policies import act, diffusion, pi0, smolvla
+from flexivtrainer.policies import act, diffusion, dit, pi0, smolvla
 from flexivtrainer.policies._shared import SharedRolloutConfig
 
 __all__ = [
@@ -41,6 +41,7 @@ __all__ = [
     "training_field_schema",
     "act",
     "diffusion",
+    "dit",
     "pi0",
     "smolvla",
 ]
@@ -50,6 +51,7 @@ TRAINING_CONFIGS: dict[str, type[BaseModel]] = {
     "act": act.TrainingConfig,
     "smolvla": smolvla.TrainingConfig,
     "pi0": pi0.TrainingConfig,
+    "multi_task_dit": dit.TrainingConfig,
 }
 
 
@@ -114,10 +116,18 @@ class DiffusionConfig(BaseModel):
     rollout: diffusion.RolloutConfig = Field(default_factory=diffusion.RolloutConfig)
 
 
+class DiTConfig(BaseModel):
+    """Training knobs (baked into checkpoint) + rollout knobs (applied at load)."""
+
+    training: dit.TrainingConfig = Field(default_factory=dit.TrainingConfig)
+    rollout: dit.RolloutConfig = Field(default_factory=dit.RolloutConfig)
+
+
 class PolicyConfig(BaseModel):
     """Per-policy-family knobs; one sub-model per family."""
 
     diffusion: DiffusionConfig = Field(default_factory=DiffusionConfig)
+    multi_task_dit: DiTConfig = Field(default_factory=DiTConfig)
 
     def rollout_for(self, policy_type: str) -> SharedRolloutConfig:
         family = getattr(self, policy_type, None)

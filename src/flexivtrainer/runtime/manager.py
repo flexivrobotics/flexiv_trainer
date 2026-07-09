@@ -495,6 +495,7 @@ class RuntimeManager:
         *,
         root_path: Path | None = None,
         annotate_episode_dirs: bool = False,
+        annotate_checkpoint_dirs: bool = False,
     ) -> dict[str, Any]:
         storage_root = self.settings.storage.root.expanduser().resolve()
         restricted_root = (root_path or storage_root).expanduser().resolve()
@@ -538,14 +539,33 @@ class RuntimeManager:
                     }
                 )
                 continue
-            items.append(
-                {
-                    "name": child.name,
-                    "path": str(child),
-                    "is_dir": child.is_dir(),
-                    "created": _entry_created_time(child),
-                }
-            )
+            entry = {
+                "name": child.name,
+                "path": str(child),
+                "is_dir": child.is_dir(),
+                "created": _entry_created_time(child),
+            }
+            if annotate_checkpoint_dirs and child.is_dir():
+                from flexivtrainer.rollout.service import (  # noqa: PLC0415
+                    _checkpoint_policy_type,
+                )
+
+                # Step folder = terminal selection target; run folder = badged
+                # (policy type) but still navigable down to a step.
+                is_step = (child / "pretrained_model" / "config.json").exists() or (
+                    child / "config.json"
+                ).exists()
+                if is_step:
+                    entry["is_checkpoint"] = True
+                else:
+                    run_configs = sorted(
+                        child.glob("checkpoints/*/pretrained_model/config.json")
+                    )
+                    if run_configs:
+                        entry["checkpoint_type"] = _checkpoint_policy_type(
+                            str(run_configs[0].parent)
+                        )
+            items.append(entry)
         return {
             "path": str(target),
             "root_path": str(restricted_root),

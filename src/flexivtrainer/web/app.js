@@ -28,6 +28,8 @@ const state = {
     // service status snapshot, and its device selection (reuses the training
     // device probe/state on the backend).
     rolloutCheckpointPath: "",
+    rolloutTaskText: "",
+    rolloutRequiresTask: true,
     rolloutStatus: null,
     rolloutDevices: null,
     teleopBootstrapped: false,
@@ -142,6 +144,10 @@ const state = {
         serviceConnectBusy: {
             teleop: false,
             cameras: false,
+        },
+        rolloutServiceBusy: {
+            teleop: null,
+            cameras: null,
         },
     },
     telemetryHistory: {
@@ -461,6 +467,29 @@ function saveCachedJobName(jobName) {
     }
     try {
         window.localStorage.setItem(JOB_NAME_STORAGE_KEY, value);
+    } catch (error) {
+        // Persistence is best-effort; ignore storage failures.
+    }
+}
+
+// localStorage key the last-used episode task description is cached under.
+const TASK_STORAGE_KEY = "flexivtrainer.lastTaskDescription";
+
+function loadCachedTask() {
+    try {
+        return (window.localStorage.getItem(TASK_STORAGE_KEY) || "").trim();
+    } catch (error) {
+        return "";
+    }
+}
+
+function saveCachedTask(task) {
+    const value = (task || "").trim();
+    if (!value) {
+        return;
+    }
+    try {
+        window.localStorage.setItem(TASK_STORAGE_KEY, value);
     } catch (error) {
         // Persistence is best-effort; ignore storage failures.
     }
@@ -3236,6 +3265,10 @@ function updateRecordingJobNameField(model) {
         model.kind === "stopped" ||
         !!state.ui.recordingStartBusy;
     field.disabled = locked;
+    const taskField = byId("record-task");
+    if (taskField) {
+        taskField.disabled = locked;
+    }
 }
 
 function updateRecordingToggleButton(model) {
@@ -3657,8 +3690,8 @@ function updateGripperInitButton(teleop) {
     button.title = !initialized
         ? "Connect teleoperation first"
         : started
-          ? "Stop teleoperation before initializing grippers"
-          : "";
+            ? "Stop teleoperation before initializing grippers"
+            : "";
 }
 
 async function initGrippers() {
@@ -5176,6 +5209,10 @@ function isEpisodeBrowserMode() {
     return state.pathBrowser.mode === "episodes";
 }
 
+function isCheckpointBrowserMode() {
+    return state.pathBrowser.mode === "checkpoint";
+}
+
 function getBrowserSelectablePaths() {
     return (state.pathBrowser.items || [])
         .filter((item) => {
@@ -5343,6 +5380,9 @@ async function refreshBrowser(path) {
     if (state.pathBrowser.annotateEpisodeDirs) {
         params.set("annotate_episode_dirs", "true");
     }
+    if (isCheckpointBrowserMode()) {
+        params.set("annotate_checkpoint_dirs", "true");
+    }
     const result = await api(`/datasets/browse?${params.toString()}`);
     state.pathBrowser.currentPath = result.path;
     state.pathBrowser.rootPath = result.root_path || state.pathBrowser.rootPath || result.path;
@@ -5428,10 +5468,19 @@ function renderBrowserList() {
         }
 
         const button = document.createElement("button");
-        button.className = "browser-item";
+        const isStepCheckpoint = !!item.is_checkpoint;
+        const badgeType = (item.checkpoint_type || "").toUpperCase();
+        button.className = `browser-item${isStepCheckpoint ? " browser-item--checkpoint" : ""}`;
         button.type = "button";
         button.dataset.browserPath = item.path;
-        button.innerHTML = `<strong>${escapeHtml(item.name)}</strong><span>${item.is_dir ? "Directory" : "File"}</span>`;
+        if (badgeType) {
+            const badge = `<span class="browser-item__badge">(${escapeHtml(badgeType)})</span>`;
+            button.innerHTML = `<strong>${escapeHtml(item.name)}</strong>${badge}`;
+        } else if (isCheckpointBrowserMode()) {
+            button.innerHTML = `<strong>${escapeHtml(item.name)}</strong>`;
+        } else {
+            button.innerHTML = `<strong>${escapeHtml(item.name)}</strong><span>${item.is_dir ? "Directory" : "File"}</span>`;
+        }
         button.onclick = () => {
             if (!item.is_dir && state.pathBrowser.directoriesOnly) {
                 return;
@@ -5442,7 +5491,8 @@ function renderBrowserList() {
                 setBrowserSelection([item.path]);
             }
         };
-        if (state.pathBrowser.allowNavigation) {
+        // Step folders are terminal; run folders stay navigable.
+        if (state.pathBrowser.allowNavigation && !isStepCheckpoint) {
             button.ondblclick = () => {
                 if (item.is_dir) {
                     refreshBrowser(item.path).catch((error) => showToast(error.message, true));
@@ -5738,7 +5788,7 @@ function startRolloutPolling() {
 function openCheckpointBrowser() {
     const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "/";
     openBrowser({
-        mode: "generic",
+        mode: "checkpoint",
         title: "Select Checkpoint",
         startPath: trainingRoot,
         rootPath: trainingRoot,
@@ -5746,16 +5796,26 @@ function openCheckpointBrowser() {
         multiSelect: false,
         allowNavigation: true,
         requireSelection: true,
-        emptyMessage: "No folders found.",
+        emptyMessage: "No checkpoints here — go up to a training run's checkpoints folder.",
         confirmLabel: "Select",
         pathNote: "Training outputs directory",
-        eyebrow: "Select a trained policy",
+        eyebrow: "Open a run's checkpoints folder, then pick a step (e.g. 034800)",
         onConfirm: async (paths) => {
             const path = paths[0];
             if (!path) {
                 return;
             }
             state.rolloutCheckpointPath = path;
+            // Prefill the task instruction from the checkpoint's dataset metadata;
+            // requires_task is false for non-language policies (diffusion, act).
+            try {
+                const info = await api(`/rollout/checkpoint-info?path=${encodeURIComponent(path)}`);
+                state.rolloutTaskText = (info && info.task) || "";
+                state.rolloutRequiresTask = !(info && info.requires_task === false);
+            } catch (error) {
+                state.rolloutTaskText = "";
+                state.rolloutRequiresTask = true;
+            }
             closeBrowser();
             renderRollout();
         },
@@ -5767,11 +5827,75 @@ async function startRolloutRun() {
     if (!checkpoint) {
         return;
     }
+    const task = state.rolloutRequiresTask ? state.rolloutTaskText || "" : "";
     state.rolloutStatus = await api("/rollout/start", {
         method: "POST",
-        body: JSON.stringify({ checkpoint_path: checkpoint }),
+        body: JSON.stringify({ checkpoint_path: checkpoint, task }),
     });
     renderRollout();
+}
+
+function isRolloutServiceConnected(serviceKey, service = {}) {
+    if (serviceKey === "teleop_service") {
+        return !!state.teleopStatus?.teleop?.initialized || service.tone === "ok";
+    }
+    const cameras = Object.values(state.teleopStatus?.cameras?.cameras || {});
+    return cameras.some((camera) => !!camera?.started)
+        || service.tone === "ok"
+        || service.tone === "working";
+}
+
+function buildRolloutServiceCard(serviceKey, serviceName, fallbackLabel, isRunning) {
+    const services = state.teleopStatus?.services || state.summary?.services || {};
+    const service = services[serviceKey] || {};
+    const connected = isRolloutServiceConnected(serviceKey, service);
+    const action = connected ? "disconnect" : "connect";
+    const pendingAction = state.ui.rolloutServiceBusy[serviceName];
+    const busy = !!pendingAction;
+    const serialsMissing = serviceName === "teleop" && !connected && !allRobotSerialsConfigured();
+    const disabled = isRunning || busy || serialsMissing;
+    const serviceState = formatValue(service.state || (connected ? "Connected" : "Not connected"));
+    const tone = service.tone || (connected ? "ok" : "neutral");
+    const buttonLabel = action === "connect" ? "Connect" : "Disconnect";
+    const busyLabel = pendingAction === "connect" ? "Connecting…" : "Disconnecting…";
+    const title = isRunning
+        ? "Stop rollout before changing service connections."
+        : serialsMissing
+            ? ROBOT_SERIALS_REQUIRED_MESSAGE
+            : `${buttonLabel} ${fallbackLabel.toLowerCase()}`;
+
+    return `
+        <aside class="panel panel--soft rollout-service-card">
+            <div class="panel-header rollout-service-card__header">
+                <h2>${escapeHtml(fallbackLabel)}</h2>
+                <span class="teleop-system-card__dot teleop-system-card__dot--${escapeHtml(tone)}" role="img" aria-label="${escapeHtml(serviceState)}" title="${escapeHtml(serviceState)}"></span>
+            </div>
+            <div class="control-stack">
+                <button class="button-with-icon ${connected ? "stop-button" : "start-button"}" data-rollout-service="${serviceName}" data-action="${action}" type="button" title="${escapeHtml(title)}" ${disabled ? "disabled" : ""}>
+                    <span class="button-content">
+                        ${busy ? `<span class="button-spinner" aria-hidden="true"></span><span>${busyLabel}</span>` : `<span>${buttonLabel}</span>`}
+                    </span>
+                </button>
+            </div>
+            <p class="training-controls__state">Status: <strong>${escapeHtml(serviceState)}</strong></p>
+            ${serviceName === "teleop" ? `<p class="training-controls__state">Disconnect before rollout</p>` : ""}
+        </aside>
+    `;
+}
+
+async function controlRolloutService(serviceName, action) {
+    if (state.ui.rolloutServiceBusy[serviceName]) {
+        return;
+    }
+    state.ui.rolloutServiceBusy[serviceName] = action;
+    renderRollout();
+    try {
+        await controlHomeService(serviceName, action);
+        await refreshTeleopStatus();
+    } finally {
+        state.ui.rolloutServiceBusy[serviceName] = null;
+        renderRollout();
+    }
 }
 
 function renderRollout() {
@@ -5807,6 +5931,14 @@ function renderRollout() {
                     : "Idle";
     const primaryMarkup = isRunning ? TELEOP_STOP_MARKUP : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
+    const rolloutServices = state.teleopStatus?.services || state.summary?.services || {};
+    const rolloutServiceKey = ["cameras", "teleop_service"].map((serviceKey) => {
+        const service = rolloutServices[serviceKey] || {};
+        return `${serviceKey}:${service.tone || ""}:${service.state || ""}:${service.detail || ""}`;
+    }).join("|");
+    const rolloutServiceBusyKey = ["cameras", "teleop"]
+        .map((serviceName) => `${serviceName}:${state.ui.rolloutServiceBusy[serviceName] || ""}`)
+        .join("|");
 
     // Rebuild the content only when something it renders changed. The 1s poll
     // calls this every tick; rebuilding unconditionally would destroy and
@@ -5814,6 +5946,7 @@ function renderRollout() {
     const renderKey = [
         status.status, status.stop_reason || "", status.error || "",
         checkpoint, configuredDevice, deviceOptions, deviceDetail,
+        state.rolloutRequiresTask, rolloutServiceKey, rolloutServiceBusyKey,
     ].join("|");
     if (container.dataset.renderKey === renderKey) {
         renderRolloutCameras();
@@ -5850,6 +5983,8 @@ function renderRollout() {
                     <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
                     ${status.error ? `<p class="training-controls__state rollout-error">${escapeHtml(status.error)}</p>` : ""}
                 </aside>
+                ${buildRolloutServiceCard("cameras", "cameras", "Cameras", isRunning)}
+                ${buildRolloutServiceCard("teleop_service", "teleop", "Teleop Service", isRunning)}
             </div>
             <div class="training-main">
                 <section class="panel panel--soft">
@@ -5859,6 +5994,11 @@ function renderRollout() {
                         <button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>
                     </div>
                     ${checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
+                    <label class="field-label rollout-task-label" for="rollout-task">Task Instruction</label>
+                    <textarea class="rollout-task-input" id="rollout-task" rows="3"
+                        placeholder="${state.rolloutRequiresTask ? 'Task instruction (optional)' : 'This policy does not take a language input'}"
+                        autocomplete="off" spellcheck="false"
+                        ${isRunning || !state.rolloutRequiresTask ? "disabled" : ""}></textarea>
                 </section>
                 <section class="panel panel--soft">
                     <div class="panel-header"><h2>Policy Camera Input</h2></div>
@@ -5886,6 +6026,14 @@ function renderRollout() {
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {
         browseBtn.onclick = () => openCheckpointBrowser();
+    }
+    const taskInput = byId("rollout-task");
+    if (taskInput) {
+        // Rebuilds re-fill from state; oninput keeps state without a rebuild.
+        taskInput.value = state.rolloutTaskText || "";
+        taskInput.oninput = () => {
+            state.rolloutTaskText = taskInput.value;
+        };
     }
     const deviceSelect = byId("rollout-device-select");
     if (deviceSelect) {
@@ -5923,6 +6071,12 @@ function renderRollout() {
             renderRollout();
         };
     }
+    container.querySelectorAll("[data-rollout-service]").forEach((button) => {
+        button.onclick = () => {
+            controlRolloutService(button.dataset.rolloutService, button.dataset.action)
+                .catch((error) => showToast(error.message, true));
+        };
+    });
 }
 
 // Render the live camera feeds the policy consumes during rollout, using the
@@ -6267,6 +6421,10 @@ function bindGlobalEvents() {
         // cached, so the very first episode is still grouped.
         jobNameField.value = loadCachedJobName() || DEFAULT_JOB_NAME;
     }
+    const taskField = byId("record-task");
+    if (taskField && !taskField.value) {
+        taskField.value = loadCachedTask();
+    }
     byId("record-toggle").onclick = async () => {
         // The single toggle button stops an in-progress recording and otherwise
         // starts a new one, mirroring the teleop power control.
@@ -6292,13 +6450,19 @@ function bindGlobalEvents() {
             const jobName = (byId("record-job-name")?.value || "").trim() || DEFAULT_JOB_NAME;
             // Remember this job name so the next session resumes it.
             saveCachedJobName(jobName);
+            const task = (byId("record-task")?.value || "").trim();
+            saveCachedTask(task);
+            // Omit task when blank so the server default applies.
+            const startBody = {
+                recording_entries: state.recordingEntries,
+                job_name: jobName,
+            };
+            if (task) {
+                startBody.task = task;
+            }
             await api("/teleop/recording/start", {
                 method: "POST",
-                body: JSON.stringify({
-                    task: "Dual-arm Flexiv teleoperation demonstration",
-                    recording_entries: state.recordingEntries,
-                    job_name: jobName,
-                }),
+                body: JSON.stringify(startBody),
             });
         } catch (error) {
             showToast(error.message, true);

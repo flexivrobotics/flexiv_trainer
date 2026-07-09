@@ -62,6 +62,7 @@ def browse(
     directories_only: bool = False,
     root_path: str | None = None,
     annotate_episode_dirs: bool = False,
+    annotate_checkpoint_dirs: bool = False,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
     try:
@@ -70,6 +71,7 @@ def browse(
             directories_only=directories_only,
             root_path=Path(root_path) if root_path else None,
             annotate_episode_dirs=annotate_episode_dirs,
+            annotate_checkpoint_dirs=annotate_checkpoint_dirs,
         )
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc

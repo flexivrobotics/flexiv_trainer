@@ -57,6 +57,13 @@ POLICY_CATALOG = {
         "label": "pi0",
         "description": "Large VLA baseline that typically needs substantially more GPU memory.",
     },
+    "multi_task_dit": {
+        "label": "Multitask DiT",
+        "description": (
+            "Language-conditioned diffusion transformer with CLIP text/vision "
+            "conditioning (~450M params)."
+        ),
+    },
 }
 
 TRAINING_DEVICE_ORDER = ("auto", "cuda", "mps", "cpu")

@@ -464,6 +464,25 @@ def build_features_from_sample(
     return features, state_keys, action_keys
 
 
+def first_dataset_task(dataset_root: Path) -> str:
+    """Best-effort read of the first task name from meta/tasks.parquet."""
+    default = "Dual-arm Flexiv teleoperation demonstration"
+    tasks_path = dataset_root / "meta" / "tasks.parquet"
+    if not tasks_path.exists():
+        return default
+    try:
+        import pandas as pd
+
+        tasks = pd.read_parquet(tasks_path)
+        if tasks.index.name == "task" and len(tasks.index):
+            return str(tasks.index[0])
+        if "task" in tasks.columns and len(tasks):
+            return str(tasks["task"].iloc[0])
+    except Exception:
+        return default
+    return default
+
+
 @dataclass(slots=True)
 class EpisodeManifest:
     root: Path
@@ -494,19 +513,4 @@ class EpisodeManifest:
 
     @staticmethod
     def _first_task(dataset_root: Path) -> str:
-        """Best-effort read of the first task name from meta/tasks.parquet."""
-        default = "Dual-arm Flexiv teleoperation demonstration"
-        tasks_path = dataset_root / "meta" / "tasks.parquet"
-        if not tasks_path.exists():
-            return default
-        try:
-            import pandas as pd
-
-            tasks = pd.read_parquet(tasks_path)
-            if tasks.index.name == "task" and len(tasks.index):
-                return str(tasks.index[0])
-            if "task" in tasks.columns and len(tasks):
-                return str(tasks["task"].iloc[0])
-        except Exception:
-            return default
-        return default
+        return first_dataset_task(dataset_root)

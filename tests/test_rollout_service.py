@@ -22,11 +22,15 @@ import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
 from flexivtrainer.policies import diffusion as diffusion_policy
+from flexivtrainer.policies import dit as dit_policy
 from flexivtrainer.rollout.service import (
     RolloutService,
+    _checkpoint_policy_type,
+    _checkpoint_requires_task,
     _checkpoint_target_hz,
-    _WaypointDispatcher,
+    _zero_ft_sensor,
 )
+from flexivtrainer.rollout.waypoint_executor import WaypointExecutor
 
 
 class _FakeRobotStates:
@@ -43,6 +47,8 @@ class _FakeRobot:
         self.serial = serial
         self.enabled = False
         self.mode = None
+        self.mode_history: list = []
+        self.primitives: list = []
         self.commands: list[tuple[list[float], list[float]]] = []
         self._fault = False
 
@@ -61,6 +67,16 @@ class _FakeRobot:
 
     def SwitchMode(self, mode) -> None:  # noqa: N802
         self.mode = mode
+        self.mode_history.append(mode)
+
+    def ExecutePrimitive(self, name, input_params) -> None:  # noqa: N802
+        self.primitives.append((name, input_params))
+
+    def primitive_states(self) -> dict:
+        return {"reachedTarget": 1}
+
+    def busy(self) -> bool:
+        return False
 
     def states(self):
         return _FakeRobotStates(base=1.0)
@@ -185,6 +201,51 @@ def _make_service(tmp_path, *, policy, robot):
     )
 
 
+def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
+    robot = service._connect_robot("F1")
+
+    assert robot.primitives == [("ZeroFTSensor", {})]
+    assert robot.mode_history == ["prim", "cmf"]
+
+
+def test_connect_robot_without_primitive_support(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+    class _NoPrimitiveRobot(_FakeRobot):
+        ExecutePrimitive = None  # firmware/stub lacking the primitive
+
+    robot = _NoPrimitiveRobot("F1")
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
+    connected = service._connect_robot("F1")
+
+    assert connected.mode_history == ["cmf"]
+
+
+def test_zero_ft_sensor_returns_false_without_primitive(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_PRIMITIVE_EXECUTION="prim"),
+    )
+
+    class _NoPrimitiveRobot(_FakeRobot):
+        ExecutePrimitive = None
+
+    assert not _zero_ft_sensor(_NoPrimitiveRobot("F1"), threading.Event())
+
+
 def test_start_refuses_when_teleop_initialized(tmp_path) -> None:
     service = RolloutService(
         _settings(tmp_path),
@@ -247,21 +308,6 @@ def test_actions_to_lists_handles_chunk_and_single() -> None:
     assert RolloutService._actions_to_lists(_TorchLike([[4.0, 5.0]])) == [[4.0, 5.0]]
 
 
-def test_plan_action_layout_locates_pose_and_wrench_runs(tmp_path) -> None:
-    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
-    # single_arm action: tcp_pose (7) -> tcp_twist (6) -> tcp_wrench (6).
-    names = (
-        [f"single_arm.tcp_pose.{a}" for a in "abcdefg"]
-        + [f"single_arm.tcp_twist.{i}" for i in range(6)]
-        + [f"single_arm.tcp_wrench.{i}" for i in range(6)]
-    )
-    layout = service._plan_action_layout(names, ["single_arm"])
-    assert len(layout) == 1
-    assert layout[0]["pose"] == slice(0, 7)
-    assert layout[0]["twist"] == slice(7, 13)
-    assert layout[0]["wrench"] == slice(13, 19)
-
-
 def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
     pytest.importorskip("diffusers")
     from diffusers.schedulers.scheduling_ddim import DDIMScheduler
@@ -303,10 +349,79 @@ def test_diffusion_scheduler_override_noop_when_disabled(tmp_path) -> None:
     assert policy.diffusion.num_inference_steps == 100
 
 
+def test_dit_scheduler_override_swaps_to_ddim(tmp_path) -> None:
+    pytest.importorskip("diffusers")
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+    from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+
+    ddpm = DDPMScheduler(
+        num_train_timesteps=100,
+        beta_schedule="squaredcos_cap_v2",
+        clip_sample=True,
+        prediction_type="epsilon",
+    )
+    # A DiT stand-in: config.objective string + objective module attributes.
+    policy = SimpleNamespace(
+        config=SimpleNamespace(objective="diffusion"),
+        objective=SimpleNamespace(noise_scheduler=ddpm, num_inference_steps=100),
+    )
+    rollout_cfg = _settings(tmp_path).policies.multi_task_dit.rollout
+    rollout_cfg.noise_scheduler_type = "DDIM"
+    rollout_cfg.num_denoise_steps = 10
+    assert dit_policy.apply_rollout_overrides(policy, rollout_cfg)
+    assert isinstance(policy.objective.noise_scheduler, DDIMScheduler)
+    assert policy.objective.num_inference_steps == 10
+    assert policy.objective.noise_scheduler.config.num_train_timesteps == 100
+
+
+def test_dit_scheduler_override_skips_flow_matching(tmp_path) -> None:
+    sentinel = object()
+    policy = SimpleNamespace(
+        config=SimpleNamespace(objective="flow_matching"),
+        objective=SimpleNamespace(noise_scheduler=sentinel, num_inference_steps=100),
+    )
+    rollout_cfg = _settings(tmp_path).policies.multi_task_dit.rollout
+    rollout_cfg.noise_scheduler_type = "DDIM"
+    assert not dit_policy.apply_rollout_overrides(policy, rollout_cfg)
+    assert policy.objective.noise_scheduler is sentinel
+    assert policy.objective.num_inference_steps == 100
+
+
+def test_rollout_for_multi_task_dit_returns_dit_config(tmp_path) -> None:
+    rollout_cfg = _settings(tmp_path).policies.rollout_for("multi_task_dit")
+    assert isinstance(rollout_cfg, dit_policy.RolloutConfig)
+    assert rollout_cfg.noise_scheduler_type == "DDIM"
+    assert rollout_cfg.num_denoise_steps == 10
+
+
 def test_checkpoint_target_hz_reads_training_dataset_fps(tmp_path) -> None:
     checkpoint = _checkpoint_with_dataset_fps(tmp_path, fps=12)
 
     assert _checkpoint_target_hz(checkpoint) == 12.0
+
+
+def _checkpoint_of_type(tmp_path, policy_type: str) -> str:
+    model = tmp_path / "ckpt" / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(
+        json.dumps({"type": policy_type}), encoding="utf-8"
+    )
+    return str(tmp_path / "ckpt")
+
+
+def test_checkpoint_policy_type_and_requires_task(tmp_path) -> None:
+    vla = _checkpoint_of_type(tmp_path / "a", "multi_task_dit")
+    assert _checkpoint_policy_type(vla) == "multi_task_dit"
+    assert _checkpoint_requires_task(vla) is True
+
+    non_vla = _checkpoint_of_type(tmp_path / "b", "diffusion")
+    assert _checkpoint_policy_type(non_vla) == "diffusion"
+    assert _checkpoint_requires_task(non_vla) is False
+
+    # Unknown/missing type defaults to requiring a task (box stays available).
+    bare = tmp_path / "c"
+    bare.mkdir()
+    assert _checkpoint_requires_task(str(bare)) is True
 
 
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:
@@ -370,12 +485,71 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
         cfg.max_linear_vel, cfg.max_angular_vel,
         cfg.max_linear_acc, cfg.max_angular_acc,
     )
-    # Clean shutdown: status settled and the dispatcher thread no longer running.
+    # Clean shutdown: status settled and both rollout threads no longer running.
     assert service.status()["status"] in {"idle", "stopped"}
     assert not any(
-        t.name == "rollout-dispatcher" and t.is_alive()
+        t.name in {"rollout-policy-planner", "rollout-waypoint-executor"}
+        and t.is_alive()
         for t in threading.enumerate()
     )
+
+
+def test_start_threads_task_into_prediction(tmp_path, monkeypatch) -> None:
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    tasks_seen: list = []
+
+    def _fake_predict(obs, pol, dev, pre, post, **kwargs):
+        tasks_seen.append(kwargs.get("task"))
+        return np.tile(pol.select_action(obs), (8, 1)), True
+
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path), task="pick up the cube")
+    deadline = time.monotonic() + 2.0
+    while not robot.commands and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.status()["task"] == "pick up the cube"
+    service.stop()
+
+    assert tasks_seen and tasks_seen[0] == "pick up the cube"
+
+
+def test_start_normalizes_blank_task_to_none(tmp_path, monkeypatch) -> None:
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    tasks_seen: list = []
+
+    def _fake_predict(obs, pol, dev, pre, post, **kwargs):
+        tasks_seen.append(kwargs.get("task"))
+        return np.tile(pol.select_action(obs), (8, 1)), True
+
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.service._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path), task="   ")
+    deadline = time.monotonic() + 2.0
+    while not robot.commands and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.status()["task"] is None
+    service.stop()
+
+    assert tasks_seen and tasks_seen[0] is None
 
 
 def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -> None:
@@ -462,15 +636,6 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
     service.stop()
 
 
-def _pose_layout():
-    # Single-arm layout: pose in the first 7 slots, no wrench slice.
-    return [{"side": "single_arm", "pose": slice(0, 7), "twist": None, "wrench": None}]
-
-
-def _unit_pose(x: float) -> list[float]:
-    return [x, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-
-
 def test_overlapped_replan_forces_and_extends_committed_path(
     tmp_path, monkeypatch
 ) -> None:
@@ -490,13 +655,13 @@ def test_overlapped_replan_forces_and_extends_committed_path(
 
     forces: list[bool] = []
     schedules: list[float] = []
-    real_replace = _WaypointDispatcher.replace_waypoints
+    real_replace = WaypointExecutor.replace_waypoints
 
     def _recording_replace(self, actions, target_times, now):
         real_replace(self, actions, target_times, now)
         schedules.append(self._waypoints[-1].target_time - now)
 
-    monkeypatch.setattr(_WaypointDispatcher, "replace_waypoints", _recording_replace)
+    monkeypatch.setattr(WaypointExecutor, "replace_waypoints", _recording_replace)
 
     def _fake_predict(obs, pol, dev, pre, post, **kwargs):
         force = bool(kwargs.get("force_refresh"))
@@ -526,52 +691,6 @@ def test_overlapped_replan_forces_and_extends_committed_path(
     dt = 1.0 / float(settings.rollout.action_dt_hz)
     # Each schedule leaves a committed horizon covering at least the replan gap.
     assert all(extent >= 4 * dt - 1e-6 for extent in schedules)
-
-
-def test_replace_waypoints_replaces_undispatched_waypoints() -> None:
-    # A later chunk replaces every undispatched waypoint: the timeline
-    # tracks chunk B's grid and poses, not chunk A's.
-    robot = _FakeRobot("F1")
-    stop_event = threading.Event()
-    dispatcher = _WaypointDispatcher(
-        [robot], _pose_layout(), stop_event, (0.25, 0.6, 1.0, 2.5)
-    )
-    dt = 0.05
-    now = 100.0
-    # Chunk A spans now+dt .. now+8dt.
-    a_actions = [_unit_pose(float(k)) for k in range(8)]
-    a_times = [now + (k + 1) * dt for k in range(8)]
-    dispatcher.replace_waypoints(a_actions, a_times, now=now)
-    assert len(dispatcher._waypoints) == 8
-    assert dispatcher._waypoints[-1].target_time == pytest.approx(now + 8 * dt)
-    # Chunk B is issued mid-span; A's overlapping tail is dropped, not merged.
-    now_b = now + 2 * dt
-    b_actions = [_unit_pose(100.0 + k) for k in range(8)]
-    b_times = [now_b + (k + 1) * dt for k in range(8)]
-    dispatcher.replace_waypoints(b_actions, b_times, now=now_b)
-    assert len(dispatcher._waypoints) == 8
-    assert dispatcher._waypoints[0].target_time == pytest.approx(now_b + dt)
-    assert dispatcher._waypoints[-1].target_time == pytest.approx(now_b + 8 * dt)
-    command = dispatcher._waypoints[0].commands[0]
-    assert command is not None
-    assert command.pose[0] == pytest.approx(100.0)
-
-
-def test_anchor_offset_keeps_first_waypoint_ahead_of_filter() -> None:
-    # With inference latency < dt, offset 1 keeps waypoint 0 in the future so the
-    # whole chunk survives the dispatcher's past-filter; offset 0 loses waypoint 0.
-    dt = 0.05
-    latency = dt / 2  # inference finished before the k=0 waypoint's target time
-    for anchor, expected in ((1, 8), (0, 7)):
-        robot = _FakeRobot("F1")
-        dispatcher = _WaypointDispatcher(
-            [robot], _pose_layout(), threading.Event(), (0.25, 0.6, 1.0, 2.5)
-        )
-        loop_start = 100.0
-        actions = [_unit_pose(float(k)) for k in range(8)]
-        target_times = [loop_start + (k + anchor) * dt for k in range(8)]
-        dispatcher.replace_waypoints(actions, target_times, now=loop_start + latency)
-        assert dispatcher._last_scheduled == expected
 
 
 def test_n_action_steps_override_applies_clamps_and_skips(tmp_path) -> None:

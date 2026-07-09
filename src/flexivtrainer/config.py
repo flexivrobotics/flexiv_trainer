@@ -97,20 +97,18 @@ class StorageConfig(BaseModel):
         self.cache_root.mkdir(parents=True, exist_ok=True)
 
 
-class TrainingConfig(BaseModel):
+class TrainingDefaultsConfig(BaseModel):
     default_policy: str = "diffusion"
     # Device passed to lerobot via --policy.device. "auto" (default) resolves to
     # the best available device on this machine (cuda > mps > cpu) at train time,
     # so the trainer stays portable across platforms; set an explicit "cuda" /
     # "mps" / "cpu" to force one.
     default_device: str = "auto"
-    save_frequency: int = 5_000
 
 
-class RolloutConfig(BaseModel):
-    # Planner-loop tick rate: obs read + action pop per tick. Inference re-runs
-    # every ``replan_steps`` ticks (overlapped replanning); set == action_dt_hz
-    # so chunks play at real speed.
+class RolloutLoopConfig(BaseModel):
+    # Fallback planner-loop tick rate used only when the checkpoint has no FPS
+    # metadata; otherwise the loop ticks at the checkpoint's data rate.
     planner_hz: int = Field(default=10, ge=1, le=120)
     max_steps: int = Field(default=0, ge=0)
     # Time-spacing of poses within one predicted chunk = the training data rate.
@@ -232,9 +230,9 @@ class AppSettings(BaseSettings):
         ]
     )
     storage: StorageConfig = Field(default_factory=StorageConfig)
-    training: TrainingConfig = Field(default_factory=TrainingConfig)
+    training: TrainingDefaultsConfig = Field(default_factory=TrainingDefaultsConfig)
     policies: PolicyConfig = Field(default_factory=PolicyConfig)
-    rollout: RolloutConfig = Field(default_factory=RolloutConfig)
+    rollout: RolloutLoopConfig = Field(default_factory=RolloutLoopConfig)
 
     @property
     def follower_robot_serials(self) -> list[str]:
