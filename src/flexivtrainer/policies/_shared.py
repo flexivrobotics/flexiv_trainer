@@ -53,12 +53,12 @@ class SharedTrainingConfig(BaseModel):
 class SharedRolloutConfig(BaseModel):
     # Override the checkpoint's action-chunk length at load; 0 = keep the
     # checkpoint default. Clamped best-effort to the family's valid range.
-    n_action_steps: int = Field(default=14, ge=0, le=64)
+    n_action_steps: int = Field(default=15, ge=0, le=64)
     # Force a fresh inference every N planner ticks so a committed path always
     # remains while the next chunk computes (overlapped replanning, as in the
     # original diffusion_policy runner). 0 = auto (half the effective chunk,
     # min 1).
-    replan_steps: int = Field(default=10, ge=0, le=64)
+    replan_steps: int = Field(default=12, ge=0, le=64)
     # Waypoint k targets loop_start + (k + offset) * dt; offset >= 1 keeps
     # waypoint 0 ahead of the past-filter (inference latency would drop it).
     action_anchor_offset_steps: int = Field(default=1, ge=0, le=8)

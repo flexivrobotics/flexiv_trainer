@@ -28,9 +28,9 @@ from flexivtrainer.rollout.service import (
     _checkpoint_policy_type,
     _checkpoint_requires_task,
     _checkpoint_target_hz,
-    _WaypointDispatcher,
     _zero_ft_sensor,
 )
+from flexivtrainer.rollout.waypoint_executor import WaypointExecutor
 
 
 class _FakeRobotStates:
@@ -678,13 +678,13 @@ def test_overlapped_replan_forces_and_extends_committed_path(
 
     forces: list[bool] = []
     schedules: list[float] = []
-    real_replace = _WaypointDispatcher.replace_waypoints
+    real_replace = WaypointExecutor.replace_waypoints
 
     def _recording_replace(self, actions, target_times, now):
         real_replace(self, actions, target_times, now)
         schedules.append(self._waypoints[-1].target_time - now)
 
-    monkeypatch.setattr(_WaypointDispatcher, "replace_waypoints", _recording_replace)
+    monkeypatch.setattr(WaypointExecutor, "replace_waypoints", _recording_replace)
 
     def _fake_predict(obs, pol, dev, pre, post, **kwargs):
         force = bool(kwargs.get("force_refresh"))

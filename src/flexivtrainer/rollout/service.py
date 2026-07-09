@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run a trained LeRobot policy on the follower robot(s).
-
-Rollout drives the follower arm(s) directly through the RDK ``Robot`` API, not
-the TDK teleop controller -- that controller only mirrors a physical leader and
-has no command-injection API, and its LAN connection cannot coexist with a fresh
-RDK one, so rollout requires teleoperation to be shut down first.
-"""
+"""Run trained LeRobot policies on follower robots through the RDK API."""
 
 from __future__ import annotations
 
@@ -27,7 +21,6 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,25 +38,19 @@ from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
+from flexivtrainer.rollout.waypoint_executor import (
+    WaypointExecutor,
+    build_action_layout,
+    normalize_pose_quaternion,
+)
 
-# Per-family rollout override hooks, dispatched by the loaded checkpoint's
-# policy type; the seam a future rollout-config UI can drive.
 _ROLLOUT_OVERRIDES = {
     "diffusion": diffusion_policy.apply_rollout_overrides,
     "multi_task_dit": dit_policy.apply_rollout_overrides,
 }
 
-# Policy families that condition on a language/task instruction (VLAs).
 _LANGUAGE_POLICY_TYPES = {"multi_task_dit", "smolvla", "pi0", "pi05"}
 
-# Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz]; tcp_twist (velocity) and
-# tcp_wrench are each 6-axis.
-_POSE_DIM = 7
-_TWIST_DIM = 6
-_WRENCH_DIM = 6
-
-# One-time guard so a policy without ``_queues[ACTION]`` (e.g. ACT) does not
-# spam the force-refresh fallback warning on every replan tick.
 _FORCE_REFRESH_WARNED = False
 
 
@@ -99,8 +86,7 @@ def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
     policy = get_policy_class(config.type).from_pretrained(model_dir)
     policy.to(device)
     policy.eval()
-    # The processors bake in the training device (e.g. cuda); point them at the
-    # rollout device so loading on a cpu-only host does not fail.
+    # Override the training device for CPU-only rollout hosts.
     device_override = {"device_processor": {"device": device}}
     preprocessor, postprocessor = make_pre_post_processors(
         config,
@@ -126,8 +112,19 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _dataset_root_candidates(root: str, model_dir: Path) -> list[Path]:
+    dataset_root = Path(root).expanduser()
+    candidates = [dataset_root]
+    if not dataset_root.is_absolute():
+        candidates.append(Path.cwd() / dataset_root)
+        candidates.extend(parent / dataset_root for parent in model_dir.parents)
+    return list(
+        dict.fromkeys(candidate.resolve(strict=False) for candidate in candidates)
+    )
+
+
 def _checkpoint_target_hz(checkpoint_path: str) -> float | None:
-    """Best-effort read of the dataset FPS baked into a LeRobot checkpoint."""
+    """Read of the dataset FPS baked into a LeRobot checkpoint."""
     model_dir = _checkpoint_model_dir(checkpoint_path)
 
     train_config = _read_json(model_dir / "train_config.json") or {}
@@ -137,22 +134,11 @@ def _checkpoint_target_hz(checkpoint_path: str) -> float | None:
             return fps
         root = dataset.get("root")
         if isinstance(root, str) and root.strip():
-            dataset_root = Path(root).expanduser()
-            candidates = [dataset_root]
-            if not dataset_root.is_absolute():
-                candidates.append(Path.cwd() / dataset_root)
-                candidates.extend(parent / dataset_root for parent in model_dir.parents)
-            seen: set[Path] = set()
-            for candidate in candidates:
-                candidate = candidate.resolve(strict=False)
-                if candidate in seen:
-                    continue
-                seen.add(candidate)
+            for candidate in _dataset_root_candidates(root, model_dir):
                 info = _read_json(candidate / "meta" / "info.json") or {}
                 if fps := _positive_float(info.get("fps")):
                     return fps
 
-    # Future/alternate checkpoint formats may carry this directly.
     config = _read_json(model_dir / "config.json") or {}
     for key in ("fps", "dataset_fps", "action_dt_hz"):
         if fps := _positive_float(config.get(key)):
@@ -161,7 +147,7 @@ def _checkpoint_target_hz(checkpoint_path: str) -> float | None:
 
 
 def _checkpoint_task(checkpoint_path: str) -> str | None:
-    """Best-effort read of the task string of the dataset a checkpoint trained on."""
+    """Read of the task string of the dataset a checkpoint trained on."""
     model_dir = _checkpoint_model_dir(checkpoint_path)
     train_config = _read_json(model_dir / "train_config.json") or {}
     dataset = train_config.get("dataset") if isinstance(train_config, dict) else None
@@ -170,17 +156,7 @@ def _checkpoint_task(checkpoint_path: str) -> str | None:
     root = dataset.get("root")
     if not (isinstance(root, str) and root.strip()):
         return None
-    dataset_root = Path(root).expanduser()
-    candidates = [dataset_root]
-    if not dataset_root.is_absolute():
-        candidates.append(Path.cwd() / dataset_root)
-        candidates.extend(parent / dataset_root for parent in model_dir.parents)
-    seen: set[Path] = set()
-    for candidate in candidates:
-        candidate = candidate.resolve(strict=False)
-        if candidate in seen:
-            continue
-        seen.add(candidate)
+    for candidate in _dataset_root_candidates(root, model_dir):
         if (candidate / "meta").exists():
             return first_dataset_task(candidate)
     return None
@@ -194,7 +170,6 @@ def _checkpoint_policy_type(checkpoint_path: str) -> str | None:
 
 
 def _checkpoint_requires_task(checkpoint_path: str) -> bool:
-    # Unknown/missing type defaults to True so the task box stays available.
     policy_type = _checkpoint_policy_type(checkpoint_path)
     return policy_type is None or policy_type in _LANGUAGE_POLICY_TYPES
 
@@ -214,9 +189,7 @@ def _rdk_mode() -> Any:
 def _zero_ft_sensor(
     robot: Any, stop_event: threading.Event, timeout: float = 3.0
 ) -> bool:
-    # Re-zero the F/T sensor bias (stale after a prior faulted rollout) via the
-    # ZeroFTSensor primitive, which requires NRT_PRIMITIVE_EXECUTION mode. A
-    # missing primitive/method degrades to a logged no-op rather than aborting.
+    # ZeroFTSensor requires NRT_PRIMITIVE_EXECUTION; unsupported firmware skips it.
     execute = getattr(robot, "ExecutePrimitive", None)
     if not callable(execute):
         return False
@@ -257,12 +230,7 @@ def _predict_action_chunk(
     force_refresh: bool = False,
     task: str | None = None,
 ) -> tuple[Any, bool]:
-    """Run one inference cycle; return ``(chunk, fresh)``.
-
-    Forced refresh clears the action queue so ``select_action`` produces a new
-    chunk from the current observation. The first action and cached tail are
-    returned together so one fresh inference replaces the pending waypoint chunk.
-    """
+    """Return an action chunk and whether it came from fresh inference."""
     import torch  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
     from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
@@ -283,7 +251,6 @@ def _predict_action_chunk(
                     "policy has no _queues[ACTION]; falling back to drain-refill",
                 )
 
-    # Policies without an ACTION queue (e.g. ACT) must be treated as always-fresh.
     fresh = action_queue is None or len(action_queue) == 0
 
     first = predict_action(
@@ -300,11 +267,7 @@ def _predict_action_chunk(
 
 
 def _cuda_sync(device: str) -> None:
-    """Block until queued CUDA work finishes so stage timings are attributed
-    to the stage that issued the work, not to a later forced sync.
-
-    No-op off cuda or when torch is unavailable (e.g. the cpu/fake-policy tests).
-    """
+    """Synchronize CUDA so inference timing includes queued work."""
     if not str(device).startswith("cuda"):
         return
     try:
@@ -314,143 +277,6 @@ def _cuda_sync(device: str) -> None:
             torch.cuda.synchronize()
     except Exception:  # pragma: no cover - torch optional
         pass
-
-
-@dataclass
-class _RobotCommand:
-    pose: list[float]
-    wrench: list[float]
-    twist: list[float]
-
-
-@dataclass
-class _TimedWaypoint:
-    target_time: float
-    commands: list[_RobotCommand | None]
-
-
-class _WaypointDispatcher:
-    """Timed dispatcher for rollout waypoints."""
-
-    def __init__(
-        self,
-        robots: list[Any],
-        layout: list[dict[str, Any]],
-        stop_event: threading.Event,
-        motion_limits: tuple[float, float, float, float],
-    ) -> None:
-        self._robots = robots
-        self._layout = layout
-        self._stop_event = stop_event
-        # Hardware ceilings for the robot motion generator.
-        self._motion_limits = motion_limits
-        self._cond = threading.Condition()
-        # Time-ordered (target_time, per-arm commands) not yet dispatched.
-        self._waypoints: list[_TimedWaypoint] = []
-        self._error: str | None = None
-        # Chunk steps that survived the past-filter last call; a shrinking
-        # count means inference is eating into the streamed horizon.
-        self._last_scheduled = 0
-        self._thread: threading.Thread | None = None
-
-    def replace_waypoints(
-        self,
-        actions: list[list[float]],
-        target_times: list[float],
-        now: float,
-    ) -> None:
-        """Install a chunk's future waypoints, replacing any still pending.
-
-        ``actions[k]`` is the flat action for step k, reached at ``target_times[k]``;
-        steps already in the past (``<= now``) are dropped.
-        """
-        waypoints: list[_TimedWaypoint] = []
-        for action, target_time in zip(actions, target_times):
-            if target_time <= now:
-                continue
-            commands: list[_RobotCommand | None] = []
-            for index, arm_plan in enumerate(self._layout):
-                if index >= len(self._robots):
-                    break
-                pose_slice = arm_plan["pose"]
-                if pose_slice is None:
-                    commands.append(None)
-                    continue
-                twist_slice = arm_plan["twist"]
-                wrench_slice = arm_plan["wrench"]
-                commands.append(
-                    _RobotCommand(
-                        pose=RolloutService._normalize_pose_quaternion(
-                            list(action[pose_slice])
-                        ),
-                        wrench=(
-                            list(action[wrench_slice])
-                            if wrench_slice is not None
-                            else [0.0] * _WRENCH_DIM
-                        ),
-                        twist=(
-                            list(action[twist_slice])
-                            if twist_slice is not None
-                            else [0.0] * _TWIST_DIM
-                        ),
-                    )
-                )
-            waypoints.append(_TimedWaypoint(float(target_time), commands))
-        with self._cond:
-            self._waypoints = waypoints
-            self._last_scheduled = len(waypoints)
-            self._cond.notify()
-
-    def _send_waypoint(self, waypoint: _TimedWaypoint) -> None:
-        max_lin_vel, max_ang_vel, max_lin_acc, max_ang_acc = self._motion_limits
-        for index, command in enumerate(waypoint.commands):
-            if command is None or index >= len(self._robots):
-                continue
-            self._robots[index].SendCartesianMotionForce(
-                command.pose,
-                command.wrench,
-                command.twist,
-                max_lin_vel,
-                max_ang_vel,
-                max_lin_acc,
-                max_ang_acc,
-            )
-
-    def _dispatch_loop(self) -> None:
-        try:
-            while not self._stop_event.is_set():
-                with self._cond:
-                    if not self._waypoints:
-                        self._cond.wait(0.1)
-                        continue
-                    delay = self._waypoints[0].target_time - time.monotonic()
-                    if delay > 0:
-                        # Capped so stop_event stays responsive; a fresh chunk
-                        # with an earlier head wakes the wait via notify().
-                        self._cond.wait(min(delay, 0.1))
-                        continue
-                    waypoint = self._waypoints.pop(0)
-                self._send_waypoint(waypoint)
-        except Exception as exc:  # pragma: no cover - hardware specific
-            self._error = describe_exception(exc)
-            self._stop_event.set()
-            with self._cond:
-                self._cond.notify()
-
-    def start(self) -> None:
-        self._thread = threading.Thread(
-            target=self._dispatch_loop, daemon=True, name="rollout-dispatcher"
-        )
-        self._thread.start()
-
-    def join(self, timeout: float = 2.0) -> None:
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-
-    @property
-    def error(self) -> str | None:
-        return self._error
 
 
 class RolloutService:
@@ -484,8 +310,6 @@ class RolloutService:
         self._lock = threading.Lock()
         self._running = False
         self._error: str | None = None
-        # Why the last run ended: None while running/never-run, "stopped" for an
-        # operator stop, or "timeout" when the max_steps budget was reached.
         self._stop_reason: str | None = None
         self._checkpoint_path: str | None = None
         self._task: str | None = None
@@ -493,15 +317,10 @@ class RolloutService:
         self._device = "cpu"
         self._thread: threading.Thread | None = None
         self._target_hz: float | None = None
-        # Held so stop() can join the dispatcher before releasing the robots.
-        self._dispatcher: _WaypointDispatcher | None = None
+        self._waypoint_executor: WaypointExecutor | None = None
         self._stop_event = threading.Event()
-        # UI-encoded log ring buffer exposed through status().
         self._logs: deque[str] = deque(maxlen=2000)
-        # Per-tick samples for the UI frequency chart.
         self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
-
-    # -- status -------------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -527,8 +346,6 @@ class RolloutService:
         self, level: str, source: str, message: str, detail: str = ""
     ) -> None:
         self._logs.append(_encode_ui_log(level, source, message, detail))
-
-    # -- lifecycle ----------------------------------------------------------
 
     def start(
         self, checkpoint_path: str, task: str | None = None
@@ -626,13 +443,13 @@ class RolloutService:
                     )
                 )
         thread = threading.Thread(
-            target=self._planner_loop,
+            target=self._policy_planner_loop,
             args=(
                 policy, preprocessor, postprocessor, robots, sides,
                 rollout_cfg, target_hz, task,
             ),
             daemon=True,
-            name="rollout-planner",
+            name="rollout-policy-planner",
         )
         self._thread = thread
         thread.start()
@@ -640,10 +457,10 @@ class RolloutService:
 
     def stop(self) -> dict[str, Any]:
         self._stop_event.set()
-        # Join the dispatcher before releasing robots so it can't command them after.
-        dispatcher = self._dispatcher
-        if dispatcher is not None:
-            dispatcher.join()
+        # Stop robot commands before releasing their connections.
+        executor = self._waypoint_executor
+        if executor is not None:
+            executor.join()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
@@ -663,18 +480,12 @@ class RolloutService:
         except Exception as exc:  # pragma: no cover - defensive
             warn("Rollout shutdown failed", describe_exception(exc))
 
-    # -- internals ----------------------------------------------------------
-
     def _teleop_initialized(self) -> bool:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
 
     def _apply_n_action_steps(self, policy: Any, rollout_cfg: Any) -> None:
-        # Override the checkpoint's action-chunk length. Diffusion's ACTION deque
-        # is rebuilt with maxlen=config.n_action_steps in reset(), so setting it
-        # here (before reset) resizes the executed chunk. Clamp to the diffusion
-        # bound horizon - n_obs_steps + 1 when those attrs exist; families without
-        # them get the value unclamped (try/except keeps a bad value loud).
+        # reset() rebuilds the policy action queue from this configured length.
         requested = getattr(rollout_cfg, "n_action_steps", 0)
         if requested <= 0:
             return
@@ -761,55 +572,10 @@ class RolloutService:
             }
         return {"robots": robots_payload, "errors": {}}
 
-    def _plan_action_layout(
-        self, action_names: list[str], sides: list[str]
-    ) -> list[dict[str, Any]]:
-        """Map the flat action vector to per-side pose/wrench command slices.
-
-        ``action_names`` are the action feature's axis names, e.g.
-        ``left_arm.tcp_pose.x`` ... ``right_arm.tcp_wrench.mz``. We locate each
-        side's ``tcp_pose``, ``tcp_twist`` and ``tcp_wrench`` runs by name so the
-        slicing tracks exactly what the recorder produced for this checkpoint.
-        """
-        layout: list[dict[str, Any]] = []
-        for side in sides:
-            pose_start = self._find_run(action_names, f"{side}.tcp_pose.")
-            twist_start = self._find_run(action_names, f"{side}.tcp_twist.")
-            wrench_start = self._find_run(action_names, f"{side}.tcp_wrench.")
-            pose = (
-                None
-                if pose_start is None
-                else slice(pose_start, pose_start + _POSE_DIM)
-            )
-            twist = (
-                None
-                if twist_start is None
-                else slice(twist_start, twist_start + _TWIST_DIM)
-            )
-            wrench = (
-                None
-                if wrench_start is None
-                else slice(wrench_start, wrench_start + _WRENCH_DIM)
-            )
-            layout.append(
-                {"side": side, "pose": pose, "twist": twist, "wrench": wrench}
-            )
-        return layout
-
-    @staticmethod
-    def _find_run(names: list[str], prefix: str) -> int | None:
-        for index, name in enumerate(names):
-            if name.startswith(prefix):
-                return index
-        return None
-
     def _planner_hz(self) -> float:
         return float(self._target_hz or self._settings.rollout.planner_hz)
 
-    def _loop_period(self) -> float:
-        return 1.0 / self._planner_hz()
-
-    def _planner_loop(
+    def _policy_planner_loop(
         self,
         policy: Any,
         preprocessor: Any,
@@ -820,23 +586,17 @@ class RolloutService:
         target_hz: float,
         task: str | None = None,
     ) -> None:
-        # Overrides run in start() before this reset(): reset() rebuilds the
-        # ACTION deque at the (possibly overridden) n_action_steps maxlen.
         policy.reset()
-        period = self._loop_period()
-        # Chunk pose spacing: the dataset's recording period, not the loop period.
+        period = 1.0 / self._planner_hz()
+        # Waypoint spacing follows dataset FPS, not planner frequency.
         dt = 1.0 / float(target_hz)
         anchor = rollout_cfg.action_anchor_offset_steps
-        # Resolved on the first fresh chunk once its length is known (auto =
-        # half the effective chunk); None means force every tick until then.
+        # Auto replan uses half the first effective action chunk.
         replan_steps: int | None = None
-        # 0 means "no cap": run until the operator stops it or a fault occurs.
         max_steps = self._settings.rollout.max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout: list[dict[str, Any]] | None = None
         log_every = max(1, int(self._planner_hz() // 2))
-        # Recent per-step work times (sleep excluded) for the timing breakdown.
-        work_times: deque[float] = deque(maxlen=10)
         stage_times: dict[str, deque[float]] = {
             name: deque(maxlen=10)
             for name in (
@@ -844,10 +604,8 @@ class RolloutService:
                 "build_obs", "inference", "to_list", "dispatch",
             )
         }
-        # Raw (un-smoothed) per-step inference times for one logging interval, to
-        # expose the 1-in-replan_steps refill spike that the smoothed window hides.
         infer_raw: deque[float] = deque(maxlen=log_every)
-        dispatcher: _WaypointDispatcher | None = None
+        waypoint_executor: WaypointExecutor | None = None
         previous_loop_start: float | None = None
         step = 0
         try:
@@ -860,8 +618,6 @@ class RolloutService:
                 )
                 actual_hz = 1.0 / loop_period if loop_period > 0 else 0.0
                 previous_loop_start = loop_start
-                # ``mark`` advances after each stage; ``now - mark`` is that
-                # stage's duration, recorded into its rolling window.
                 mark = loop_start
 
                 for robot in robots:
@@ -892,9 +648,9 @@ class RolloutService:
                     )
                     action_feature = features.get("action")
                     action_names = action_feature["names"] if action_feature else []
-                    layout = self._plan_action_layout(action_names, sides)
+                    layout = build_action_layout(action_names, sides)
                     app_rollout = self._settings.rollout
-                    dispatcher = _WaypointDispatcher(
+                    waypoint_executor = WaypointExecutor(
                         robots,
                         layout,
                         self._stop_event,
@@ -905,12 +661,10 @@ class RolloutService:
                             app_rollout.max_angular_acc,
                         ),
                     )
-                    self._dispatcher = dispatcher
-                    dispatcher.start()
+                    self._waypoint_executor = waypoint_executor
+                    waypoint_executor.start()
 
-                # Force a fresh chunk every replan_steps ticks (every tick until
-                # replan_steps is resolved below on the first fresh chunk), so a
-                # committed path always remains while the next chunk computes.
+                # Replan early enough to retain a committed path during inference.
                 force = replan_steps is None or step % replan_steps == 0
                 actions, fresh = _predict_action_chunk(
                     observation,
@@ -921,8 +675,6 @@ class RolloutService:
                     force_refresh=force,
                     task=task,
                 )
-                # Sync so async cuda inference is timed here, not at to_list's
-                # device->host copy.
                 _cuda_sync(self._device)
                 now = time.monotonic()
                 infer_seconds = now - mark
@@ -935,10 +687,8 @@ class RolloutService:
                 stage_times["to_list"].append(now - mark)
                 mark = now
 
-                # Forced ticks replace the dispatcher's future waypoints; other
-                # ticks leave the current plan in place. The anchor keeps the
-                # first waypoint ahead of the past-filter after inference latency.
-                assert dispatcher is not None  # created above with the layout
+                # Fresh chunks replace pending waypoints on an anchored time grid.
+                assert waypoint_executor is not None
                 if fresh:
                     if replan_steps is None:
                         effective = len(action_lists)
@@ -955,14 +705,13 @@ class RolloutService:
                         loop_start + (k + anchor) * dt
                         for k in range(len(action_lists))
                     ]
-                    dispatcher.replace_waypoints(
+                    waypoint_executor.replace_waypoints(
                         action_lists, target_times, now=time.monotonic()
                     )
-                if dispatcher.error is not None:
-                    raise RuntimeError(dispatcher.error)
+                if waypoint_executor.error is not None:
+                    raise RuntimeError(waypoint_executor.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
 
-                work_times.append(time.monotonic() - loop_start)
                 self._metrics.append({
                     "t": round(loop_start, 3),
                     "step": step,
@@ -972,7 +721,10 @@ class RolloutService:
                 })
                 if step % log_every == 0:
                     self._log_timing(
-                        step, stage_times, infer_raw, dispatcher._last_scheduled
+                        step,
+                        stage_times,
+                        infer_raw,
+                        waypoint_executor.scheduled_count,
                     )
                     self._log_step(
                         step, snapshot, action_lists[0], layout, sides,
@@ -998,12 +750,11 @@ class RolloutService:
                 )
             warn("Rollout stopped", detail)
         finally:
-            # Stop the dispatcher before releasing robots. Break paths above may
-            # exit without setting the stop event, so set it here.
-            if dispatcher is not None:
+            # Stop commands before releasing robot connections.
+            if waypoint_executor is not None:
                 self._stop_event.set()
-                dispatcher.join()
-            self._dispatcher = None
+                waypoint_executor.join()
+            self._waypoint_executor = None
             self._release_robots()
             with self._lock:
                 self._running = False
@@ -1044,11 +795,7 @@ class RolloutService:
 
     @staticmethod
     def _actions_to_lists(actions: Any) -> list[list[float]]:
-        """Convert an action chunk to a list of per-step float vectors.
-
-        Accepts a [n_steps, dim], [1, n_steps, dim] or [dim] tensor/ndarray/
-        sequence; a bare single action becomes a one-element list.
-        """
+        """Convert an action chunk to per-step float vectors."""
         detached = getattr(actions, "detach", None)
         if callable(detached):
             actions = actions.detach().cpu().numpy()
@@ -1066,13 +813,7 @@ class RolloutService:
         infer_raw: deque[float],
         scheduled: int,
     ) -> None:
-        """Log the mean per-stage duration (ms) over the recent window.
-
-        One line per ``log_every``, ordered as the stages run in the loop, with a
-        ``total`` so the breakdown can be checked against the ``freq=`` line. Use
-        it to find which stage (e.g. grab_images, inference) caps the loop rate.
-        ``sched`` is how many future waypoints the dispatcher last accepted.
-        """
+        """Log recent mean stage durations and the scheduled waypoint count."""
         parts: list[str] = []
         total_ms = 0.0
         for name, samples in stage_times.items():
@@ -1097,13 +838,7 @@ class RolloutService:
         camera_names: list[str],
         actual_hz: float,
     ) -> None:
-        """Log measured vs commanded TCP pose per side, plus an observation row.
-
-        The observation row reports, per expected camera, whether a frame was
-        present and its mean pixel value -- a missing camera or a frozen/black
-        feed (mean ~0 or unchanging) would starve the policy and is the prime
-        suspect for an in-distribution start still diverging.
-        """
+        """Log observation health and measured versus commanded poses."""
         cam_parts: list[str] = []
         for name in camera_names:
             image = images.get(name)
@@ -1126,7 +861,7 @@ class RolloutService:
             pose_slice = plan["pose"]
             twist_slice = plan["twist"]
             commanded = (
-                self._normalize_pose_quaternion(action[pose_slice])
+                normalize_pose_quaternion(action[pose_slice])
                 if pose_slice is not None
                 else []
             )
@@ -1160,22 +895,3 @@ class RolloutService:
         if not vector:
             return "n/a"
         return "[" + ", ".join(f"{value:.3f}" for value in vector) + "]"
-
-    @staticmethod
-    def _normalize_pose_quaternion(pose: list[float]) -> list[float]:
-        """Renormalize the orientation quaternion of a ``[x,y,z,qw,qx,qy,qz]`` pose.
-
-        The policy outputs the quaternion as four independently-regressed scalars
-        (ACTION uses per-element MIN_MAX normalization), so the result is not
-        guaranteed to be unit length. ``SendCartesianMotionForce`` expects a unit
-        quaternion, so rescale components 3:7 to unit norm before commanding. A
-        near-zero norm is left untouched to avoid dividing by ~0.
-        """
-        pose = list(pose)
-        if len(pose) < _POSE_DIM:
-            return pose
-        quat = pose[3:7]
-        norm = sum(component * component for component in quat) ** 0.5
-        if norm > 1e-6:
-            pose[3:7] = [component / norm for component in quat]
-        return pose
