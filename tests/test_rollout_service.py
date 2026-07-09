@@ -308,21 +308,6 @@ def test_actions_to_lists_handles_chunk_and_single() -> None:
     assert RolloutService._actions_to_lists(_TorchLike([[4.0, 5.0]])) == [[4.0, 5.0]]
 
 
-def test_plan_action_layout_locates_pose_and_wrench_runs(tmp_path) -> None:
-    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
-    # single_arm action: tcp_pose (7) -> tcp_twist (6) -> tcp_wrench (6).
-    names = (
-        [f"single_arm.tcp_pose.{a}" for a in "abcdefg"]
-        + [f"single_arm.tcp_twist.{i}" for i in range(6)]
-        + [f"single_arm.tcp_wrench.{i}" for i in range(6)]
-    )
-    layout = service._plan_action_layout(names, ["single_arm"])
-    assert len(layout) == 1
-    assert layout[0]["pose"] == slice(0, 7)
-    assert layout[0]["twist"] == slice(7, 13)
-    assert layout[0]["wrench"] == slice(13, 19)
-
-
 def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
     pytest.importorskip("diffusers")
     from diffusers.schedulers.scheduling_ddim import DDIMScheduler
@@ -500,10 +485,11 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
         cfg.max_linear_vel, cfg.max_angular_vel,
         cfg.max_linear_acc, cfg.max_angular_acc,
     )
-    # Clean shutdown: status settled and the dispatcher thread no longer running.
+    # Clean shutdown: status settled and both rollout threads no longer running.
     assert service.status()["status"] in {"idle", "stopped"}
     assert not any(
-        t.name == "rollout-dispatcher" and t.is_alive()
+        t.name in {"rollout-policy-planner", "rollout-waypoint-executor"}
+        and t.is_alive()
         for t in threading.enumerate()
     )
 
@@ -650,15 +636,6 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
     service.stop()
 
 
-def _pose_layout():
-    # Single-arm layout: pose in the first 7 slots, no wrench slice.
-    return [{"side": "single_arm", "pose": slice(0, 7), "twist": None, "wrench": None}]
-
-
-def _unit_pose(x: float) -> list[float]:
-    return [x, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-
-
 def test_overlapped_replan_forces_and_extends_committed_path(
     tmp_path, monkeypatch
 ) -> None:
@@ -714,52 +691,6 @@ def test_overlapped_replan_forces_and_extends_committed_path(
     dt = 1.0 / float(settings.rollout.action_dt_hz)
     # Each schedule leaves a committed horizon covering at least the replan gap.
     assert all(extent >= 4 * dt - 1e-6 for extent in schedules)
-
-
-def test_replace_waypoints_replaces_undispatched_waypoints() -> None:
-    # A later chunk replaces every undispatched waypoint: the timeline
-    # tracks chunk B's grid and poses, not chunk A's.
-    robot = _FakeRobot("F1")
-    stop_event = threading.Event()
-    dispatcher = _WaypointDispatcher(
-        [robot], _pose_layout(), stop_event, (0.25, 0.6, 1.0, 2.5)
-    )
-    dt = 0.05
-    now = 100.0
-    # Chunk A spans now+dt .. now+8dt.
-    a_actions = [_unit_pose(float(k)) for k in range(8)]
-    a_times = [now + (k + 1) * dt for k in range(8)]
-    dispatcher.replace_waypoints(a_actions, a_times, now=now)
-    assert len(dispatcher._waypoints) == 8
-    assert dispatcher._waypoints[-1].target_time == pytest.approx(now + 8 * dt)
-    # Chunk B is issued mid-span; A's overlapping tail is dropped, not merged.
-    now_b = now + 2 * dt
-    b_actions = [_unit_pose(100.0 + k) for k in range(8)]
-    b_times = [now_b + (k + 1) * dt for k in range(8)]
-    dispatcher.replace_waypoints(b_actions, b_times, now=now_b)
-    assert len(dispatcher._waypoints) == 8
-    assert dispatcher._waypoints[0].target_time == pytest.approx(now_b + dt)
-    assert dispatcher._waypoints[-1].target_time == pytest.approx(now_b + 8 * dt)
-    command = dispatcher._waypoints[0].commands[0]
-    assert command is not None
-    assert command.pose[0] == pytest.approx(100.0)
-
-
-def test_anchor_offset_keeps_first_waypoint_ahead_of_filter() -> None:
-    # With inference latency < dt, offset 1 keeps waypoint 0 in the future so the
-    # whole chunk survives the dispatcher's past-filter; offset 0 loses waypoint 0.
-    dt = 0.05
-    latency = dt / 2  # inference finished before the k=0 waypoint's target time
-    for anchor, expected in ((1, 8), (0, 7)):
-        robot = _FakeRobot("F1")
-        dispatcher = _WaypointDispatcher(
-            [robot], _pose_layout(), threading.Event(), (0.25, 0.6, 1.0, 2.5)
-        )
-        loop_start = 100.0
-        actions = [_unit_pose(float(k)) for k in range(8)]
-        target_times = [loop_start + (k + anchor) * dt for k in range(8)]
-        dispatcher.replace_waypoints(actions, target_times, now=loop_start + latency)
-        assert dispatcher._last_scheduled == expected
 
 
 def test_n_action_steps_override_applies_clamps_and_skips(tmp_path) -> None:
