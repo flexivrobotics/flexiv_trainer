@@ -108,6 +108,10 @@ class TestCheckpointPathSecurity:
         with pytest.raises(ValueError, match="Access denied"):
             resolve_checkpoint_path(str(tmp_path / ".." / ".." / "etc"), tmp_path)
 
+    def test_missing_checkpoint_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="Checkpoint not found"):
+            resolve_checkpoint_path(str(tmp_path / "missing"), tmp_path)
+
     def test_checkpoint_with_prefix_collision_raises(self, tmp_path: Path) -> None:
         sibling = tmp_path.with_name(f"{tmp_path.name}-other")
         sibling.mkdir()

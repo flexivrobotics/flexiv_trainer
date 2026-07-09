@@ -86,6 +86,8 @@ def rollout_checkpoint_info(
         checkpoint_path = resolve_checkpoint_path(
             path, runtime.settings.storage.root
         )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Checkpoint not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 

@@ -65,14 +65,41 @@ def _checkpoint_model_dir(checkpoint_path: str) -> Path:
     return model_dir
 
 
+def _matching_child(parent: Path, name: str) -> Path | None:
+    try:
+        for child in parent.iterdir():
+            if child.name == name:
+                return child
+    except OSError:
+        return None
+    return None
+
+
 def resolve_checkpoint_path(checkpoint_path: str, storage_root: Path) -> Path:
     """Reject a client checkpoint path that escapes the storage root."""
-    root = os.path.realpath(os.path.expanduser(os.fspath(storage_root)))
-    resolved = os.path.realpath(os.path.expanduser(checkpoint_path))
-    root_prefix = root if root.endswith(os.sep) else root + os.sep
-    if resolved != root and not resolved.startswith(root_prefix):
+    root = storage_root.expanduser().resolve()
+    root_text = os.fspath(root)
+    root_prefix = root_text if root_text.endswith(os.sep) else root_text + os.sep
+    if checkpoint_path == root_text:
+        return root
+    if not checkpoint_path.startswith(root_prefix):
         raise ValueError(f"Access denied: path must be within storage root ({root})")
-    return Path(resolved)
+
+    parts = checkpoint_path[len(root_prefix) :].split(os.sep)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"Access denied: path must be within storage root ({root})")
+
+    resolved = root
+    for part in parts:
+        child = _matching_child(resolved, part)
+        if child is None:
+            raise FileNotFoundError("Checkpoint not found")
+        resolved = child.resolve()
+        if not resolved.is_relative_to(root):
+            raise ValueError(
+                f"Access denied: path must be within storage root ({root})"
+            )
+    return resolved
 
 
 def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
@@ -365,12 +392,13 @@ class RolloutService:
                     "(it holds the robot connection)."
                 )
 
-        resolved_checkpoint = resolve_checkpoint_path(
-            checkpoint_path, self._settings.storage.root
-        )
+        try:
+            resolved_checkpoint = resolve_checkpoint_path(
+                checkpoint_path, self._settings.storage.root
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"Checkpoint not found: {checkpoint_path}") from exc
         checkpoint_path = str(resolved_checkpoint)
-        if not resolved_checkpoint.exists():
-            raise RuntimeError(f"Checkpoint not found: {checkpoint_path}")
 
         device = self._resolve_device(self._settings.training.default_device)
         sides = self._get_active_sides()
