@@ -83,14 +83,17 @@ def rollout_checkpoint_info(
     )
 
     try:
-        resolve_checkpoint_path(path, runtime.settings.storage.root)
+        checkpoint_path = resolve_checkpoint_path(
+            path, runtime.settings.storage.root
+        )
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
+    resolved_path = str(checkpoint_path)
     return {
-        "task": _checkpoint_task(path),
-        "policy_type": _checkpoint_policy_type(path),
-        "requires_task": _checkpoint_requires_task(path),
+        "task": _checkpoint_task(resolved_path),
+        "policy_type": _checkpoint_policy_type(resolved_path),
+        "requires_task": _checkpoint_requires_task(resolved_path),
     }
 
 

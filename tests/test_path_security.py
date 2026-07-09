@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for path traversal protection in browse_path, preview_dataset, merge_episodes."""
+"""Tests for path traversal protection in dataset and rollout operations."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,6 +107,22 @@ class TestCheckpointPathSecurity:
     def test_checkpoint_with_traversal_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="Access denied"):
             resolve_checkpoint_path(str(tmp_path / ".." / ".." / "etc"), tmp_path)
+
+    def test_checkpoint_with_prefix_collision_raises(self, tmp_path: Path) -> None:
+        sibling = tmp_path.with_name(f"{tmp_path.name}-other")
+        sibling.mkdir()
+
+        with pytest.raises(ValueError, match="Access denied"):
+            resolve_checkpoint_path(str(sibling), tmp_path)
+
+    def test_checkpoint_symlink_escape_raises(self, tmp_path: Path) -> None:
+        outside = tmp_path.parent / "outside-checkpoint"
+        outside.mkdir()
+        link = tmp_path / "linked-checkpoint"
+        link.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="Access denied"):
+            resolve_checkpoint_path(str(link), tmp_path)
 
 
 class TestMergeEpisodesSecurity:

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -66,11 +67,12 @@ def _checkpoint_model_dir(checkpoint_path: str) -> Path:
 
 def resolve_checkpoint_path(checkpoint_path: str, storage_root: Path) -> Path:
     """Reject a client checkpoint path that escapes the storage root."""
-    resolved = Path(checkpoint_path).expanduser().resolve()
-    root = storage_root.expanduser().resolve()
-    if not resolved.is_relative_to(root):
+    root = os.path.realpath(os.path.expanduser(os.fspath(storage_root)))
+    resolved = os.path.realpath(os.path.expanduser(checkpoint_path))
+    root_prefix = root if root.endswith(os.sep) else root + os.sep
+    if resolved != root and not resolved.startswith(root_prefix):
         raise ValueError(f"Access denied: path must be within storage root ({root})")
-    return resolved
+    return Path(resolved)
 
 
 def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
@@ -363,8 +365,11 @@ class RolloutService:
                     "(it holds the robot connection)."
                 )
 
-        resolve_checkpoint_path(checkpoint_path, self._settings.storage.root)
-        if not Path(checkpoint_path).exists():
+        resolved_checkpoint = resolve_checkpoint_path(
+            checkpoint_path, self._settings.storage.root
+        )
+        checkpoint_path = str(resolved_checkpoint)
+        if not resolved_checkpoint.exists():
             raise RuntimeError(f"Checkpoint not found: {checkpoint_path}")
 
         device = self._resolve_device(self._settings.training.default_device)
