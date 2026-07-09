@@ -2513,6 +2513,28 @@ button:active {
     font-size: 0.85rem;
 }
 
+.rollout-service-card {
+    display: grid;
+    gap: 0.55rem;
+    min-width: 0;
+    padding: 0.68rem 1rem;
+    border-radius: 18px;
+}
+
+.rollout-service-card__header {
+    gap: 0.55rem;
+}
+
+.rollout-service-card .panel-header h2 {
+    margin: 0;
+    font-size: 1.08rem;
+}
+
+.rollout-service-card .training-controls__state {
+    font-size: 0.76rem;
+    line-height: 1.3;
+}
+
 #training-content {
     display: grid;
     gap: 0.95rem;

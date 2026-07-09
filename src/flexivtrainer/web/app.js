@@ -145,6 +145,10 @@ const state = {
             teleop: false,
             cameras: false,
         },
+        rolloutServiceBusy: {
+            teleop: null,
+            cameras: null,
+        },
     },
     telemetryHistory: {
         left: [],
@@ -3686,8 +3690,8 @@ function updateGripperInitButton(teleop) {
     button.title = !initialized
         ? "Connect teleoperation first"
         : started
-          ? "Stop teleoperation before initializing grippers"
-          : "";
+            ? "Stop teleoperation before initializing grippers"
+            : "";
 }
 
 async function initGrippers() {
@@ -5831,6 +5835,69 @@ async function startRolloutRun() {
     renderRollout();
 }
 
+function isRolloutServiceConnected(serviceKey, service = {}) {
+    if (serviceKey === "teleop_service") {
+        return !!state.teleopStatus?.teleop?.initialized || service.tone === "ok";
+    }
+    const cameras = Object.values(state.teleopStatus?.cameras?.cameras || {});
+    return cameras.some((camera) => !!camera?.started)
+        || service.tone === "ok"
+        || service.tone === "working";
+}
+
+function buildRolloutServiceCard(serviceKey, serviceName, fallbackLabel, isRunning) {
+    const services = state.teleopStatus?.services || state.summary?.services || {};
+    const service = services[serviceKey] || {};
+    const connected = isRolloutServiceConnected(serviceKey, service);
+    const action = connected ? "disconnect" : "connect";
+    const pendingAction = state.ui.rolloutServiceBusy[serviceName];
+    const busy = !!pendingAction;
+    const serialsMissing = serviceName === "teleop" && !connected && !allRobotSerialsConfigured();
+    const disabled = isRunning || busy || serialsMissing;
+    const serviceState = formatValue(service.state || (connected ? "Connected" : "Not connected"));
+    const tone = service.tone || (connected ? "ok" : "neutral");
+    const buttonLabel = action === "connect" ? "Connect" : "Disconnect";
+    const busyLabel = pendingAction === "connect" ? "Connecting…" : "Disconnecting…";
+    const title = isRunning
+        ? "Stop rollout before changing service connections."
+        : serialsMissing
+            ? ROBOT_SERIALS_REQUIRED_MESSAGE
+            : `${buttonLabel} ${fallbackLabel.toLowerCase()}`;
+
+    return `
+        <aside class="panel panel--soft rollout-service-card">
+            <div class="panel-header rollout-service-card__header">
+                <h2>${escapeHtml(fallbackLabel)}</h2>
+                <span class="teleop-system-card__dot teleop-system-card__dot--${escapeHtml(tone)}" role="img" aria-label="${escapeHtml(serviceState)}" title="${escapeHtml(serviceState)}"></span>
+            </div>
+            <div class="control-stack">
+                <button class="button-with-icon ${connected ? "stop-button" : "start-button"}" data-rollout-service="${serviceName}" data-action="${action}" type="button" title="${escapeHtml(title)}" ${disabled ? "disabled" : ""}>
+                    <span class="button-content">
+                        ${busy ? `<span class="button-spinner" aria-hidden="true"></span><span>${busyLabel}</span>` : `<span>${buttonLabel}</span>`}
+                    </span>
+                </button>
+            </div>
+            <p class="training-controls__state">Status: <strong>${escapeHtml(serviceState)}</strong></p>
+            ${serviceName === "teleop" ? `<p class="training-controls__state">Disconnect before rollout</p>` : ""}
+        </aside>
+    `;
+}
+
+async function controlRolloutService(serviceName, action) {
+    if (state.ui.rolloutServiceBusy[serviceName]) {
+        return;
+    }
+    state.ui.rolloutServiceBusy[serviceName] = action;
+    renderRollout();
+    try {
+        await controlHomeService(serviceName, action);
+        await refreshTeleopStatus();
+    } finally {
+        state.ui.rolloutServiceBusy[serviceName] = null;
+        renderRollout();
+    }
+}
+
 function renderRollout() {
     const container = byId("rollout-content");
     if (!container) {
@@ -5864,6 +5931,14 @@ function renderRollout() {
                     : "Idle";
     const primaryMarkup = isRunning ? TELEOP_STOP_MARKUP : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
+    const rolloutServices = state.teleopStatus?.services || state.summary?.services || {};
+    const rolloutServiceKey = ["cameras", "teleop_service"].map((serviceKey) => {
+        const service = rolloutServices[serviceKey] || {};
+        return `${serviceKey}:${service.tone || ""}:${service.state || ""}:${service.detail || ""}`;
+    }).join("|");
+    const rolloutServiceBusyKey = ["cameras", "teleop"]
+        .map((serviceName) => `${serviceName}:${state.ui.rolloutServiceBusy[serviceName] || ""}`)
+        .join("|");
 
     // Rebuild the content only when something it renders changed. The 1s poll
     // calls this every tick; rebuilding unconditionally would destroy and
@@ -5871,7 +5946,7 @@ function renderRollout() {
     const renderKey = [
         status.status, status.stop_reason || "", status.error || "",
         checkpoint, configuredDevice, deviceOptions, deviceDetail,
-        state.rolloutRequiresTask,
+        state.rolloutRequiresTask, rolloutServiceKey, rolloutServiceBusyKey,
     ].join("|");
     if (container.dataset.renderKey === renderKey) {
         renderRolloutCameras();
@@ -5908,6 +5983,8 @@ function renderRollout() {
                     <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
                     ${status.error ? `<p class="training-controls__state rollout-error">${escapeHtml(status.error)}</p>` : ""}
                 </aside>
+                ${buildRolloutServiceCard("cameras", "cameras", "Cameras", isRunning)}
+                ${buildRolloutServiceCard("teleop_service", "teleop", "Teleop Service", isRunning)}
             </div>
             <div class="training-main">
                 <section class="panel panel--soft">
@@ -5994,6 +6071,12 @@ function renderRollout() {
             renderRollout();
         };
     }
+    container.querySelectorAll("[data-rollout-service]").forEach((button) => {
+        button.onclick = () => {
+            controlRolloutService(button.dataset.rolloutService, button.dataset.action)
+                .catch((error) => showToast(error.message, true));
+        };
+    });
 }
 
 // Render the live camera feeds the policy consumes during rollout, using the
