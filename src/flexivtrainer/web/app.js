@@ -4423,7 +4423,7 @@ function renderTraining() {
                 <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
             </div>
             <div class="control-bar control-bar--floating-step-nav">
-                <button id="training-next-step" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
+                <button id="training-flow-next" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
             </div>`;
 
         const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
@@ -4447,7 +4447,7 @@ function renderTraining() {
                 renderTraining();
             };
         }
-        byId("training-next-step").onclick = () => {
+        byId("training-flow-next").onclick = () => {
             state.trainingStep = 2;
             renderTraining();
         };
@@ -4469,7 +4469,7 @@ function renderTraining() {
                     <div id="merged-dataset-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav">
                         <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
-                        <button id="training-next-step" type="button">Next</button>
+                        <button id="training-flow-next" type="button">Next</button>
                     </div>
                 </div>
             </div>`;
@@ -4484,7 +4484,7 @@ function renderTraining() {
             state.trainingStep = 1;
             renderTraining();
         };
-        byId("training-next-step").onclick = () => {
+        byId("training-flow-next").onclick = () => {
             state.trainingStep = 3;
             renderTraining();
         };
