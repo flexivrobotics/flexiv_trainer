@@ -497,6 +497,15 @@ button:disabled {
     font-size: revert;
 }
 
+/* Controls sharing the header row with the title (a select-all toggle, a status
+   dot): give them the same bottom margin as the title so the flex row centers
+   both on the same box, and the control's center lines up with the title text
+   (not the margin-inflated line). */
+.panel-header .toggle-all-button,
+.panel-header .teleop-system-card__dot {
+    margin-bottom: 0.5rem;
+}
+
 .kv-list {
     display: grid;
     gap: 0.8rem;
