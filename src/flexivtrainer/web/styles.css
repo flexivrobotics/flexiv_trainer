@@ -2845,7 +2845,6 @@ button:active {
 }
 
 .log-pane {
-    margin-top: 1rem;
     min-height: 0;
     max-height: calc(100vh - 14rem);
     overflow-x: auto;
