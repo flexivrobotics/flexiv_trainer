@@ -2331,7 +2331,7 @@ function renderHomeEndEffectors() {
         tile.className = "panel end-effector-tile";
         tile.innerHTML = `
             <div class="panel-header">
-                <h2>${END_EFFECTOR_TILE_LABELS[side] || "End Effector Configuration"}</h2>
+                <h3>${END_EFFECTOR_TILE_LABELS[side] || "End Effector Configuration"}</h3>
             </div>
             <div class="end-effector-row">
                 <label class="robot-input-group">
@@ -4168,7 +4168,7 @@ function renderProcessing() {
         container.innerHTML = `
             <div class="panel-header panel-header--training-step">
                 <div>
-                    <h2 class="training-step-title">Load Episodes</h2>
+                    <h3 class="training-step-title">Load Episodes</h3>
                 </div>
             </div>
             <div class="episode-list" id="load-episode-list"></div>
@@ -4245,7 +4245,7 @@ function renderProcessing() {
             <div class="training-layout">
                 <aside class="panel">
                     <div class="panel-header">
-                        <h2>Episodes</h2>
+                        <h3>Episodes</h3>
                         <button class="secondary-button toggle-all-button" id="training-select-all" type="button" title="${state.selectedEpisodes.length === state.episodes.length ? "Deselect all episodes" : "Select all episodes"}" aria-label="${state.selectedEpisodes.length === state.episodes.length ? "Deselect all episodes" : "Select all episodes"}">${state.selectedEpisodes.length === state.episodes.length ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG}</button>
                     </div>
                     <div class="episode-list" id="training-episode-picker"></div>
@@ -4352,11 +4352,11 @@ function renderProcessing() {
         container.innerHTML = `
             <div class="training-layout">
                 <aside class="panel">
-                    <div class="panel-header"><h2>Episodes</h2></div>
+                    <div class="panel-header"><h3>Episodes</h3></div>
                     <div class="episode-list" id="merged-episode-picker"></div>
                 </aside>
                 <div class="training-main">
-                    <div class="panel-header"><div><h2>${escapeHtml(title)}</h2></div></div>
+                    <div class="panel-header"><div><h3>${escapeHtml(title)}</h3></div></div>
                     <div id="merged-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button><button id="merge-next" type="button">Next</button></div>
                 </div>
@@ -4426,7 +4426,7 @@ function renderTraining() {
                 <button id="training-next-step" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
             </div>`;
 
-        const headerHtml = `<div class="panel-header panel-header--training-step"><div><h2 class="training-step-title">Load Training Dataset</h2></div></div>`;
+        const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
 
         container.innerHTML = `
             ${headerHtml}
@@ -4461,11 +4461,11 @@ function renderTraining() {
         container.innerHTML = `
             <div class="training-layout">
                 <aside class="panel">
-                    <div class="panel-header"><h2>Episodes</h2></div>
+                    <div class="panel-header"><h3>Episodes</h3></div>
                     <div class="episode-list" id="training-dataset-episode-picker"></div>
                 </aside>
                 <div class="training-main">
-                    <div class="panel-header"><div><h2>${escapeHtml(tTitle)}</h2></div></div>
+                    <div class="panel-header"><div><h3>${escapeHtml(tTitle)}</h3></div></div>
                     <div id="merged-dataset-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav">
                         <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
@@ -4496,7 +4496,7 @@ function renderTraining() {
         const policiesReady = !!state.trainingPolicies;
         const outputDir = getTrainingOutputDir();
         container.innerHTML = `
-            <div class="panel-header"><div><h2>Choose Training Policy</h2></div></div>
+            <div class="panel-header"><div><h3>Choose Training Policy</h3></div></div>
             <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
                 <div class="policy-grid" id="policy-grid"></div>
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
@@ -4589,7 +4589,7 @@ function renderTraining() {
         <div class="training-layout">
             <div class="training-sidebar">
                 <aside class="panel panel--soft control-panel training-device-panel">
-                    <div class="panel-header"><h2>Computation Device</h2></div>
+                    <div class="panel-header"><h3>Computation Device</h3></div>
                     <div class="training-device-row">
                         <label class="training-device-field" for="training-device-select">
                             <select id="training-device-select" ${(isRunning || isDeviceEvalBusy) ? "disabled" : ""}>
@@ -4603,7 +4603,7 @@ function renderTraining() {
                     <p class="training-device-detail">${escapeHtml(deviceDetail)}</p>
                 </aside>
                 <aside class="panel panel--soft control-panel training-controls">
-                    <div class="panel-header"><h2>Training Control</h2></div>
+                    <div class="panel-header"><h3>Training Control</h3></div>
                     <div class="control-stack">
                         <button id="training-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
                             ${primaryMarkup}
@@ -5867,7 +5867,7 @@ function buildRolloutServiceCard(serviceKey, serviceName, fallbackLabel, isRunni
     return `
         <aside class="panel panel--soft rollout-service-card">
             <div class="panel-header rollout-service-card__header">
-                <h2>${escapeHtml(fallbackLabel)}</h2>
+                <h3>${escapeHtml(fallbackLabel)}</h3>
                 <span class="teleop-system-card__dot teleop-system-card__dot--${escapeHtml(tone)}" role="img" aria-label="${escapeHtml(serviceState)}" title="${escapeHtml(serviceState)}"></span>
             </div>
             <div class="control-stack">
@@ -5960,7 +5960,7 @@ function renderRollout() {
         <div class="training-layout">
             <div class="training-sidebar">
                 <aside class="panel panel--soft control-panel training-device-panel">
-                    <div class="panel-header"><h2>Computation Device</h2></div>
+                    <div class="panel-header"><h3>Computation Device</h3></div>
                     <div class="training-device-row">
                         <label class="training-device-field" for="rollout-device-select">
                             <select id="rollout-device-select" ${isRunning ? "disabled" : ""}>
@@ -5974,7 +5974,7 @@ function renderRollout() {
                     <p class="training-device-detail">${escapeHtml(deviceDetail)}</p>
                 </aside>
                 <aside class="panel panel--soft control-panel training-controls">
-                    <div class="panel-header"><h2>Rollout Control</h2></div>
+                    <div class="panel-header"><h3>Rollout Control</h3></div>
                     <div class="control-stack">
                         <button id="rollout-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
                             ${primaryMarkup}
@@ -5988,7 +5988,7 @@ function renderRollout() {
             </div>
             <div class="training-main">
                 <section class="panel panel--soft">
-                    <div class="panel-header"><h2>Policy Checkpoint</h2></div>
+                    <div class="panel-header"><h3>Policy Checkpoint</h3></div>
                     <div class="rollout-checkpoint">
                         <code class="rollout-checkpoint__path">${checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected"}</code>
                         <button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>
@@ -6001,18 +6001,18 @@ function renderRollout() {
                         ${isRunning || !state.rolloutRequiresTask ? "disabled" : ""}></textarea>
                 </section>
                 <section class="panel panel--soft">
-                    <div class="panel-header"><h2>Policy Camera Input</h2></div>
+                    <div class="panel-header"><h3>Policy Camera Input</h3></div>
                     <div id="rollout-cameras" class="rollout-cameras"></div>
                 </section>
                 <section class="panel panel--soft">
                     <div class="panel-header">
-                        <h2>Inference Frequency</h2>
+                        <h3>Inference Frequency</h3>
                         <span class="feed__fps rollout-hz-badge" id="rollout-hz-badge"></span>
                     </div>
                     <div class="trend-chart rollout-hz-chart" id="rollout-hz-chart"></div>
                 </section>
                 <section class="panel panel--soft">
-                    <div class="panel-header"><h2>Rollout Log</h2></div>
+                    <div class="panel-header"><h3>Rollout Log</h3></div>
                     <div class="log-pane" id="rollout-terminal-pane"></div>
                 </section>
             </div>

@@ -42,6 +42,18 @@
     box-sizing: border-box;
 }
 
+/* Unified heading style: all panel titles render as the browser-default h3
+   (see the <h3> panel titles across index.html / app.js). Zero the top margin
+   on every heading level so titles sit flush against the panel top edge. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    margin-top: 0;
+}
+
 body {
     margin: 0;
     min-width: 320px;
@@ -482,9 +494,9 @@ button:disabled {
     color: var(--muted);
 }
 
-.view[data-view="home"] .panel>h2,
-.view[data-view="home"] .panel-header h2 {
-    font-size: 1.18rem;
+.view[data-view="home"] .panel>h3,
+.view[data-view="home"] .panel-header h3 {
+    font-size: revert;
 }
 
 .kv-list {
@@ -1212,9 +1224,9 @@ button:disabled {
     padding: 1rem;
 }
 
-.control-panel .panel-header h2,
-.teleop-status-panel .panel-header h2 {
-    font-size: 1.08rem;
+.control-panel .panel-header h3,
+.teleop-status-panel .panel-header h3 {
+    font-size: revert;
     margin: 0;
 }
 
@@ -2116,8 +2128,8 @@ button:active {
 .training-step-title {
     margin: 0;
     color: var(--ink);
-    font-size: 1.1rem;
-    font-weight: 700;
+    font-size: revert;
+    font-weight: revert;
     letter-spacing: 0;
     text-transform: none;
 }
@@ -2525,9 +2537,9 @@ button:active {
     gap: 0.55rem;
 }
 
-.rollout-service-card .panel-header h2 {
+.rollout-service-card .panel-header h3 {
     margin: 0;
-    font-size: 1.08rem;
+    font-size: revert;
 }
 
 .rollout-service-card .training-controls__state {
@@ -2577,12 +2589,12 @@ button:active {
     padding-bottom: 1.5rem;
 }
 
-#training-content .panel-header h2,
+#training-content .panel-header h3,
 #training-content .panel h3,
-#processing-content .panel-header h2,
+#processing-content .panel-header h3,
 #processing-content .panel h3 {
     margin: 0.1rem 0 0;
-    font-size: 1.1rem;
+    font-size: revert;
 }
 
 #training-content .episode-list {
