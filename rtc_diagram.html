@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RTC action-chunk inference cycle</title>
+<style>
+  html, body { margin: 0; }
+  :root {
+    --bg: #f7f6f2;
+    --panel: #ffffff;
+    --ink: #1a1e24;
+    --ink-soft: #4a535f;
+    --ink-faint: #868e99;
+    --line: #dfe1de;
+    --line-strong: #c7cac6;
+    --old: #c07a1e;         /* amber — previous/frozen chunk */
+    --old-fill: #f4e6cc;
+    --new: #1f8fa0;         /* cyan — freshly planned chunk */
+    --new-fill: #d6eef1;
+    --seam: #c0503f;        /* red — jerk / disagreement */
+    --seam-fill: #f6dcd6;
+    --noise: #6a5ca8;       /* violet — noise level */
+    --accent: var(--new);
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --radius: 10px;
+    --maxw: 940px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --panel: #161b22;
+      --ink: #e6e9ed;
+      --ink-soft: #a8b0bb;
+      --ink-faint: #6b7481;
+      --line: #262d37;
+      --line-strong: #333c48;
+      --old: #e0a340;
+      --old-fill: #3a2f18;
+      --new: #3db8c6;
+      --new-fill: #12333a;
+      --seam: #e07a68;
+      --seam-fill: #3a201b;
+      --noise: #9a8ad6;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f6f2; --panel: #ffffff; --ink: #1a1e24; --ink-soft: #4a535f;
+    --ink-faint: #868e99; --line: #dfe1de; --line-strong: #c7cac6;
+    --old: #c07a1e; --old-fill: #f4e6cc; --new: #1f8fa0; --new-fill: #d6eef1;
+    --seam: #c0503f; --seam-fill: #f6dcd6; --noise: #6a5ca8;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --panel: #161b22; --ink: #e6e9ed; --ink-soft: #a8b0bb;
+    --ink-faint: #6b7481; --line: #262d37; --line-strong: #333c48;
+    --old: #e0a340; --old-fill: #3a2f18; --new: #3db8c6; --new-fill: #12333a;
+    --seam: #e07a68; --seam-fill: #3a201b; --noise: #9a8ad6;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 56px 24px 96px; }
+
+  header { margin-bottom: 8px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--accent); font-weight: 600;
+  }
+  h1 {
+    font-size: clamp(28px, 5vw, 42px); line-height: 1.1; margin: 10px 0 8px;
+    letter-spacing: -0.02em; text-wrap: balance; font-weight: 680;
+  }
+  .lede { font-size: 18px; color: var(--ink-soft); max-width: 64ch; margin: 0; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 28px 0 8px;
+    padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--panel); font-family: var(--mono); font-size: 12.5px;
+  }
+  .legend b { font-weight: 600; }
+  .key { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-soft); }
+  .swatch { width: 15px; height: 15px; border-radius: 4px; flex: none; border: 1px solid rgba(128,128,128,.25); }
+
+  section.panel {
+    margin-top: 34px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 14px;
+    padding: 26px 26px 30px;
+  }
+  .step-tag {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--bg); background: var(--accent);
+    display: inline-block; padding: 3px 10px; border-radius: 20px;
+  }
+  h2 { font-size: 22px; margin: 12px 0 6px; letter-spacing: -0.01em; font-weight: 640; }
+  h2 .t { font-family: var(--mono); color: var(--ink-faint); font-weight: 500; font-size: 16px; }
+  section.panel p { margin: 8px 0 0; color: var(--ink-soft); max-width: 68ch; }
+  section.panel p.note { font-size: 14.5px; }
+  code, .m { font-family: var(--mono); font-size: .92em; }
+  section.panel p code { color: var(--ink); background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 5px; border-radius: 4px; }
+
+  .diagram { margin: 20px 0 4px; overflow-x: auto; }
+  svg { display: block; max-width: 100%; height: auto; }
+  svg text { font-family: var(--mono); }
+
+  .callout {
+    margin-top: 18px; border-left: 3px solid var(--accent);
+    padding: 10px 16px; background: color-mix(in srgb, var(--accent) 7%, transparent);
+    border-radius: 0 8px 8px 0; font-size: 14.5px; color: var(--ink-soft);
+  }
+  .callout b { color: var(--ink); }
+  .callout.warn { border-color: var(--seam); background: color-mix(in srgb, var(--seam) 8%, transparent); }
+
+  .divider-note {
+    text-align: center; font-family: var(--mono); font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint);
+    margin: 30px 0 -4px;
+  }
+
+  footer { margin-top: 40px; color: var(--ink-faint); font-size: 13px; font-family: var(--mono); text-align: center; }
+  footer code { color: var(--ink-soft); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Real-Time Chunking · diffusion policy rollout</div>
+    <h1>One replan cycle, start to finish</h1>
+    <p class="lede">How a fresh action chunk is inferred, why consecutive chunks used to jerk, and how re-noising the previous tail welds the seam shut — step by step.</p>
+  </header>
+
+  <div class="legend" aria-label="legend">
+    <span class="key"><span class="swatch" style="background:var(--old)"></span><b>old chunk</b> — currently executing</span>
+    <span class="key"><span class="swatch" style="background:var(--new)"></span><b>new chunk</b> — freshly planned</span>
+    <span class="key"><span class="swatch" style="background:var(--noise)"></span><b>noise level</b> — diffusion step t</span>
+    <span class="key"><span class="swatch" style="background:var(--seam)"></span><b>seam</b> — the jerk</span>
+  </div>
+
+  <!-- ========================= PANEL 0 : THE PROBLEM ========================= -->
+  <section class="panel">
+    <span class="step-tag" style="background:var(--seam)">The problem</span>
+    <h2>Naïve replan — chunks disagree at the seam</h2>
+    <p class="note">The robot is mid-way through the <span class="m" style="color:var(--old)">old chunk</span> when a new observation arrives and a <span class="m" style="color:var(--new)">new chunk</span> is denoised from independent random noise. It knows nothing about the path in flight, so its first waypoint can land far from where the robot was heading. Replacing the pending waypoints there produces a <span class="m" style="color:var(--seam)">discontinuity</span> — the jerk.</p>
+    <div class="diagram" id="d-problem"></div>
+    <div class="callout warn"><b>Root cause.</b> Two trajectories sampled from unrelated noise share no continuity constraint. A post-hoc trajectory blend can't fix it — it just averages two dynamically-inconsistent paths.</div>
+  </section>
+
+  <div class="divider-note">↓ RTC rewrites the cycle ↓</div>
+
+  <!-- ========================= PANEL 1 : TIMELINE ========================= -->
+  <section class="panel">
+    <span class="step-tag">Overview</span>
+    <h2>The overlapped cycle</h2>
+    <p class="note">Inference takes time. While the new chunk is computing, the robot keeps executing the old one — so by the time the new chunk lands, the first <code>d</code> steps of it are <em>already in the past</em>. RTC freezes exactly those <code>d</code> steps onto the still-executing tail, so the new chunk continues the old one instead of contradicting it.</p>
+    <div class="diagram" id="d-timeline"></div>
+    <div class="callout"><b>d = inference delay.</b> How many action steps elapse during inference (<code>infer_ms / dt</code>). <b>s = execution horizon</b> — where the blend from old→new finishes. Constraint: <span class="m">d ≤ s ≤ H − d</span>.</div>
+  </section>
+
+  <!-- ========================= PANEL 2 : INSIDE THE DENOISER ========================= -->
+  <section class="panel">
+    <span class="step-tag">Inside one inference</span>
+    <h2>Denoising loop with a frozen prefix <span class="t">× 16 steps</span></h2>
+    <p class="note">A fresh chunk starts as pure noise and is denoised over your 16 DDIM steps. At <em>every</em> step, RTC re-asserts the prefix: it re-noises the clean old-tail to the current noise level, blends it in under the fade weights, then lets the black-box model denoise one step.</p>
+    <div class="diagram" id="d-loop"></div>
+    <div class="callout"><b>The model never knows.</b> It always receives a chunk uniformly noised to level <span class="m">t</span> — it can't tell the prefix was planted. That's why this works on an unmodified, already-trained policy.</div>
+  </section>
+
+  <!-- ========================= PANEL 3 : RE-NOISE ZOOM ========================= -->
+  <section class="panel">
+    <span class="step-tag" style="background:var(--noise)">Zoom · the re-noise</span>
+    <h2>Lifting the clean prefix up to noise level t</h2>
+    <p class="note">The rest of the sample sits at noise level <span class="m">t</span>, but the prefix is clean (level 0). To make them compatible, jump the prefix up to the same level in one closed-form move — the diffusion <em>forward</em> formula, no model, no loop:</p>
+    <div class="diagram" id="d-renoise"></div>
+    <p class="note" style="margin-top:16px"><code>noisy_prev = √(ᾱ<sub>t</sub>)·prev_actions + √(1−ᾱ<sub>t</sub>)·target_noise</code> &nbsp;— <span class="m">ᾱ<sub>t</sub></span> is a precomputed constant; <span class="m">target_noise</span> is sampled once per chunk and reused every step so the prefix rides the same latent path.</p>
+  </section>
+
+  <!-- ========================= PANEL 4 : THE FADE ========================= -->
+  <section class="panel">
+    <span class="step-tag">The blend</span>
+    <h2>Fade weights — hard freeze, then hand off</h2>
+    <p class="note">Per position across the horizon: weight <span class="m">1.0</span> = take the old path exactly; weight <span class="m">0.0</span> = fully freshly planned. The first <code>d</code> steps are pinned hard; from <code>d</code> to <code>s</code> the weight decays, handing control smoothly to the new plan.</p>
+    <div class="diagram" id="d-fade"></div>
+    <div class="callout"><b>Two schedules.</b> <span class="m" style="color:var(--new)">exp</span> hands off fast (steeper); <span class="m" style="color:var(--old)">linear</span> is gentler. Tunable via <code>rtc_prefix_schedule</code>.</div>
+  </section>
+
+  <!-- ========================= PANEL 5 : RESULT ========================= -->
+  <section class="panel">
+    <span class="step-tag" style="background:var(--new)">Result</span>
+    <h2>Chunks that weld instead of clash</h2>
+    <p class="note">The new chunk now leaves the old one exactly where the robot is, and only diverges once past the frozen head. Executed end-to-end, replans become invisible — one continuous path.</p>
+    <div class="diagram" id="d-result"></div>
+  </section>
+
+  <footer>
+    rtc_conditional_sample() · flexivtrainer/policies/rtc_diffusion.py &nbsp;·&nbsp; DDIM · 16 steps · H=16
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const NS = "http://www.w3.org/2000/svg";
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+  function el(name, attrs) {
+    const e = document.createElementNS(NS, name);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function txt(x, y, s, attrs) {
+    const t = el("text", Object.assign({ x, y, "font-size": 12, fill: "var(--ink-soft)" }, attrs || {}));
+    t.textContent = s;
+    return t;
+  }
+  function svg(w, h) {
+    const s = el("svg", { viewBox: `0 0 ${w} ${h}`, width: w, height: h, role: "img" });
+    return s;
+  }
+
+  // Sample paths (a gentle curve = "old", a diverging curve = "new")
+  const H = 16;
+  function oldPath(i) { return Math.sin(i * 0.38) * 26; }
+  function newBad(i) { return Math.sin(i * 0.38 + 1.5) * 30 + 14; } // disagreeing chunk
+  function newGood(i, d) {
+    // continues old for i<d, then eases toward a fresh direction
+    const base = oldPath(i);
+    const fresh = Math.sin(i * 0.30 + 0.4) * 24 - 10;
+    const s = 8;
+    let w = i <= d ? 1 : (i >= s ? 0 : 1 - (i - d) / (s - d));
+    return base * w + fresh * (1 - w);
+  }
+
+  // ---- shared plotting helpers ----
+  function plot(s, pts, x0, y0, dx, color, opts) {
+    opts = opts || {};
+    let dpath = "";
+    pts.forEach((p, i) => { dpath += (i ? " L" : "M") + (x0 + i * dx) + " " + (y0 - p); });
+    const path = el("path", {
+      d: dpath, fill: "none", stroke: color,
+      "stroke-width": opts.w || 2.5, "stroke-linecap": "round", "stroke-linejoin": "round",
+    });
+    if (opts.dash) path.setAttribute("stroke-dasharray", opts.dash);
+    if (opts.opacity) path.setAttribute("opacity", opts.opacity);
+    s.appendChild(path);
+    if (opts.dots) {
+      pts.forEach((p, i) => s.appendChild(el("circle", { cx: x0 + i * dx, cy: y0 - p, r: opts.dots, fill: color })));
+    }
+    return path;
+  }
+
+  /* ============ PANEL 0: THE PROBLEM ============ */
+  (function () {
+    const W = 860, Hh = 250, s = svg(W, Hh);
+    const x0 = 60, dx = (W - 110) / (H - 1), mid = 120;
+    // baseline grid
+    s.appendChild(el("line", { x1: 40, y1: mid, x2: W - 30, y2: mid, stroke: "var(--line)", "stroke-width": 1 }));
+    // old chunk, executed portion solid then dashed remainder
+    const oldPts = []; for (let i = 0; i < H; i++) oldPts.push(oldPath(i));
+    const dSplit = 6;
+    plot(s, oldPts.slice(0, dSplit + 1), x0, mid, dx, "var(--old)", { w: 3, dots: 3 });
+    plot(s, oldPts.slice(dSplit), x0 + dSplit * dx, mid, dx, "var(--old)", { w: 2, dash: "3 5", opacity: .5 });
+    // new (bad) chunk from the split
+    const badPts = []; for (let i = 0; i < H; i++) badPts.push(newBad(i));
+    plot(s, badPts.slice(dSplit), x0 + dSplit * dx, mid, dx, "var(--new)", { w: 3, dots: 3 });
+    // seam marker
+    const sx = x0 + dSplit * dx;
+    const oy = mid - oldPts[dSplit], ny = mid - badPts[dSplit];
+    s.appendChild(el("line", { x1: sx, y1: oy, x2: sx, y2: ny, stroke: "var(--seam)", "stroke-width": 2.5, "stroke-dasharray": "2 3" }));
+    s.appendChild(el("circle", { cx: sx, cy: ny, r: 5, fill: "var(--seam)" }));
+    const burst = el("path", { d: `M${sx - 9} ${(oy+ny)/2 - 9} L${sx+9} ${(oy+ny)/2 + 9} M${sx+9} ${(oy+ny)/2 - 9} L${sx-9} ${(oy+ny)/2 + 9}`, stroke: "var(--seam)", "stroke-width": 3, "stroke-linecap": "round" });
+    s.appendChild(burst);
+    s.appendChild(txt(sx + 14, (oy + ny) / 2, "JERK", { fill: "var(--seam)", "font-weight": 700, "font-size": 13 }));
+    s.appendChild(txt(x0, Hh - 22, "executed", { fill: "var(--old)" }));
+    s.appendChild(txt(sx + 4, Hh - 22, "replan point", { fill: "var(--ink-faint)" }));
+    s.appendChild(txt(W - 190, Hh - 22, "new chunk (from fresh noise)", { fill: "var(--new)" }));
+    document.getElementById("d-problem").appendChild(s);
+  })();
+
+  /* ============ PANEL 1: TIMELINE ============ */
+  (function () {
+    const W = 860, Hh = 300, s = svg(W, Hh);
+    const x0 = 40, dx = (W - 80) / 24;
+    const laneY = { obs: 46, inf: 96, oldc: 168, newc: 224 };
+    const barH = 26;
+    function lane(y, label) {
+      s.appendChild(txt(x0, y - 12, label, { fill: "var(--ink-faint)", "font-size": 11.5, "letter-spacing": ".08em" }));
+    }
+    function block(x, w, y, fill, stroke, label, labelColor) {
+      s.appendChild(el("rect", { x, y, width: w, height: barH, rx: 6, fill, stroke: stroke || "none", "stroke-width": 1.5 }));
+      if (label) { const t = txt(x + 9, y + barH / 2 + 4, label, { fill: labelColor || "var(--ink)", "font-size": 12, "font-weight": 600 }); s.appendChild(t); }
+    }
+    // OLD chunk executing across the whole window
+    lane(laneY.oldc, "OLD CHUNK · executing");
+    block(x0, dx * 14, laneY.oldc, "var(--old-fill)", "var(--old)", "old actions", "var(--old)");
+    // frozen d region highlight
+    const dStart = 6, dLen = 3;
+    s.appendChild(el("rect", { x: x0 + dStart * dx, y: laneY.oldc - 4, width: dLen * dx, height: barH + 8, rx: 6, fill: "none", stroke: "var(--old)", "stroke-width": 2, "stroke-dasharray": "4 3" }));
+
+    // inference bar (spanning d)
+    lane(laneY.inf, "INFERENCE · computing new chunk");
+    block(x0 + dStart * dx, dLen * dx, laneY.inf, "var(--new-fill)", "var(--new)", "denoise ×16", "var(--new)");
+    // arrow from obs to inference
+    lane(laneY.obs, "OBSERVATION");
+    block(x0 + dStart * dx, dx * 0.5, laneY.obs, "var(--noise)", "none", "", "");
+    s.appendChild(el("line", { x1: x0 + dStart * dx + 4, y1: laneY.obs + barH, x2: x0 + dStart * dx + 4, y2: laneY.inf, stroke: "var(--ink-faint)", "stroke-width": 1.5, "marker-end": "url(#arr)" }));
+
+    // NEW chunk landing after inference, overlapping old
+    lane(laneY.newc, "NEW CHUNK · lands & continues");
+    const nStart = dStart + dLen;
+    block(x0 + nStart * dx, dx * 12, laneY.newc, "var(--new-fill)", "var(--new)", "new actions", "var(--new)");
+    // frozen prefix ghost at head of new chunk
+    block(x0 + nStart * dx, dLen * dx, laneY.newc, "var(--old-fill)", "var(--old)", "", "");
+    s.appendChild(txt(x0 + nStart * dx + 6, laneY.newc + barH / 2 + 4, "frozen", { fill: "var(--old)", "font-size": 11, "font-weight": 700 }));
+
+    // brace: d
+    const bx1 = x0 + dStart * dx, bx2 = x0 + (dStart + dLen) * dx, by = laneY.inf - 26;
+    s.appendChild(el("path", { d: `M${bx1} ${by} v-6 H${bx2} v6`, fill: "none", stroke: "var(--new)", "stroke-width": 1.5 }));
+    s.appendChild(txt((bx1 + bx2) / 2, by - 12, "d", { fill: "var(--new)", "text-anchor": "middle", "font-weight": 700, "font-size": 14 }));
+    s.appendChild(txt((bx1 + bx2) / 2, by - 12, "", {}));
+
+    // time axis
+    s.appendChild(el("line", { x1: x0, y1: 270, x2: W - 30, y2: 270, stroke: "var(--line-strong)", "stroke-width": 1 }));
+    s.appendChild(txt(x0, 288, "t = now", { fill: "var(--ink-faint)" }));
+    s.appendChild(txt(x0 + dStart * dx - 6, 288, "replan", { fill: "var(--ink-faint)" }));
+    s.appendChild(txt(W - 60, 288, "time →", { fill: "var(--ink-faint)" }));
+
+    // arrow marker
+    const defs = el("defs", {});
+    const marker = el("marker", { id: "arr", markerWidth: 8, markerHeight: 8, refX: 4, refY: 4, orient: "auto" });
+    marker.appendChild(el("path", { d: "M0 0 L8 4 L0 8 z", fill: "var(--ink-faint)" }));
+    defs.appendChild(marker); s.appendChild(defs);
+
+    document.getElementById("d-timeline").appendChild(s);
+  })();
+
+  /* ============ PANEL 2: DENOISE LOOP ============ */
+  (function () {
+    const W = 860, Hh = 210, s = svg(W, Hh);
+    const steps = [1000, 700, 450, 250, 90, 1]; // representative noise levels
+    const n = steps.length;
+    const x0 = 70, gap = (W - 120) / (n - 1), cy = 96, boxW = 74, boxH = 60;
+    // connecting track
+    s.appendChild(el("line", { x1: x0, y1: cy, x2: x0 + (n - 1) * gap, y2: cy, stroke: "var(--line-strong)", "stroke-width": 2 }));
+    steps.forEach((lvl, i) => {
+      const x = x0 + i * gap;
+      // noise intensity: box fill opacity from violet
+      const frac = lvl / 1000;
+      const bx = x - boxW / 2, by = cy - boxH / 2;
+      s.appendChild(el("rect", { x: bx, y: by, width: boxW, height: boxH, rx: 8, fill: "var(--panel)", stroke: "var(--line-strong)", "stroke-width": 1.5 }));
+      // top slab = frozen prefix (amber), bottom = sample (cyan), noise grain via opacity
+      s.appendChild(el("rect", { x: bx, y: by, width: boxW, height: boxH * 0.34, rx: 6, fill: "var(--old-fill)", stroke: "var(--old)", "stroke-width": 1 }));
+      s.appendChild(el("rect", { x: bx, y: by + boxH * 0.34, width: boxW, height: boxH * 0.66, fill: "var(--new-fill)", opacity: 0.4 + 0.6 * (1 - frac) }));
+      // noise overlay
+      s.appendChild(el("rect", { x: bx, y: by, width: boxW, height: boxH, rx: 8, fill: "var(--noise)", opacity: 0.30 * frac }));
+      s.appendChild(txt(x, by - 10, "t=" + lvl, { "text-anchor": "middle", fill: "var(--noise)", "font-size": 11, "font-weight": 600 }));
+      s.appendChild(txt(x, by + boxH * 0.34 / 2 + 3.5, "prefix", { "text-anchor": "middle", fill: "var(--old)", "font-size": 8.5, "font-weight": 700 }));
+      // arrows + labels between boxes
+      if (i < n - 1) {
+        const ax1 = x + boxW / 2 + 3, ax2 = x0 + (i + 1) * gap - boxW / 2 - 3;
+        s.appendChild(el("line", { x1: ax1, y1: cy, x2: ax2, y2: cy, stroke: "var(--ink-faint)", "stroke-width": 1.5, "marker-end": "url(#arr2)" }));
+      }
+    });
+    // captions under the cycle
+    s.appendChild(txt(x0, 168, "① re-noise prefix → t", { fill: "var(--noise)", "font-size": 12, "font-weight": 600 }));
+    s.appendChild(txt(x0 + gap * 2 - 30, 168, "② blend under weights", { fill: "var(--old)", "font-size": 12, "font-weight": 600 }));
+    s.appendChild(txt(x0 + gap * 3.6, 168, "③ model denoises one step", { fill: "var(--new)", "font-size": 12, "font-weight": 600 }));
+    s.appendChild(txt(x0 + (n-1)*gap, 188, "clean chunk →", { "text-anchor": "end", fill: "var(--ink-soft)", "font-size": 12 }));
+    s.appendChild(txt(x0 - 22, cy + 4, "noise", { "text-anchor": "end", fill: "var(--ink-faint)", "font-size": 10 }));
+
+    const defs = el("defs", {});
+    const m = el("marker", { id: "arr2", markerWidth: 8, markerHeight: 8, refX: 6, refY: 4, orient: "auto" });
+    m.appendChild(el("path", { d: "M0 0 L8 4 L0 8 z", fill: "var(--ink-faint)" }));
+    defs.appendChild(m); s.appendChild(defs);
+    document.getElementById("d-loop").appendChild(s);
+  })();
+
+  /* ============ PANEL 3: RE-NOISE ZOOM ============ */
+  (function () {
+    const W = 860, Hh = 190, s = svg(W, Hh);
+    const cy = 84, boxW = 150, boxH = 74;
+    function bar(cx, label, fills, sub, subcol) {
+      const bx = cx - boxW / 2, by = cy - boxH / 2;
+      s.appendChild(el("rect", { x: bx, y: by, width: boxW, height: boxH, rx: 10, fill: "var(--panel)", stroke: "var(--line-strong)", "stroke-width": 1.5 }));
+      fills.forEach(f => s.appendChild(el("rect", Object.assign({ rx: 8 }, f))));
+      s.appendChild(txt(cx, by + boxH + 22, label, { "text-anchor": "middle", fill: "var(--ink)", "font-size": 13, "font-weight": 600 }));
+      if (sub) s.appendChild(txt(cx, by + boxH + 40, sub, { "text-anchor": "middle", fill: subcol || "var(--ink-faint)", "font-size": 11 }));
+      return { bx, by };
+    }
+    const g = W / 4;
+    // clean prefix
+    bar(g * 0.75, "clean prefix", [{ x: g * 0.75 - boxW / 2, y: cy - boxH / 2, width: boxW, height: boxH, fill: "var(--old-fill)", stroke: "var(--old)", "stroke-width": 1.5 }], "level 0", "var(--old)");
+    // + noise
+    bar(g * 1.9, "target_noise", [{ x: g * 1.9 - boxW / 2, y: cy - boxH / 2, width: boxW, height: boxH, fill: "var(--noise)", opacity: .55 }], "√(1−ᾱ)·ε", "var(--noise)");
+    // = noisy prefix at level t
+    bar(g * 3.1, "noisy_prev @ t", [
+      { x: g * 3.1 - boxW / 2, y: cy - boxH / 2, width: boxW, height: boxH, fill: "var(--old-fill)", stroke: "var(--old)", "stroke-width": 1.5 },
+      { x: g * 3.1 - boxW / 2, y: cy - boxH / 2, width: boxW, height: boxH, fill: "var(--noise)", opacity: .32 },
+    ], "matches the sample", "var(--ink-soft)");
+    // operators
+    s.appendChild(txt(g * 1.32, cy + 6, "×√ᾱ  +", { "text-anchor": "middle", fill: "var(--ink-soft)", "font-size": 20, "font-weight": 700 }));
+    s.appendChild(txt(g * 2.5, cy + 6, "=", { "text-anchor": "middle", fill: "var(--ink-soft)", "font-size": 22, "font-weight": 700 }));
+    document.getElementById("d-renoise").appendChild(s);
+  })();
+
+  /* ============ PANEL 4: FADE WEIGHTS ============ */
+  (function () {
+    const W = 860, Hh = 250, s = svg(W, Hh);
+    const x0 = 56, y0 = 200, plotW = W - 110, plotH = 150, dx = plotW / (H - 1);
+    const d = 3, sEnd = 8;
+    // axes
+    s.appendChild(el("line", { x1: x0, y1: y0, x2: x0 + plotW, y2: y0, stroke: "var(--line-strong)", "stroke-width": 1.5 }));
+    s.appendChild(el("line", { x1: x0, y1: y0, x2: x0, y2: y0 - plotH, stroke: "var(--line-strong)", "stroke-width": 1.5 }));
+    s.appendChild(txt(x0 - 10, y0 - plotH + 4, "1.0", { "text-anchor": "end", fill: "var(--ink-faint)", "font-size": 10 }));
+    s.appendChild(txt(x0 - 10, y0 + 4, "0.0", { "text-anchor": "end", fill: "var(--ink-faint)", "font-size": 10 }));
+    s.appendChild(txt(x0 + plotW / 2, y0 + 34, "horizon position  (action step)", { "text-anchor": "middle", fill: "var(--ink-faint)", "font-size": 11 }));
+    s.appendChild(txt(x0 - 34, y0 - plotH / 2, "weight", { "text-anchor": "middle", fill: "var(--ink-faint)", "font-size": 11, transform: `rotate(-90 ${x0 - 34} ${y0 - plotH / 2})` }));
+
+    function w(i, kind) {
+      if (i <= d) return 1;
+      if (i >= sEnd) return 0;
+      const lin = 1 - (i - d) / (sEnd - d);
+      return kind === "exp" ? lin * (Math.expm1(lin) / (Math.E - 1)) : lin;
+    }
+    // shaded region for d
+    s.appendChild(el("rect", { x: x0, y: y0 - plotH, width: d * dx, height: plotH, fill: "var(--old)", opacity: .12 }));
+    s.appendChild(txt(x0 + d * dx / 2, y0 - plotH - 8, "hard freeze", { "text-anchor": "middle", fill: "var(--old)", "font-size": 10.5, "font-weight": 600 }));
+    s.appendChild(el("rect", { x: x0 + d * dx, y: y0 - plotH, width: (sEnd - d) * dx, height: plotH, fill: "var(--new)", opacity: .08 }));
+    s.appendChild(txt(x0 + (d + sEnd) / 2 * dx, y0 - plotH - 8, "fade", { "text-anchor": "middle", fill: "var(--new)", "font-size": 10.5, "font-weight": 600 }));
+
+    ["linear", "exp"].forEach((kind, k) => {
+      const col = kind === "exp" ? "var(--new)" : "var(--old)";
+      let dpath = "";
+      for (let i = 0; i < H; i++) { const x = x0 + i * dx, y = y0 - w(i, kind) * plotH; dpath += (i ? " L" : "M") + x + " " + y; }
+      const p = el("path", { d: dpath, fill: "none", stroke: col, "stroke-width": 2.5, "stroke-linejoin": "round" });
+      if (kind === "linear") p.setAttribute("stroke-dasharray", "5 4");
+      s.appendChild(p);
+      for (let i = 0; i < H; i++) s.appendChild(el("circle", { cx: x0 + i * dx, cy: y0 - w(i, kind) * plotH, r: 2.5, fill: col }));
+    });
+    // d and s markers on axis
+    [["d", d], ["s", sEnd]].forEach(([lbl, pos]) => {
+      s.appendChild(el("line", { x1: x0 + pos * dx, y1: y0, x2: x0 + pos * dx, y2: y0 + 6, stroke: "var(--ink-faint)", "stroke-width": 1.5 }));
+      s.appendChild(txt(x0 + pos * dx, y0 + 20, lbl, { "text-anchor": "middle", fill: "var(--ink)", "font-size": 12, "font-weight": 700 }));
+    });
+    // legend
+    s.appendChild(el("line", { x1: x0 + plotW - 120, y1: 26, x2: x0 + plotW - 96, y2: 26, stroke: "var(--new)", "stroke-width": 2.5 }));
+    s.appendChild(txt(x0 + plotW - 90, 30, "exp", { fill: "var(--new)", "font-size": 11, "font-weight": 600 }));
+    s.appendChild(el("line", { x1: x0 + plotW - 60, y1: 26, x2: x0 + plotW - 36, y2: 26, stroke: "var(--old)", "stroke-width": 2.5, "stroke-dasharray": "5 4" }));
+    s.appendChild(txt(x0 + plotW - 30, 30, "linear", { fill: "var(--old)", "font-size": 11, "font-weight": 600 }));
+    document.getElementById("d-fade").appendChild(s);
+  })();
+
+  /* ============ PANEL 5: RESULT ============ */
+  (function () {
+    const W = 860, Hh = 240, s = svg(W, Hh);
+    const x0 = 60, dx = (W - 110) / (H - 1), mid = 120, d = 3;
+    s.appendChild(el("line", { x1: 40, y1: mid, x2: W - 30, y2: mid, stroke: "var(--line)", "stroke-width": 1 }));
+    const dSplit = 6;
+    const oldPts = []; for (let i = 0; i < H; i++) oldPts.push(oldPath(i));
+    // executed old
+    plot(s, oldPts.slice(0, dSplit + 1), x0, mid, dx, "var(--old)", { w: 3, dots: 3 });
+    // new chunk that continues: reuse oldPath at head, then newGood
+    const goodPts = []; for (let i = 0; i < H; i++) goodPts.push(newGood(i, d));
+    // shift so head aligns at replan point
+    const headVal = oldPts[dSplit];
+    const aligned = goodPts.map((v, i) => v - goodPts[0] + oldPts[dSplit] * 0 + v); // keep as-is; newGood already continues old
+    // frozen head segment (amber) then cyan
+    plot(s, oldPts.slice(dSplit, dSplit + d + 1), x0 + dSplit * dx, mid, dx, "var(--old)", { w: 3.5, dots: 3.5 });
+    const tail = []; for (let i = dSplit + d; i < H; i++) tail.push(oldPath(i) * Math.max(0, 1 - (i - dSplit - d) / 5) + newGood(i, d) * Math.min(1, (i - dSplit - d) / 5));
+    plot(s, tail, x0 + (dSplit + d) * dx, mid, dx, "var(--new)", { w: 3, dots: 3 });
+    // smooth marker at seam (no burst)
+    const sx = x0 + dSplit * dx;
+    s.appendChild(el("circle", { cx: sx, cy: mid - oldPts[dSplit], r: 5, fill: "none", stroke: "var(--new)", "stroke-width": 2 }));
+    s.appendChild(txt(sx + 12, mid - oldPts[dSplit] - 12, "continuous ✓", { fill: "var(--new)", "font-weight": 700, "font-size": 13 }));
+    s.appendChild(txt(x0, Hh - 26, "executed (old)", { fill: "var(--old)" }));
+    s.appendChild(txt(sx + 4, Hh - 26, "frozen head → fresh plan", { fill: "var(--ink-faint)" }));
+    document.getElementById("d-result").appendChild(s);
+  })();
+})();
+</script>
+</body>
+</html>

@@ -249,6 +249,22 @@ def _zero_ft_sensor(
     return True
 
 
+def _normalize_actions(preprocessor: Any, actions: Any) -> Any:
+    """Map real-unit actions to the model's normalized space via the
+    preprocessor's NormalizerProcessorStep (same stats the postprocessor inverts).
+    Falls back to the input unchanged if the step is not found.
+    """
+    from lerobot.processor.normalize_processor import (  # noqa: PLC0415
+        NormalizerProcessorStep,
+    )
+
+    for step in getattr(preprocessor, "steps", []):
+        if isinstance(step, NormalizerProcessorStep):
+            return step._normalize_action(actions, inverse=False)
+    warn("RTC: normalizer step not found; using raw prev_actions", "")
+    return actions
+
+
 def _predict_action_chunk(
     observation: dict[str, Any],
     policy: Any,
@@ -258,8 +274,16 @@ def _predict_action_chunk(
     *,
     force_refresh: bool = False,
     task: str | None = None,
+    rtc_prev_actions: Any = None,
+    rtc_inference_delay: int | None = None,
 ) -> tuple[Any, bool]:
-    """Return an action chunk and whether it came from fresh inference."""
+    """Return an action chunk and whether it came from fresh inference.
+
+    When RTC is attached to the policy and ``rtc_prev_actions`` is given, it is
+    stashed on ``policy.diffusion`` so the RTC sampler conditions the fresh
+    chunk's head on the previous chunk's still-executing tail. ``rtc_prev_actions``
+    must be laid out on the full-horizon grid (index 0 == first horizon step).
+    """
     import torch  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
     from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
@@ -267,6 +291,27 @@ def _predict_action_chunk(
     torch_device = torch.device(device)
     queues = getattr(policy, "_queues", None)
     action_queue = queues.get(ACTION) if isinstance(queues, dict) else None
+
+    # RTC: hand the previous chunk's unexecuted tail to the attached sampler.
+    # The sampler works in normalized action space, but rtc_prev_actions arrives
+    # in real units (postprocessed), so normalize it via the preprocessor's own
+    # NormalizerProcessorStep (same stats the postprocessor later inverts).
+    # Cleared after inference so a stale prefix never leaks into a later chunk.
+    diffusion = getattr(policy, "diffusion", None)
+    rtc_active = diffusion is not None and getattr(diffusion, "_rtc_attached", False)
+    if rtc_active:
+        if rtc_prev_actions is not None:
+            prev = torch.as_tensor(
+                rtc_prev_actions, dtype=torch.float32, device=torch_device
+            )
+            if prev.ndim == 2:
+                prev = prev.unsqueeze(0)  # (1, T, D)
+            prev = _normalize_actions(preprocessor, prev)
+            diffusion._rtc_prev_actions = prev
+            if rtc_inference_delay is not None:
+                diffusion._rtc_inference_delay = int(rtc_inference_delay)
+        else:
+            diffusion._rtc_prev_actions = None
 
     if force_refresh:
         if action_queue is not None:
@@ -282,10 +327,15 @@ def _predict_action_chunk(
 
     fresh = action_queue is None or len(action_queue) == 0
 
-    first = predict_action(
-        observation, policy, torch_device, preprocessor, postprocessor,
-        use_amp=False, task=task,
-    )
+    try:
+        first = predict_action(
+            observation, policy, torch_device, preprocessor, postprocessor,
+            use_amp=False, task=task,
+        )
+    finally:
+        # Drop the prefix so it can never condition a later, unrelated chunk.
+        if rtc_active:
+            diffusion._rtc_prev_actions = None
     tail = list(action_queue) if action_queue is not None else []
     if not tail:
         return first.reshape(1, -1), fresh
@@ -640,6 +690,12 @@ class RolloutService:
         infer_raw: deque[float] = deque(maxlen=log_every)
         waypoint_executor: WaypointExecutor | None = None
         previous_loop_start: float | None = None
+        # RTC: remember the last fresh chunk and when it was dispatched so the
+        # next fresh inference can freeze its head onto the still-executing tail.
+        rtc_enabled = bool(getattr(rollout_cfg, "rtc_enabled", False))
+        rtc_delay_cfg = int(getattr(rollout_cfg, "rtc_inference_delay", 0) or 0)
+        prev_chunk: np.ndarray | None = None
+        prev_chunk_start: float | None = None
         step = 0
         try:
             while not self._stop_event.is_set():
@@ -699,6 +755,19 @@ class RolloutService:
 
                 # Replan early enough to retain a committed path during inference.
                 force = replan_steps is None or step % replan_steps == 0
+                # RTC: freeze the new chunk's head onto the previous chunk's tail,
+                # re-based to the horizon grid (index 0 == loop_start + anchor*dt).
+                rtc_prev_actions = None
+                rtc_delay = None
+                if (
+                    rtc_enabled and force
+                    and prev_chunk is not None and prev_chunk_start is not None
+                ):
+                    elapsed = round((loop_start - prev_chunk_start) / dt)
+                    delay = rtc_delay_cfg or max(1, elapsed)
+                    delay = max(1, min(delay, len(prev_chunk) - 1))
+                    rtc_prev_actions = prev_chunk[delay:]
+                    rtc_delay = delay
                 actions, fresh = _predict_action_chunk(
                     observation,
                     policy,
@@ -707,6 +776,8 @@ class RolloutService:
                     postprocessor,
                     force_refresh=force,
                     task=task,
+                    rtc_prev_actions=rtc_prev_actions,
+                    rtc_inference_delay=rtc_delay,
                 )
                 _cuda_sync(self._device)
                 now = time.monotonic()
@@ -741,6 +812,9 @@ class RolloutService:
                     waypoint_executor.replace_waypoints(
                         action_lists, target_times, now=time.monotonic()
                     )
+                    if rtc_enabled:
+                        prev_chunk = np.asarray(action_lists, dtype=np.float32)
+                        prev_chunk_start = loop_start
                 if waypoint_executor.error is not None:
                     raise RuntimeError(waypoint_executor.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)

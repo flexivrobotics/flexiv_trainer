@@ -66,38 +66,95 @@ class RolloutConfig(SharedRolloutConfig):
     noise_scheduler_type: Literal["", "DDPM", "DDIM"] = "DDIM"
     num_denoise_steps: int = Field(default=16, ge=1, le=1000)
 
+    # Real-Time Chunking (RTC): condition each fresh chunk's head on the still-
+    # executing tail of the previous chunk so consecutive chunks join smoothly
+    # (no replan-seam jerk). Inference-only; no retraining. See
+    # policies/rtc_diffusion.py.
+    rtc_enabled: bool = Field(
+        default=True, description="smooth replan seams via prefix inpainting"
+    )
+    # d: head steps hard-frozen to the previous chunk. Should track measured
+    # inference latency in steps (infer_ms / dt); 0 = auto (derived in planner).
+    rtc_inference_delay: int = Field(default=0, ge=0, le=64)
+    # s: fade-window end; blend old->new over steps d..s. 0 = auto (half horizon).
+    # Constrained to d <= s <= horizon - d at sample time.
+    rtc_execution_horizon: int = Field(default=0, ge=0, le=64)
+    rtc_prefix_schedule: Literal["linear", "exp"] = "exp"
+
 
 def apply_rollout_overrides(policy: Any, rollout_cfg: RolloutConfig) -> bool:
-    """Apply diffusion-specific rollout overrides to a freshly loaded policy."""
-    scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
-    if not scheduler:
-        return False
-    diffusion = getattr(policy, "diffusion", None)
-    existing = getattr(diffusion, "noise_scheduler", None)
-    if diffusion is None or existing is None:
-        return False
-    steps = getattr(rollout_cfg, "num_denoise_steps", 0)
-    try:
-        from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
-            _make_noise_scheduler,
-        )
+    """Apply diffusion-specific rollout overrides to a freshly loaded policy.
 
-        # Reuse the trained schedule so only the sampler family changes. A
-        # scheduler's full config carries family-specific keys the other family
-        # rejects, so pass the same kwargs LeRobot uses when building one.
-        cfg = existing.config
-        kwargs = dict(
-            num_train_timesteps=cfg.num_train_timesteps,
-            beta_start=cfg.beta_start,
-            beta_end=cfg.beta_end,
-            beta_schedule=cfg.beta_schedule,
-            clip_sample=cfg.clip_sample,
-            clip_sample_range=cfg.clip_sample_range,
-            prediction_type=cfg.prediction_type,
+    Returns ``True`` if any override (scheduler swap and/or RTC) was applied, so
+    the service logs it.
+    """
+    diffusion = getattr(policy, "diffusion", None)
+    if diffusion is None:
+        return False
+
+    overridden = False
+    scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
+    existing = getattr(diffusion, "noise_scheduler", None)
+    if scheduler and existing is not None:
+        steps = getattr(rollout_cfg, "num_denoise_steps", 0)
+        try:
+            from lerobot.policies.diffusion.modeling_diffusion import (  # noqa: PLC0415
+                _make_noise_scheduler,
+            )
+
+            # Reuse the trained schedule so only the sampler family changes. A
+            # scheduler's full config carries family-specific keys the other
+            # family rejects, so pass the same kwargs LeRobot uses when building
+            # one.
+            cfg = existing.config
+            kwargs = dict(
+                num_train_timesteps=cfg.num_train_timesteps,
+                beta_start=cfg.beta_start,
+                beta_end=cfg.beta_end,
+                beta_schedule=cfg.beta_schedule,
+                clip_sample=cfg.clip_sample,
+                clip_sample_range=cfg.clip_sample_range,
+                prediction_type=cfg.prediction_type,
+            )
+            diffusion.noise_scheduler = _make_noise_scheduler(scheduler, **kwargs)
+            diffusion.num_inference_steps = steps
+            overridden = True
+        except Exception as exc:
+            warn("Failed to override diffusion scheduler", describe_exception(exc))
+
+    if getattr(rollout_cfg, "rtc_enabled", False):
+        overridden = _attach_rtc(diffusion, rollout_cfg) or overridden
+
+    return overridden
+
+
+def _attach_rtc(diffusion: Any, rollout_cfg: RolloutConfig) -> bool:
+    """Swap the diffusion model's sampler for the RTC (prefix-inpainting) version.
+
+    Binds the standalone RTC functions onto this loaded instance and stashes the
+    RTC knobs on it, so no weights are reloaded and the base policy loader is
+    untouched. The service later stashes ``_rtc_prev_actions`` /
+    ``_rtc_inference_delay`` on this same instance before each fresh inference.
+    """
+    try:
+        import types  # noqa: PLC0415
+
+        from flexivtrainer.policies import rtc_diffusion  # noqa: PLC0415
+
+        if getattr(diffusion, rtc_diffusion.RTC_ATTACHED_FLAG, False):
+            return True
+        diffusion.generate_actions = types.MethodType(
+            rtc_diffusion.rtc_generate_actions, diffusion
         )
-        diffusion.noise_scheduler = _make_noise_scheduler(scheduler, **kwargs)
-        diffusion.num_inference_steps = steps
+        # Static config knobs; per-inference prev_actions/delay are set by the
+        # service. Defaults left as None/"exp" so a first chunk (no prev_actions)
+        # samples exactly like the stock policy.
+        diffusion._rtc_prev_actions = None
+        diffusion._rtc_inference_delay = rollout_cfg.rtc_inference_delay or None
+        diffusion._rtc_execution_horizon = rollout_cfg.rtc_execution_horizon or None
+        diffusion._rtc_prefix_schedule = rollout_cfg.rtc_prefix_schedule
+        setattr(diffusion, rtc_diffusion.RTC_ATTACHED_FLAG, True)
     except Exception as exc:
-        warn("Failed to override diffusion scheduler", describe_exception(exc))
+        warn("Failed to enable RTC", describe_exception(exc))
         return False
     return True
