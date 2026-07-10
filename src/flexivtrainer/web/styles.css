@@ -2662,6 +2662,13 @@ button:active {
     white-space: nowrap;
 }
 
+/* Long episode/dataset names wrap onto extra lines so the row grows to fit
+   instead of clipping (job tags keep their single-line ellipsis above). */
+#processing-content .episode-row__text > span:not(.episode-row__job) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
 #processing-content .episode-row__main input[type="checkbox"] {
     flex: 0 0 auto;
 }

@@ -37,6 +37,7 @@ const state = {
     trainingBootstrapped: false,
     processingBootstrapped: false,
     processingStep: 1,
+    processingMode: null,
     trainingStep: 1,
     episodes: [],
     selectedEpisodes: [],
@@ -882,6 +883,9 @@ function _showPreviewLoadingOverlay(containerId) {
 function _showMergeModal() {
     const modal = byId("merge-modal");
     if (!modal) return;
+    const mode = PROCESSING_MODES[state.processingMode] || PROCESSING_MODES.episodes;
+    byId("merge-modal-eyebrow").textContent = mode.modalEyebrow;
+    byId("merge-modal-title").textContent = mode.modalTitle;
     const bar = modal.querySelector(".progress-bar");
     if (bar) {
         bar.querySelector("span:first-child").style.width = "0%";
@@ -945,6 +949,36 @@ async function _pollMergeProgress() {
 // Per-scope merged-dataset preview controller, shared by the Data Processing
 // (step 3) and Policy Training (step 1) pages. Each context names the state
 // keys it reads/writes, the preview block element, and how to re-render.
+// Data Processing tab modes. The left/right bubble picker and the wizard chrome
+// (titles, labels, browser to open) are driven from here; the underlying wizard
+// state keys are shared between modes.
+const PROCESSING_MODES = {
+    episodes: {
+        cardTitle: "Merging Episodes",
+        cardDescription: "Merge multiple recorded episodes into one dataset.",
+        loadTitle: "Load Episodes",
+        pickerTitle: "Episodes",
+        itemNoun: "episode",
+        mergeLabel: "Merge Selected Episodes",
+        modalEyebrow: "Merging Episodes",
+        modalTitle: "Merging selected episodes…",
+        emptyMessage: "No episodes selected.",
+        openBrowser: () => openEpisodeBrowser(),
+    },
+    datasets: {
+        cardTitle: "Merging Dataset",
+        cardDescription: "Merge multiple existing datasets into one larger dataset.",
+        loadTitle: "Load Datasets",
+        pickerTitle: "Datasets",
+        itemNoun: "dataset",
+        mergeLabel: "Merge Selected Datasets",
+        modalEyebrow: "Merging Datasets",
+        modalTitle: "Merging selected datasets…",
+        emptyMessage: "No datasets selected.",
+        openBrowser: () => openProcessingDatasetBrowser(),
+    },
+};
+
 const MERGED_PREVIEW_CTX = {
     processing: {
         path: () => state.mergedPath,
@@ -4160,36 +4194,69 @@ function _setupJobTagMarquee(scope) {
     });
 }
 
+function renderProcessingModePicker(container) {
+    container.innerHTML = `
+        <div class="panel-header"><div><h2>Data Processing</h2></div></div>
+        <div class="policy-grid" id="processing-mode-grid"></div>
+    `;
+    const grid = byId("processing-mode-grid");
+    Object.entries(PROCESSING_MODES).forEach(([key, mode]) => {
+        const card = document.createElement("button");
+        card.className = "policy-card";
+        card.type = "button";
+        card.innerHTML = `<h3>${mode.cardTitle}</h3><p>${mode.cardDescription}</p>`;
+        card.onclick = () => {
+            if (state.processingMode !== key) {
+                state.processingStep = 1;
+                state.episodes = [];
+                state.selectedEpisodes = [];
+                state.preview = null;
+                state.previewSeries = null;
+            }
+            state.processingMode = key;
+            renderProcessing();
+        };
+        grid.appendChild(card);
+    });
+}
+
 function renderProcessing() {
     const container = byId("processing-content");
+    if (!state.processingMode) {
+        container.classList.remove("has-playback-bar");
+        renderProcessingModePicker(container);
+        return;
+    }
+    const mode = PROCESSING_MODES[state.processingMode];
     container.classList.toggle("has-playback-bar", state.processingStep > 1);
 
     if (state.processingStep === 1) {
         container.innerHTML = `
             <div class="panel-header panel-header--training-step">
                 <div>
-                    <h2 class="training-step-title">Load Episodes</h2>
+                    <h2 class="training-step-title">${mode.loadTitle}</h2>
                 </div>
             </div>
             <div class="episode-list" id="load-episode-list"></div>
             <div class="control-bar control-bar--episode-step">
-                <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add episode dataset" title="Add episode dataset">
+                <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add ${mode.itemNoun} dataset" title="Add ${mode.itemNoun} dataset">
                     <span aria-hidden="true">+</span>
                 </button>
                 ${state.episodes.length ? `
-                <button class="round-icon-button round-icon-button--clear" id="training-clear-episodes" type="button" aria-label="Clear all episodes" title="Clear all episodes">
+                <button class="round-icon-button round-icon-button--clear" id="training-clear-episodes" type="button" aria-label="Clear all ${mode.itemNoun}s" title="Clear all ${mode.itemNoun}s">
                     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"></path>
                     </svg>
                 </button>` : ""}
             </div>
             <div class="control-bar control-bar--floating-step-nav">
+                <button class="secondary-button" id="processing-back-modes" type="button">Back</button>
                 <button id="training-next-step" type="button" ${state.episodes.length ? "" : "disabled"}>Next</button>
             </div>
         `;
         const list = byId("load-episode-list");
         if (!state.episodes.length) {
-            list.innerHTML = `<div class="episode-empty-state"><span>No episodes selected.</span></div>`;
+            list.innerHTML = `<div class="episode-empty-state"><span>${mode.emptyMessage}</span></div>`;
         } else {
             state.episodes.forEach((episode, index) => {
                 const row = document.createElement("div");
@@ -4213,7 +4280,11 @@ function renderProcessing() {
                 list.appendChild(row);
             });
         }
-        byId("training-add-episode").onclick = () => openEpisodeBrowser();
+        byId("training-add-episode").onclick = () => mode.openBrowser();
+        byId("processing-back-modes").onclick = () => {
+            state.processingMode = null;
+            renderProcessing();
+        };
         const clearButton = byId("training-clear-episodes");
         if (clearButton) {
             clearButton.onclick = () => {
@@ -4245,8 +4316,8 @@ function renderProcessing() {
             <div class="training-layout">
                 <aside class="panel">
                     <div class="panel-header">
-                        <h2>Episodes</h2>
-                        <button class="secondary-button toggle-all-button" id="training-select-all" type="button" title="${state.selectedEpisodes.length === state.episodes.length ? "Deselect all episodes" : "Select all episodes"}" aria-label="${state.selectedEpisodes.length === state.episodes.length ? "Deselect all episodes" : "Select all episodes"}">${state.selectedEpisodes.length === state.episodes.length ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG}</button>
+                        <h2>${mode.pickerTitle}</h2>
+                        <button class="secondary-button toggle-all-button" id="training-select-all" type="button" title="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}" aria-label="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}">${state.selectedEpisodes.length === state.episodes.length ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG}</button>
                     </div>
                     <div class="episode-list" id="training-episode-picker"></div>
                 </aside>
@@ -4254,7 +4325,7 @@ function renderProcessing() {
                     <div id="episode-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav">
                         <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
-                        <button id="training-merge" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>Merge Selected Episodes</button>
+                        <button id="training-merge" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>${mode.mergeLabel}</button>
                     </div>
                 </div>
             </div>
@@ -5604,6 +5675,44 @@ function openEpisodeBrowser() {
         emptyMessage: "No episode datasets found under this directory.",
         confirmLabel: "Load",
         pathNote: "Episodes directory",
+        onConfirm: (paths) => {
+            const orderedItems = (state.pathBrowser.items || [])
+                .filter((item) => paths.includes(item.path));
+            orderedItems.forEach((item) => {
+                if (!state.episodes.some((existing) => existing.path === item.path)) {
+                    state.episodes.push({
+                        name: item.path.split("/").pop(),
+                        path: item.path,
+                        job: item.job || null,
+                    });
+                }
+            });
+            closeBrowser();
+            renderProcessing();
+        },
+    }).catch((error) => showToast(error.message, true));
+}
+
+function openProcessingDatasetBrowser() {
+    openBrowser({
+        mode: "episodes",
+        title: "",
+        startPath: state.summary.storage.merged,
+        rootPath: state.summary.storage.merged,
+        directoriesOnly: true,
+        multiSelect: true,
+        allowNavigation: false,
+        annotateEpisodeDirs: true,
+        showSelectAll: true,
+        hideHeader: true,
+        hideEyebrow: true,
+        hideClose: true,
+        hideUp: true,
+        requireSelection: true,
+        fallbackToCurrentPath: false,
+        emptyMessage: "No datasets found under this directory.",
+        confirmLabel: "Load",
+        pathNote: "Datasets directory",
         onConfirm: (paths) => {
             const orderedItems = (state.pathBrowser.items || [])
                 .filter((item) => paths.includes(item.path));
