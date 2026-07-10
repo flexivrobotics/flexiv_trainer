@@ -217,7 +217,7 @@ button:disabled {
     border-radius: 24px;
     background: var(--panel);
     box-shadow: var(--shadow);
-    padding: 1.25rem;
+    padding: 1rem;
 }
 
 .panel-grid {
@@ -232,10 +232,6 @@ button:disabled {
        and let the robot-serial tiles grow enough to show the full placeholder. */
     grid-template-columns: minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 1rem;
-}
-
-.robot-config-panel {
-    padding: 1.1rem 1.2rem;
 }
 
 .robot-input-grid {
@@ -299,10 +295,6 @@ button:disabled {
 
 .end-effector-grid+.panel-grid {
     margin-top: 1rem;
-}
-
-.end-effector-tile {
-    padding: 1.1rem 1.2rem;
 }
 
 .end-effector-row {
@@ -1233,7 +1225,6 @@ button:disabled {
 .control-panel {
     --control-section-gap: 0.58rem;
     margin: 0;
-    padding: 1rem;
 }
 
 .control-stack {
@@ -2523,7 +2514,6 @@ button:active {
     display: grid;
     gap: 0.55rem;
     min-width: 0;
-    padding: 0.68rem 1rem;
     border-radius: 18px;
 }
 
