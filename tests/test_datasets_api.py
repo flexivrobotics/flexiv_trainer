@@ -14,12 +14,14 @@
 
 """Tests for the datasets API routes (browse, preview, merge) including security."""
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from flexivtrainer.api.app import create_app
+from flexivtrainer.api.routes import datasets as datasets_routes
 from flexivtrainer.config import AppSettings, RobotSerialConfig, StorageConfig
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
@@ -104,3 +106,58 @@ def test_list_episodes_returns_episodes(tmp_path: Path) -> None:
     assert response.status_code == 200
     episodes = response.json()["episodes"]
     assert any("ep_001" in ep["name"] for ep in episodes)
+
+
+def test_merge_accepts_dataset_paths_under_merged_root(tmp_path, monkeypatch) -> None:
+    app = create_app()
+    manager = _make_manager(tmp_path)
+    app.dependency_overrides[get_runtime_manager] = lambda: manager
+    client = TestClient(app)
+    merged_root = manager.settings.storage.merged_root
+    ds_paths = []
+    for name in ("ds_a", "ds_b"):
+        ds_dir = merged_root / name
+        (ds_dir / "meta").mkdir(parents=True, exist_ok=True)
+        (ds_dir / "meta" / "info.json").write_text("{}")
+        ds_paths.append(str(ds_dir))
+
+    def _fake_merge(roots, output_root, output_name, on_progress=None):
+        return {"root": str(output_root / output_name), "episodes": len(roots)}
+
+    monkeypatch.setattr(
+        "flexivtrainer.jobs.merge_episodes.merge_episode_datasets", _fake_merge
+    )
+    datasets_routes._merge_job = None
+    try:
+        response = client.post(
+            "/datasets/merge",
+            json={"episode_paths": ds_paths, "output_name": "merged_test"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "started"
+
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            progress = client.get("/datasets/merge-progress").json()
+            if progress["status"] == "done":
+                break
+            time.sleep(0.05)
+        assert progress["status"] == "done"
+    finally:
+        datasets_routes._merge_job = None
+
+
+def test_merge_conflict_returns_409(tmp_path) -> None:
+    app = create_app()
+    manager = _make_manager(tmp_path)
+    app.dependency_overrides[get_runtime_manager] = lambda: manager
+    client = TestClient(app)
+    datasets_routes._merge_job = {"status": "running"}
+    try:
+        response = client.post(
+            "/datasets/merge",
+            json={"episode_paths": [], "output_name": "merged_test"},
+        )
+        assert response.status_code == 409
+    finally:
+        datasets_routes._merge_job = None
