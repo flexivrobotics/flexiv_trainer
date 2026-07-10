@@ -6088,7 +6088,11 @@ function renderRolloutCameras() {
     if (!container) {
         return;
     }
-    const cameraNames = ["ego", ...getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side])];
+    // Place the egocentric feed in the middle, flanked by the wrist cameras
+    // (e.g. [left_wrist, ego, right_wrist] for a dual-arm setup).
+    const wristCameras = getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side]);
+    const mid = Math.floor(wristCameras.length / 2);
+    const cameraNames = [...wristCameras.slice(0, mid), "ego", ...wristCameras.slice(mid)];
     // Only rebuild the feed elements when the camera set changes; rebuilding on
     // every poll would tear down the live <img> and restart the frame pump.
     const renderKey = cameraNames.join(",");
@@ -6097,7 +6101,7 @@ function renderRolloutCameras() {
         container.innerHTML = cameraNames.map((name) => `
             <div class="feed">
                 <div class="feed__header">
-                    <span class="feed__title">${escapeHtml(name)}</span>
+                    <span class="feed__title">${escapeHtml(name.replace(/_/g, " "))}</span>
                     <strong class="feed__fps" id="rollout-${escapeHtml(name)}-fps">0.0 FPS</strong>
                 </div>
                 <div class="feed__placeholder feed__placeholder--awaiting" data-render-mode="awaiting">

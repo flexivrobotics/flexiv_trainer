@@ -772,19 +772,24 @@ button:disabled {
 
 /* Slim framing for the Data Collection camera feeds (matching the dataset
    preview): tighter padding so the video fills more of the card, the title
-   pulled up tight against the top edge, and a bold title. */
-#teleop-cameras-wrap .feed {
+   pulled up tight against the top edge, and a bold title. The Policy Rollout
+   camera feeds (.rollout-cameras) reuse the exact same framing. */
+#teleop-cameras-wrap .feed,
+.rollout-cameras .feed {
     padding: 0.4rem;
     gap: 0.3rem;
     border-radius: 12px;
 }
 
 #teleop-cameras-wrap .feed__placeholder,
-#teleop-cameras-wrap .feed__image {
+#teleop-cameras-wrap .feed__image,
+.rollout-cameras .feed__placeholder,
+.rollout-cameras .feed__image {
     border-radius: 8px;
 }
 
-#teleop-cameras-wrap .feed__title {
+#teleop-cameras-wrap .feed__title,
+.rollout-cameras .feed__title {
     font-weight: 700;
     padding-left: 0.4rem;
 }
@@ -792,7 +797,8 @@ button:disabled {
 .rollout-cameras {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
-    gap: 1rem;
+    /* Match the slim spacing of the Data Collection camera feeds. */
+    gap: 0.3rem;
     min-width: 0;
 }
 
