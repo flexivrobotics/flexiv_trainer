@@ -4324,7 +4324,7 @@ function renderProcessing() {
                 <div class="training-main">
                     <div id="episode-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav">
-                        <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
+                        <button class="secondary-button" id="training-prev-step" type="button">Back</button>
                         <button id="training-merge" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>${mode.mergeLabel}</button>
                     </div>
                 </div>
@@ -4429,7 +4429,7 @@ function renderProcessing() {
                 <div class="training-main">
                     <div class="panel-header"><div><h3>${escapeHtml(title)}</h3></div></div>
                     <div id="merged-preview-block"></div>
-                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button><button id="merge-next" type="button">Next</button></div>
+                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Back</button><button id="merge-next" type="button">Next</button></div>
                 </div>
             </div>
         `;
@@ -4539,7 +4539,7 @@ function renderTraining() {
                     <div class="panel-header"><div><h3>${escapeHtml(tTitle)}</h3></div></div>
                     <div id="merged-dataset-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav">
-                        <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
+                        <button class="secondary-button" id="training-prev-dataset" type="button">Back</button>
                         <button id="training-flow-next" type="button">Next</button>
                     </div>
                 </div>
@@ -4574,7 +4574,7 @@ function renderTraining() {
             </div>
             <div id="policy-config-panel"></div>
             <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
-            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
+            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Back</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
         `;
         const grid = byId("policy-grid");
         Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
@@ -4689,7 +4689,7 @@ function renderTraining() {
             <div class="training-main">
                 <div class="progress-bar progress-bar--thick ${isFailed ? "progress-bar--error" : ""}"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
                 <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
-                <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
+                <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="training-run-prev" type="button">Back</button></div>
             </div>
         </div>
     `;
