@@ -494,8 +494,14 @@ button:disabled {
     color: var(--muted);
 }
 
-.view[data-view="home"] .panel>h3,
-.view[data-view="home"] .panel-header h3 {
+/* Single source of truth for panel-title spacing across every page: flush to
+   the panel's top padding (no margin above) and one uniform gap below. Both
+   title DOM shapes are covered — an <h3> wrapped in .panel-header and an <h3>
+   that is a direct child of .panel. Per-view overrides below must NOT reset
+   these margins, or the spacing drifts apart again. */
+.panel>h3,
+.panel-header h3 {
+    margin: 0 0 0.5rem;
     font-size: revert;
 }
 
@@ -1222,17 +1228,6 @@ button:disabled {
     --control-section-gap: 0.58rem;
     margin: 0;
     padding: 1rem;
-}
-
-.control-panel .panel-header h3,
-.teleop-status-panel .panel-header h3 {
-    font-size: revert;
-    margin: 0;
-}
-
-.control-panel .panel-header,
-.teleop-status-panel .panel-header {
-    margin-bottom: var(--control-section-gap);
 }
 
 .control-stack {
@@ -2121,15 +2116,8 @@ button:active {
     text-overflow: clip;
 }
 
-.panel-header--training-step {
-    margin-bottom: 0.25rem;
-}
-
 .training-step-title {
-    margin: 0;
     color: var(--ink);
-    font-size: revert;
-    font-weight: revert;
     letter-spacing: 0;
     text-transform: none;
 }
@@ -2537,11 +2525,6 @@ button:active {
     gap: 0.55rem;
 }
 
-.rollout-service-card .panel-header h3 {
-    margin: 0;
-    font-size: revert;
-}
-
 .rollout-service-card .training-controls__state {
     font-size: 0.76rem;
     line-height: 1.3;
@@ -2587,14 +2570,6 @@ button:active {
    clearance, so only a small amount is needed here on top. */
 #training-content.has-playback-bar {
     padding-bottom: 1.5rem;
-}
-
-#training-content .panel-header h3,
-#training-content .panel h3,
-#processing-content .panel-header h3,
-#processing-content .panel h3 {
-    margin: 0.1rem 0 0;
-    font-size: revert;
 }
 
 #training-content .episode-list {
