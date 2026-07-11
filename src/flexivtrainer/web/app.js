@@ -2365,7 +2365,7 @@ function renderHomeEndEffectors() {
         tile.className = "panel end-effector-tile";
         tile.innerHTML = `
             <div class="panel-header">
-                <h2>${END_EFFECTOR_TILE_LABELS[side] || "End Effector Configuration"}</h2>
+                <h3>${END_EFFECTOR_TILE_LABELS[side] || "End Effector Configuration"}</h3>
             </div>
             <div class="end-effector-row">
                 <label class="robot-input-group">
@@ -4196,7 +4196,7 @@ function _setupJobTagMarquee(scope) {
 
 function renderProcessingModePicker(container) {
     container.innerHTML = `
-        <div class="panel-header"><div><h2>Data Processing</h2></div></div>
+        <div class="panel-header"><div><h3>Data Processing</h3></div></div>
         <div class="policy-grid" id="processing-mode-grid"></div>
     `;
     const grid = byId("processing-mode-grid");
@@ -4234,7 +4234,7 @@ function renderProcessing() {
         container.innerHTML = `
             <div class="panel-header panel-header--training-step">
                 <div>
-                    <h2 class="training-step-title">${mode.loadTitle}</h2>
+                    <h3 class="training-step-title">${mode.loadTitle}</h3>
                 </div>
             </div>
             <div class="episode-list" id="load-episode-list"></div>
@@ -4316,7 +4316,7 @@ function renderProcessing() {
             <div class="training-layout">
                 <aside class="panel">
                     <div class="panel-header">
-                        <h2>${mode.pickerTitle}</h2>
+                        <h3>${mode.pickerTitle}</h3>
                         <button class="secondary-button toggle-all-button" id="training-select-all" type="button" title="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}" aria-label="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}">${state.selectedEpisodes.length === state.episodes.length ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG}</button>
                     </div>
                     <div class="episode-list" id="training-episode-picker"></div>
@@ -4324,7 +4324,7 @@ function renderProcessing() {
                 <div class="training-main">
                     <div id="episode-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav">
-                        <button class="secondary-button" id="training-prev-step" type="button">Previous Step</button>
+                        <button class="secondary-button" id="training-prev-step" type="button">Back</button>
                         <button id="training-merge" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>${mode.mergeLabel}</button>
                     </div>
                 </div>
@@ -4423,13 +4423,13 @@ function renderProcessing() {
         container.innerHTML = `
             <div class="training-layout">
                 <aside class="panel">
-                    <div class="panel-header"><h2>Episodes</h2></div>
+                    <div class="panel-header"><h3>Episodes</h3></div>
                     <div class="episode-list" id="merged-episode-picker"></div>
                 </aside>
                 <div class="training-main">
-                    <div class="panel-header"><div><h2>${escapeHtml(title)}</h2></div></div>
+                    <div class="panel-header"><div><h3>${escapeHtml(title)}</h3></div></div>
                     <div id="merged-preview-block"></div>
-                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Previous Step</button><button id="merge-next" type="button">Next</button></div>
+                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Back</button><button id="merge-next" type="button">Next</button></div>
                 </div>
             </div>
         `;
@@ -4494,10 +4494,10 @@ function renderTraining() {
                 <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
             </div>
             <div class="control-bar control-bar--floating-step-nav">
-                <button id="training-next-step" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
+                <button id="training-flow-next" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
             </div>`;
 
-        const headerHtml = `<div class="panel-header panel-header--training-step"><div><h2 class="training-step-title">Load Training Dataset</h2></div></div>`;
+        const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
 
         container.innerHTML = `
             ${headerHtml}
@@ -4518,7 +4518,7 @@ function renderTraining() {
                 renderTraining();
             };
         }
-        byId("training-next-step").onclick = () => {
+        byId("training-flow-next").onclick = () => {
             state.trainingStep = 2;
             renderTraining();
         };
@@ -4532,15 +4532,15 @@ function renderTraining() {
         container.innerHTML = `
             <div class="training-layout">
                 <aside class="panel">
-                    <div class="panel-header"><h2>Episodes</h2></div>
+                    <div class="panel-header"><h3>Episodes</h3></div>
                     <div class="episode-list" id="training-dataset-episode-picker"></div>
                 </aside>
                 <div class="training-main">
-                    <div class="panel-header"><div><h2>${escapeHtml(tTitle)}</h2></div></div>
+                    <div class="panel-header"><div><h3>${escapeHtml(tTitle)}</h3></div></div>
                     <div id="merged-dataset-preview-block"></div>
                     <div class="control-bar control-bar--floating-step-nav">
-                        <button class="secondary-button" id="training-prev-dataset" type="button">Previous Step</button>
-                        <button id="training-next-step" type="button">Next</button>
+                        <button class="secondary-button" id="training-prev-dataset" type="button">Back</button>
+                        <button id="training-flow-next" type="button">Next</button>
                     </div>
                 </div>
             </div>`;
@@ -4555,7 +4555,7 @@ function renderTraining() {
             state.trainingStep = 1;
             renderTraining();
         };
-        byId("training-next-step").onclick = () => {
+        byId("training-flow-next").onclick = () => {
             state.trainingStep = 3;
             renderTraining();
         };
@@ -4567,14 +4567,14 @@ function renderTraining() {
         const policiesReady = !!state.trainingPolicies;
         const outputDir = getTrainingOutputDir();
         container.innerHTML = `
-            <div class="panel-header"><div><h2>Choose Training Policy</h2></div></div>
+            <div class="panel-header"><div><h3>Choose Training Policy</h3></div></div>
             <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
                 <div class="policy-grid" id="policy-grid"></div>
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
             </div>
             <div id="policy-config-panel"></div>
             <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
-            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Previous Step</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
+            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Back</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
         `;
         const grid = byId("policy-grid");
         Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
@@ -4660,7 +4660,7 @@ function renderTraining() {
         <div class="training-layout">
             <div class="training-sidebar">
                 <aside class="panel panel--soft control-panel training-device-panel">
-                    <div class="panel-header"><h2>Computation Device</h2></div>
+                    <div class="panel-header"><h3>Computation Device</h3></div>
                     <div class="training-device-row">
                         <label class="training-device-field" for="training-device-select">
                             <select id="training-device-select" ${(isRunning || isDeviceEvalBusy) ? "disabled" : ""}>
@@ -4674,7 +4674,7 @@ function renderTraining() {
                     <p class="training-device-detail">${escapeHtml(deviceDetail)}</p>
                 </aside>
                 <aside class="panel panel--soft control-panel training-controls">
-                    <div class="panel-header"><h2>Training Control</h2></div>
+                    <div class="panel-header"><h3>Training Control</h3></div>
                     <div class="control-stack">
                         <button id="training-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
                             ${primaryMarkup}
@@ -4689,7 +4689,7 @@ function renderTraining() {
             <div class="training-main">
                 <div class="progress-bar progress-bar--thick ${isFailed ? "progress-bar--error" : ""}"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
                 <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
-                <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="training-run-prev" type="button">Previous Step</button></div>
+                <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="training-run-prev" type="button">Back</button></div>
             </div>
         </div>
     `;
@@ -5976,7 +5976,7 @@ function buildRolloutServiceCard(serviceKey, serviceName, fallbackLabel, isRunni
     return `
         <aside class="panel panel--soft rollout-service-card">
             <div class="panel-header rollout-service-card__header">
-                <h2>${escapeHtml(fallbackLabel)}</h2>
+                <h3>${escapeHtml(fallbackLabel)}</h3>
                 <span class="teleop-system-card__dot teleop-system-card__dot--${escapeHtml(tone)}" role="img" aria-label="${escapeHtml(serviceState)}" title="${escapeHtml(serviceState)}"></span>
             </div>
             <div class="control-stack">
@@ -6069,7 +6069,7 @@ function renderRollout() {
         <div class="training-layout">
             <div class="training-sidebar">
                 <aside class="panel panel--soft control-panel training-device-panel">
-                    <div class="panel-header"><h2>Computation Device</h2></div>
+                    <div class="panel-header"><h3>Computation Device</h3></div>
                     <div class="training-device-row">
                         <label class="training-device-field" for="rollout-device-select">
                             <select id="rollout-device-select" ${isRunning ? "disabled" : ""}>
@@ -6083,7 +6083,7 @@ function renderRollout() {
                     <p class="training-device-detail">${escapeHtml(deviceDetail)}</p>
                 </aside>
                 <aside class="panel panel--soft control-panel training-controls">
-                    <div class="panel-header"><h2>Rollout Control</h2></div>
+                    <div class="panel-header"><h3>Rollout Control</h3></div>
                     <div class="control-stack">
                         <button id="rollout-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
                             ${primaryMarkup}
@@ -6097,7 +6097,7 @@ function renderRollout() {
             </div>
             <div class="training-main">
                 <section class="panel panel--soft">
-                    <div class="panel-header"><h2>Policy Checkpoint</h2></div>
+                    <div class="panel-header"><h3>Policy Checkpoint</h3></div>
                     <div class="rollout-checkpoint">
                         <code class="rollout-checkpoint__path">${checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected"}</code>
                         <button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>
@@ -6110,18 +6110,18 @@ function renderRollout() {
                         ${isRunning || !state.rolloutRequiresTask ? "disabled" : ""}></textarea>
                 </section>
                 <section class="panel panel--soft">
-                    <div class="panel-header"><h2>Policy Camera Input</h2></div>
+                    <div class="panel-header"><h3>Policy Camera Input</h3></div>
                     <div id="rollout-cameras" class="rollout-cameras"></div>
                 </section>
                 <section class="panel panel--soft">
                     <div class="panel-header">
-                        <h2>Inference Frequency</h2>
+                        <h3>Inference Frequency</h3>
                         <span class="feed__fps rollout-hz-badge" id="rollout-hz-badge"></span>
                     </div>
                     <div class="trend-chart rollout-hz-chart" id="rollout-hz-chart"></div>
                 </section>
                 <section class="panel panel--soft">
-                    <div class="panel-header"><h2>Rollout Log</h2></div>
+                    <div class="panel-header"><h3>Rollout Log</h3></div>
                     <div class="log-pane" id="rollout-terminal-pane"></div>
                 </section>
             </div>
@@ -6197,7 +6197,11 @@ function renderRolloutCameras() {
     if (!container) {
         return;
     }
-    const cameraNames = ["ego", ...getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side])];
+    // Place the egocentric feed in the middle, flanked by the wrist cameras
+    // (e.g. [left_wrist, ego, right_wrist] for a dual-arm setup).
+    const wristCameras = getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side]);
+    const mid = Math.floor(wristCameras.length / 2);
+    const cameraNames = [...wristCameras.slice(0, mid), "ego", ...wristCameras.slice(mid)];
     // Only rebuild the feed elements when the camera set changes; rebuilding on
     // every poll would tear down the live <img> and restart the frame pump.
     const renderKey = cameraNames.join(",");
@@ -6206,7 +6210,7 @@ function renderRolloutCameras() {
         container.innerHTML = cameraNames.map((name) => `
             <div class="feed">
                 <div class="feed__header">
-                    <span class="feed__title">${escapeHtml(name)}</span>
+                    <span class="feed__title">${escapeHtml(name.replace(/_/g, " "))}</span>
                     <strong class="feed__fps" id="rollout-${escapeHtml(name)}-fps">0.0 FPS</strong>
                 </div>
                 <div class="feed__placeholder feed__placeholder--awaiting" data-render-mode="awaiting">
