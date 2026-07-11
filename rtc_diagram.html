@@ -156,10 +156,10 @@
   <!-- ========================= PANEL 1 : TIMELINE ========================= -->
   <section class="panel">
     <span class="step-tag">Overview</span>
-    <h2>The overlapped cycle</h2>
-    <p class="note">Inference takes time. While the new chunk is computing, the robot keeps executing the old one — so by the time the new chunk lands, the first <code>d</code> steps of it are <em>already in the past</em>. RTC freezes exactly those <code>d</code> steps onto the still-executing tail, so the new chunk continues the old one instead of contradicting it.</p>
+    <h2>The overlapped cycle <span class="t">· your config</span></h2>
+    <p class="note">Your rollout queues <code>n_action_steps = 10</code> but replans every <code>replan_steps = 8</code> — so a new chunk is inferred while <strong>2 steps</strong> of the old one are still pending. Those <strong>2 overlap steps</strong> are the frozen prefix: RTC pins the head of the new chunk onto the old chunk's unexecuted tail, so the new chunk <em>continues</em> the old one instead of contradicting it.</p>
     <div class="diagram" id="d-timeline"></div>
-    <div class="callout"><b>d = inference delay.</b> How many action steps elapse during inference (<code>infer_ms / dt</code>). <b>s = execution horizon</b> — where the blend from old→new finishes. Constraint: <span class="m">d ≤ s ≤ H − d</span>.</div>
+    <div class="callout"><b>d = 2 (overlap = n_action_steps − replan_steps = 10 − 8).</b> The number of old-chunk steps still pending when the new chunk lands — exactly the steps RTC freezes. Raise <code>replan_steps</code> → fewer overlap steps → less to freeze; lower it → more overlap, smoother handoff.</div>
   </section>
 
   <!-- ========================= PANEL 2 : INSIDE THE DENOISER ========================= -->
@@ -284,56 +284,94 @@
 
   /* ============ PANEL 1: TIMELINE ============ */
   (function () {
-    const W = 860, Hh = 300, s = svg(W, Hh);
-    const x0 = 40, dx = (W - 80) / 24;
-    const laneY = { obs: 46, inf: 96, oldc: 168, newc: 224 };
-    const barH = 26;
-    function lane(y, label) {
-      s.appendChild(txt(x0, y - 12, label, { fill: "var(--ink-faint)", "font-size": 11.5, "letter-spacing": ".08em" }));
+    // Real rollout numbers: chunk = 10 action steps, replan every 8 -> 2 overlap.
+    const CHUNK = 10, REPLAN = 8, OVERLAP = CHUNK - REPLAN; // 2
+    const W = 900, Hh = 340, s = svg(W, Hh);
+    // Per-step grid. Show the old chunk (0..CHUNK) plus the new chunk starting
+    // at REPLAN and running another CHUNK, so total span = REPLAN + CHUNK.
+    const TOTAL = REPLAN + CHUNK;            // 18 steps of timeline
+    const gridL = 150, gridR = W - 40;       // labels live left of gridL
+    const dx = (gridR - gridL) / TOTAL;
+    const X = (step) => gridL + step * dx;
+
+    const barH = 30, gap = 22;
+    const rowLabelX = gridL - 14;
+    const laneY = { brace: 40, obs: 74, inf: 112, oldc: 176, newc: 232 };
+
+    // faint vertical step gridlines
+    for (let i = 0; i <= TOTAL; i++) {
+      s.appendChild(el("line", {
+        x1: X(i), y1: laneY.obs - 8, x2: X(i), y2: 286,
+        stroke: "var(--line)", "stroke-width": 1, opacity: i % 2 ? .35 : .6,
+      }));
     }
-    function block(x, w, y, fill, stroke, label, labelColor) {
-      s.appendChild(el("rect", { x, y, width: w, height: barH, rx: 6, fill, stroke: stroke || "none", "stroke-width": 1.5 }));
-      if (label) { const t = txt(x + 9, y + barH / 2 + 4, label, { fill: labelColor || "var(--ink)", "font-size": 12, "font-weight": 600 }); s.appendChild(t); }
+
+    function rowLabel(y, top, sub) {
+      s.appendChild(txt(rowLabelX, y + barH / 2 - 2, top, {
+        "text-anchor": "end", fill: "var(--ink)", "font-size": 12.5, "font-weight": 600,
+      }));
+      if (sub) s.appendChild(txt(rowLabelX, y + barH / 2 + 14, sub, {
+        "text-anchor": "end", fill: "var(--ink-faint)", "font-size": 10.5,
+        "font-family": "var(--mono)", "letter-spacing": ".04em",
+      }));
     }
-    // OLD chunk executing across the whole window
-    lane(laneY.oldc, "OLD CHUNK · executing");
-    block(x0, dx * 14, laneY.oldc, "var(--old-fill)", "var(--old)", "old actions", "var(--old)");
-    // frozen d region highlight
-    const dStart = 6, dLen = 3;
-    s.appendChild(el("rect", { x: x0 + dStart * dx, y: laneY.oldc - 4, width: dLen * dx, height: barH + 8, rx: 6, fill: "none", stroke: "var(--old)", "stroke-width": 2, "stroke-dasharray": "4 3" }));
+    function bar(step0, nSteps, y, fill, stroke, label, labelColor) {
+      const x = X(step0), w = nSteps * dx;
+      s.appendChild(el("rect", { x, y, width: w, height: barH, rx: 7, fill, stroke: stroke || "none", "stroke-width": 1.5 }));
+      if (label) s.appendChild(txt(x + w / 2, y + barH / 2 + 4.5, label, {
+        "text-anchor": "middle", fill: labelColor || "var(--ink)", "font-size": 12, "font-weight": 600,
+      }));
+    }
 
-    // inference bar (spanning d)
-    lane(laneY.inf, "INFERENCE · computing new chunk");
-    block(x0 + dStart * dx, dLen * dx, laneY.inf, "var(--new-fill)", "var(--new)", "denoise ×16", "var(--new)");
-    // arrow from obs to inference
-    lane(laneY.obs, "OBSERVATION");
-    block(x0 + dStart * dx, dx * 0.5, laneY.obs, "var(--noise)", "none", "", "");
-    s.appendChild(el("line", { x1: x0 + dStart * dx + 4, y1: laneY.obs + barH, x2: x0 + dStart * dx + 4, y2: laneY.inf, stroke: "var(--ink-faint)", "stroke-width": 1.5, "marker-end": "url(#arr)" }));
+    // --- OBSERVATION: a tick at the replan point ---
+    rowLabel(laneY.obs, "Observation");
+    s.appendChild(el("rect", { x: X(REPLAN) - 4, y: laneY.obs, width: 8, height: barH, rx: 4, fill: "var(--noise)" }));
+    s.appendChild(txt(X(REPLAN), laneY.obs - 8, "new obs", { "text-anchor": "middle", fill: "var(--noise)", "font-size": 10.5, "font-weight": 600 }));
+    // arrow obs -> inference
+    s.appendChild(el("line", { x1: X(REPLAN), y1: laneY.obs + barH, x2: X(REPLAN), y2: laneY.inf - 2, stroke: "var(--ink-faint)", "stroke-width": 1.5, "marker-end": "url(#arr)" }));
 
-    // NEW chunk landing after inference, overlapping old
-    lane(laneY.newc, "NEW CHUNK · lands & continues");
-    const nStart = dStart + dLen;
-    block(x0 + nStart * dx, dx * 12, laneY.newc, "var(--new-fill)", "var(--new)", "new actions", "var(--new)");
-    // frozen prefix ghost at head of new chunk
-    block(x0 + nStart * dx, dLen * dx, laneY.newc, "var(--old-fill)", "var(--old)", "", "");
-    s.appendChild(txt(x0 + nStart * dx + 6, laneY.newc + barH / 2 + 4, "frozen", { fill: "var(--old)", "font-size": 11, "font-weight": 700 }));
+    // --- INFERENCE: spans d steps, starting at replan ---
+    const dLen = OVERLAP; // by design, inference finishes right as the overlap ends
+    rowLabel(laneY.inf, "Inference", "denoise ×16");
+    bar(REPLAN, dLen, laneY.inf, "var(--new-fill)", "var(--new)", "computing", "var(--new)");
 
-    // brace: d
-    const bx1 = x0 + dStart * dx, bx2 = x0 + (dStart + dLen) * dx, by = laneY.inf - 26;
-    s.appendChild(el("path", { d: `M${bx1} ${by} v-6 H${bx2} v6`, fill: "none", stroke: "var(--new)", "stroke-width": 1.5 }));
-    s.appendChild(txt((bx1 + bx2) / 2, by - 12, "d", { fill: "var(--new)", "text-anchor": "middle", "font-weight": 700, "font-size": 14 }));
-    s.appendChild(txt((bx1 + bx2) / 2, by - 12, "", {}));
+    // --- OLD CHUNK: 0..CHUNK, with the tail (REPLAN..CHUNK) marked as frozen ---
+    rowLabel(laneY.oldc, "Old chunk", "executing");
+    bar(0, CHUNK, laneY.oldc, "var(--old-fill)", "var(--old)", "", "");
+    s.appendChild(txt(X(REPLAN / 2), laneY.oldc + barH / 2 + 4.5, "old actions", { "text-anchor": "middle", fill: "var(--old)", "font-size": 12, "font-weight": 600 }));
+    // dashed outline on the still-unexecuted tail = the frozen prefix source
+    s.appendChild(el("rect", {
+      x: X(REPLAN), y: laneY.oldc - 4, width: OVERLAP * dx, height: barH + 8, rx: 7,
+      fill: "none", stroke: "var(--old)", "stroke-width": 2, "stroke-dasharray": "4 3",
+    }));
 
-    // time axis
-    s.appendChild(el("line", { x1: x0, y1: 270, x2: W - 30, y2: 270, stroke: "var(--line-strong)", "stroke-width": 1 }));
-    s.appendChild(txt(x0, 288, "t = now", { fill: "var(--ink-faint)" }));
-    s.appendChild(txt(x0 + dStart * dx - 6, 288, "replan", { fill: "var(--ink-faint)" }));
-    s.appendChild(txt(W - 60, 288, "time →", { fill: "var(--ink-faint)" }));
+    // --- NEW CHUNK: starts at REPLAN, runs CHUNK steps; head OVERLAP = frozen ---
+    rowLabel(laneY.newc, "New chunk", "continues");
+    bar(REPLAN, CHUNK, laneY.newc, "var(--new-fill)", "var(--new)", "", "");
+    // frozen head
+    bar(REPLAN, OVERLAP, laneY.newc, "var(--old-fill)", "var(--old)", "frozen", "var(--old)");
+    s.appendChild(txt(X(REPLAN + OVERLAP + (CHUNK - OVERLAP) / 2), laneY.newc + barH / 2 + 4.5, "new actions", { "text-anchor": "middle", fill: "var(--new)", "font-size": 12, "font-weight": 600 }));
+
+    // --- d brace: its own row at the very top, clear of every label ---
+    const bx1 = X(REPLAN), bx2 = X(REPLAN + OVERLAP), by = laneY.brace;
+    s.appendChild(el("path", { d: `M${bx1} ${by + 8} v-8 H${bx2} v8`, fill: "none", stroke: "var(--new)", "stroke-width": 1.5 }));
+    s.appendChild(txt((bx1 + bx2) / 2, by - 6, "d = 2 overlap steps", { "text-anchor": "middle", fill: "var(--new)", "font-weight": 700, "font-size": 12.5 }));
+
+    // --- time axis with step ticks ---
+    const axisY = 300;
+    s.appendChild(el("line", { x1: gridL, y1: axisY, x2: gridR, y2: axisY, stroke: "var(--line-strong)", "stroke-width": 1.5, "marker-end": "url(#arr)" }));
+    // key tick labels only, to avoid crowding
+    const ticks = [[0, "now"], [REPLAN, "replan"], [CHUNK, "old ends"]];
+    ticks.forEach(([step, lbl]) => {
+      s.appendChild(el("line", { x1: X(step), y1: axisY - 4, x2: X(step), y2: axisY + 4, stroke: "var(--ink-faint)", "stroke-width": 1.5 }));
+      s.appendChild(txt(X(step), axisY + 18, lbl, { "text-anchor": "middle", fill: "var(--ink-faint)", "font-size": 11 }));
+    });
+    s.appendChild(txt(gridR, axisY + 18, "steps →", { "text-anchor": "end", fill: "var(--ink-faint)", "font-size": 11 }));
 
     // arrow marker
     const defs = el("defs", {});
-    const marker = el("marker", { id: "arr", markerWidth: 8, markerHeight: 8, refX: 4, refY: 4, orient: "auto" });
-    marker.appendChild(el("path", { d: "M0 0 L8 4 L0 8 z", fill: "var(--ink-faint)" }));
+    const marker = el("marker", { id: "arr", markerWidth: 9, markerHeight: 9, refX: 5, refY: 4.5, orient: "auto" });
+    marker.appendChild(el("path", { d: "M0 0 L9 4.5 L0 9 z", fill: "var(--ink-faint)" }));
     defs.appendChild(marker); s.appendChild(defs);
 
     document.getElementById("d-timeline").appendChild(s);
