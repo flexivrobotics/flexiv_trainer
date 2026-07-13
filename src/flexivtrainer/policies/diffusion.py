@@ -73,8 +73,8 @@ class RolloutConfig(SharedRolloutConfig):
     rtc_enabled: bool = Field(
         default=True, description="smooth replan seams via prefix inpainting"
     )
-    # d: head steps hard-frozen to the previous chunk. Should track measured
-    # inference latency in steps (infer_ms / dt); 0 = auto (derived in planner).
+    # d: executed head steps to freeze onto the previous chunk (default 1 when 0);
+    # the planner adds the n_obs_steps-1 horizon offset on top of this.
     rtc_inference_delay: int = Field(default=0, ge=0, le=64)
     # s: fade-window end; blend old->new over steps d..s. 0 = auto (half horizon).
     # Constrained to d <= s <= horizon - d at sample time.

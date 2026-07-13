@@ -252,7 +252,7 @@ def _zero_ft_sensor(
 def _normalize_actions(preprocessor: Any, actions: Any) -> Any:
     """Map real-unit actions to the model's normalized space via the
     preprocessor's NormalizerProcessorStep (same stats the postprocessor inverts).
-    Falls back to the input unchanged if the step is not found.
+    Returns None if the step is not found so the caller can disable RTC.
     """
     from lerobot.processor.normalize_processor import (  # noqa: PLC0415
         NormalizerProcessorStep,
@@ -261,8 +261,8 @@ def _normalize_actions(preprocessor: Any, actions: Any) -> Any:
     for step in getattr(preprocessor, "steps", []):
         if isinstance(step, NormalizerProcessorStep):
             return step._normalize_action(actions, inverse=False)
-    warn("RTC: normalizer step not found; using raw prev_actions", "")
-    return actions
+    warn("RTC disabled: normalizer step not found", "")
+    return None
 
 
 def _predict_action_chunk(
@@ -308,7 +308,7 @@ def _predict_action_chunk(
                 prev = prev.unsqueeze(0)  # (1, T, D)
             prev = _normalize_actions(preprocessor, prev)
             diffusion._rtc_prev_actions = prev
-            if rtc_inference_delay is not None:
+            if prev is not None and rtc_inference_delay is not None:
                 diffusion._rtc_inference_delay = int(rtc_inference_delay)
         else:
             diffusion._rtc_prev_actions = None
@@ -694,6 +694,9 @@ class RolloutService:
         # next fresh inference can freeze its head onto the still-executing tail.
         rtc_enabled = bool(getattr(rollout_cfg, "rtc_enabled", False))
         rtc_delay_cfg = int(getattr(rollout_cfg, "rtc_inference_delay", 0) or 0)
+        rtc_start_offset = max(
+            getattr(getattr(policy, "config", None), "n_obs_steps", 1) - 1, 0
+        )
         prev_chunk: np.ndarray | None = None
         prev_chunk_start: float | None = None
         step = 0
@@ -763,11 +766,11 @@ class RolloutService:
                     rtc_enabled and force
                     and prev_chunk is not None and prev_chunk_start is not None
                 ):
-                    elapsed = round((loop_start - prev_chunk_start) / dt)
-                    delay = rtc_delay_cfg or max(1, elapsed)
-                    delay = max(1, min(delay, len(prev_chunk) - 1))
-                    rtc_prev_actions = prev_chunk[delay:]
-                    rtc_delay = delay
+                    elapsed = max(1, round((loop_start - prev_chunk_start) / dt))
+                    if elapsed < len(prev_chunk):
+                        tail_start = max(elapsed - rtc_start_offset, 0)
+                        rtc_prev_actions = prev_chunk[tail_start:]
+                        rtc_delay = rtc_start_offset + (rtc_delay_cfg or 1)
                 actions, fresh = _predict_action_chunk(
                     observation,
                     policy,
@@ -825,6 +828,9 @@ class RolloutService:
                     "hz": round(actual_hz, 2),
                     "infer_ms": round(infer_seconds * 1000.0, 1),
                     "fresh": bool(fresh),
+                    "rtc_d": rtc_delay,
+                    "rtc_len": len(rtc_prev_actions)
+                    if rtc_prev_actions is not None else None,
                 })
                 if step % log_every == 0:
                     self._log_timing(

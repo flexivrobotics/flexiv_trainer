@@ -149,13 +149,13 @@ def rtc_conditional_sample(
         return sample
 
     # --- RTC path -------------------------------------------------------------
-    # 0/None means "auto": freeze one step, fade over half the horizon.
+    # 0/None means "auto": freeze one step, fade over half the horizon. Clamp d/s
+    # to the real prefix length so zero-padding never falls in the frozen region.
+    prefix_len = prev_actions.shape[1]
     d = int(inference_delay) if inference_delay else 1
     s = int(execution_horizon) if execution_horizon else horizon // 2
-    # Paper constraint d <= s <= H - d (mirrors Psi0's assertion). Clamp rather
-    # than raise so a mis-tuned rollout degrades gracefully instead of faulting.
-    d = max(1, min(d, horizon - 1))
-    s = max(d, min(s, horizon - d))
+    d = max(1, min(d, prefix_len, horizon - 1))
+    s = max(d, min(s, prefix_len, horizon - d))
 
     prev_actions = _pad_prev_actions(
         prev_actions.to(device=device, dtype=dtype), horizon, action_dim
