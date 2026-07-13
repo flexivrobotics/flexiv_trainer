@@ -78,8 +78,8 @@ class RolloutConfig(SharedRolloutConfig):
     rtc_inference_delay: int = Field(default=0, ge=0, le=64)
     # s: fade-window end; blend old->new over steps d..s. 0 = auto (half horizon).
     # Constrained to d <= s <= horizon - d at sample time.
-    rtc_execution_horizon: int = Field(default=0, ge=0, le=64)
-    rtc_prefix_schedule: Literal["linear", "exp"] = "exp"
+    rtc_execution_horizon: int = Field(default=8, ge=0, le=64)
+    rtc_prefix_schedule: Literal["linear", "exp"] = "linear"
 
 
 def apply_rollout_overrides(policy: Any, rollout_cfg: RolloutConfig) -> bool:

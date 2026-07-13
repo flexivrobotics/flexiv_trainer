@@ -157,9 +157,10 @@
   <section class="panel">
     <span class="step-tag">Overview</span>
     <h2>The overlapped cycle <span class="t">· your config</span></h2>
-    <p class="note">Your rollout queues <code>n_action_steps = 10</code> but replans every <code>replan_steps = 8</code> — so a new chunk is inferred while <strong>2 steps</strong> of the old one are still pending. Those <strong>2 overlap steps</strong> are the frozen prefix: RTC pins the head of the new chunk onto the old chunk's unexecuted tail, so the new chunk <em>continues</em> the old one instead of contradicting it.</p>
+    <p class="note">Your rollout queues <code>n_action_steps = 10</code> but replans every <code>replan_steps = 8</code>, so when the new chunk lands, part of the old chunk is still unexecuted. That unexecuted <strong>tail</strong> is carried forward as the prefix — RTC pins the head of the new chunk onto it, so the new chunk <em>continues</em> the old one instead of contradicting it.</p>
     <div class="diagram" id="d-timeline"></div>
-    <div class="callout"><b>d = 2 (overlap = n_action_steps − replan_steps = 10 − 8).</b> The number of old-chunk steps still pending when the new chunk lands — exactly the steps RTC freezes. Raise <code>replan_steps</code> → fewer overlap steps → less to freeze; lower it → more overlap, smoother handoff.</div>
+    <div class="callout"><b>Two separate quantities</b> (conflating them collapses the robot to the mean pose):
+    <b>tail</b> = how much of the old chunk is carried over as the prefix; <b>d = freeze length</b> = how many head positions are hard-pinned. The planner sets <code>d = (n_obs_steps − 1) + rtc_inference_delay</code> — the obs-history offset plus the executed head — and the sampler <em>clamps</em> <code>d</code> to the real prefix length so zero-padding is never frozen.</div>
   </section>
 
   <!-- ========================= PANEL 2 : INSIDE THE DENOISER ========================= -->
@@ -355,7 +356,7 @@
     // --- d brace: its own row at the very top, clear of every label ---
     const bx1 = X(REPLAN), bx2 = X(REPLAN + OVERLAP), by = laneY.brace;
     s.appendChild(el("path", { d: `M${bx1} ${by + 8} v-8 H${bx2} v8`, fill: "none", stroke: "var(--new)", "stroke-width": 1.5 }));
-    s.appendChild(txt((bx1 + bx2) / 2, by - 6, "d = 2 overlap steps", { "text-anchor": "middle", fill: "var(--new)", "font-weight": 700, "font-size": 12.5 }));
+    s.appendChild(txt((bx1 + bx2) / 2, by - 6, "d = freeze length (clamped ≤ tail)", { "text-anchor": "middle", fill: "var(--new)", "font-weight": 700, "font-size": 12.5 }));
 
     // --- time axis with step ticks ---
     const axisY = 300;

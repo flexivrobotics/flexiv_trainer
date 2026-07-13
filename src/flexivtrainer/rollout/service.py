@@ -762,6 +762,7 @@ class RolloutService:
                 # re-based to the horizon grid (index 0 == loop_start + anchor*dt).
                 rtc_prev_actions = None
                 rtc_delay = None
+                seam_gap = None
                 if (
                     rtc_enabled and force
                     and prev_chunk is not None and prev_chunk_start is not None
@@ -816,6 +817,14 @@ class RolloutService:
                         action_lists, target_times, now=time.monotonic()
                     )
                     if rtc_enabled:
+                        if prev_chunk is not None and prev_chunk_start is not None:
+                            old_i = min(
+                                round((loop_start - prev_chunk_start) / dt),
+                                len(prev_chunk) - 1,
+                            )
+                            seam_gap = float(
+                                np.linalg.norm(prev_chunk[old_i] - action_lists[0])
+                            )
                         prev_chunk = np.asarray(action_lists, dtype=np.float32)
                         prev_chunk_start = loop_start
                 if waypoint_executor.error is not None:
@@ -831,6 +840,7 @@ class RolloutService:
                     "rtc_d": rtc_delay,
                     "rtc_len": len(rtc_prev_actions)
                     if rtc_prev_actions is not None else None,
+                    "seam_gap": round(seam_gap, 4) if seam_gap is not None else None,
                 })
                 if step % log_every == 0:
                     self._log_timing(
