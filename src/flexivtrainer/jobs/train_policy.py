@@ -24,7 +24,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from flexivtrainer.config import AppSettings
 from flexivtrainer.observability import (
@@ -92,6 +92,21 @@ EFFECTIVE_BATCH_SIZE_PATTERN = re.compile(
 CHECKPOINT_STEP_PATTERN = re.compile(r"Checkpoint policy after step (?P<step>\d+)")
 EVAL_STEP_PATTERN = re.compile(r"Eval policy at step (?P<step>\d+)")
 UI_LOG_PREFIX = "@@TRAIN_LOG@@"
+
+TrainingMode = Literal["new", "fine_tune"]
+
+_FINE_TUNE_COMMON_FIELDS = {
+    "batch_size",
+    "epochs",
+    "save_freq",
+    "log_freq",
+    "num_workers",
+}
+_FINE_TUNE_POLICY_FIELDS = {
+    "optimizer_lr",
+    "vision_encoder_lr_multiplier",
+    "freeze_vision_encoder",
+}
 
 
 def _stream_level(text: str) -> str:
@@ -171,6 +186,8 @@ class TrainingJob:
     output_dir: Path
     dataset_root: Path
     policy_type: str
+    training_mode: TrainingMode = "new"
+    checkpoint_path: Path | None = None
     process: subprocess.Popen[str] | None = None
     logs: list[str] = field(default_factory=list)
     status: str = "pending"
@@ -202,6 +219,10 @@ class TrainingJob:
             "output_dir": str(self.output_dir),
             "dataset_root": str(self.dataset_root),
             "policy_type": self.policy_type,
+            "training_mode": self.training_mode,
+            "checkpoint_path": (
+                str(self.checkpoint_path) if self.checkpoint_path else None
+            ),
             "status": self.status,
             "return_code": self.return_code,
             "error": self.error,
@@ -440,9 +461,213 @@ class TrainingService:
         return " ".join(parts)
 
     def _resolve_dataset(self, dataset_root: Path) -> tuple[str, Path]:
-        # Recordings and merged datasets are standard LeRobot datasets whose
-        # repo id is local/<name> (what the recorder/merge write).
-        return f"local/{dataset_root.name}", dataset_root
+        datasets_root = self._settings.storage.merged_root.expanduser().resolve()
+        resolved = dataset_root.expanduser().resolve()
+        if not resolved.is_relative_to(datasets_root):
+            raise ValueError(
+                f"Access denied: dataset must be within datasets root ({datasets_root})"
+            )
+        if not (resolved / "meta" / "info.json").is_file():
+            raise FileNotFoundError(f"No dataset metadata found under: {resolved}")
+        return f"local/{resolved.name}", resolved
+
+    def _resolve_output_dir(self, output_dir: Path) -> Path:
+        training_root = self._settings.storage.training_root.expanduser().resolve()
+        resolved = output_dir.expanduser().resolve()
+        if not resolved.is_relative_to(training_root) or resolved == training_root:
+            raise ValueError(
+                f"Access denied: output must be within training root ({training_root})"
+            )
+        if resolved.exists():
+            raise FileExistsError(f"Training output already exists: {resolved}")
+        return resolved
+
+    def _resolve_checkpoint(self, checkpoint_path: Path) -> tuple[Path, Path]:
+        training_root = self._settings.storage.training_root.expanduser().resolve()
+        resolved = checkpoint_path.expanduser().resolve()
+        if not resolved.is_relative_to(training_root):
+            raise ValueError(
+                "Access denied: checkpoint must be within training root "
+                f"({training_root})"
+            )
+        if not resolved.is_dir():
+            raise FileNotFoundError(f"Checkpoint not found: {resolved}")
+
+        model_dir = resolved
+        if not (model_dir / "config.json").is_file():
+            nested = model_dir / "pretrained_model"
+            if (nested / "config.json").is_file():
+                model_dir = nested
+        if not (model_dir / "config.json").is_file():
+            raise FileNotFoundError(
+                f"Checkpoint config.json not found under: {resolved}"
+            )
+        if not (model_dir / "model.safetensors").is_file():
+            raise FileNotFoundError(
+                f"Checkpoint model.safetensors not found under: {model_dir}"
+            )
+
+        checkpoint_dir = (
+            model_dir.parent if model_dir.name == "pretrained_model" else model_dir
+        )
+        return checkpoint_dir, model_dir
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid JSON file: {path}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"Expected a JSON object in: {path}")
+        return payload
+
+    @staticmethod
+    def _fine_tune_fields(
+        policy_type: str, policy_config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        fields = []
+        existing_names: set[str] = set()
+        for schema_field in training_field_schema(policy_type):
+            name = schema_field["name"]
+            if name not in _FINE_TUNE_COMMON_FIELDS | _FINE_TUNE_POLICY_FIELDS:
+                continue
+            item = dict(schema_field)
+            if name in _FINE_TUNE_POLICY_FIELDS and name in policy_config:
+                item["default"] = policy_config[name]
+            fields.append(item)
+            existing_names.add(name)
+
+        # Diffusion's application schema intentionally exposes architecture
+        # knobs only, while LeRobot's checkpoint config still carries its LR.
+        # Fine-tuning needs that LR control without changing the new-policy UI.
+        if "optimizer_lr" not in existing_names and isinstance(
+            policy_config.get("optimizer_lr"), int | float
+        ):
+            fields.append(
+                {
+                    "name": "optimizer_lr",
+                    "flag": "--policy.optimizer_lr",
+                    "type": "float",
+                    "arity": 0,
+                    "default": policy_config["optimizer_lr"],
+                    "min": 0,
+                    "max": 1.0,
+                    "choices": None,
+                    "hint": "Learning rate for fine-tuning",
+                }
+            )
+        return fields
+
+    def inspect_checkpoint(self, checkpoint_path: Path) -> dict[str, Any]:
+        checkpoint_dir, model_dir = self._resolve_checkpoint(checkpoint_path)
+        policy_config = self._read_json(model_dir / "config.json")
+        policy_type = policy_config.get("type")
+        if policy_type not in POLICY_CATALOG:
+            raise ValueError(f"Unsupported checkpoint policy type: {policy_type!r}")
+        catalog_entry = POLICY_CATALOG[policy_type]
+        return {
+            "checkpoint_path": str(checkpoint_dir),
+            "model_path": str(model_dir),
+            "policy_type": policy_type,
+            "policy_label": catalog_entry["label"],
+            "fields": self._fine_tune_fields(policy_type, policy_config),
+            "policy_config": policy_config,
+        }
+
+    @staticmethod
+    def _dataset_policy_features(info: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        features = info.get("features")
+        if not isinstance(features, dict):
+            raise ValueError("Dataset metadata has no features object")
+        for key, raw in features.items():
+            if not isinstance(raw, dict):
+                continue
+            shape = raw.get("shape")
+            if not isinstance(shape, list):
+                continue
+            dtype = raw.get("dtype")
+            if dtype in {"image", "video"}:
+                feature_type = "VISUAL"
+                names = raw.get("names")
+                if (
+                    len(shape) == 3
+                    and isinstance(names, list)
+                    and len(names) == 3
+                    and names[2] in {"channel", "channels"}
+                ):
+                    shape = [shape[2], shape[0], shape[1]]
+            elif key.startswith("observation.environment_state"):
+                feature_type = "ENV"
+            elif key.startswith("observation"):
+                feature_type = "STATE"
+            elif key.startswith("action"):
+                feature_type = "ACTION"
+            else:
+                continue
+            result[key] = {"type": feature_type, "shape": shape}
+        return result
+
+    def _validate_checkpoint_dataset(
+        self, checkpoint_info: dict[str, Any], dataset_root: Path
+    ) -> None:
+        dataset_info = self._read_json(dataset_root / "meta" / "info.json")
+        actual = self._dataset_policy_features(dataset_info)
+        policy_config = checkpoint_info["policy_config"]
+        expected: dict[str, Any] = {}
+        for group in ("input_features", "output_features"):
+            value = policy_config.get(group)
+            if isinstance(value, dict):
+                expected.update(value)
+
+        mismatches: list[str] = []
+        for key, required in expected.items():
+            found = actual.get(key)
+            if found is None:
+                mismatches.append(f"missing {key}")
+                continue
+            if not isinstance(required, dict):
+                mismatches.append(f"invalid checkpoint feature {key}")
+                continue
+            required_type = str(required.get("type", "")).upper()
+            required_shape = list(required.get("shape") or [])
+            if found["type"] != required_type or found["shape"] != required_shape:
+                mismatches.append(
+                    f"{key}: checkpoint={required_type}{required_shape}, "
+                    f"dataset={found['type']}{found['shape']}"
+                )
+        if mismatches:
+            raise ValueError(
+                "Dataset is incompatible with checkpoint features: "
+                + "; ".join(mismatches)
+            )
+
+    @staticmethod
+    def _fine_tune_extra_args(
+        extra_args: list[str], fields: list[dict[str, Any]]
+    ) -> list[str]:
+        allowed = {field["flag"] for field in fields}
+        normalized: list[str] = []
+        index = 0
+        while index < len(extra_args):
+            token = extra_args[index]
+            if "=" in token:
+                flag, value = token.split("=", 1)
+                index += 1
+            else:
+                flag = token
+                if index + 1 >= len(extra_args):
+                    raise ValueError(f"Missing value for fine-tuning argument: {flag}")
+                value = extra_args[index + 1]
+                index += 2
+            if flag not in allowed:
+                raise ValueError(f"Fine-tuning argument is not allowed: {flag}")
+            if flag.startswith("--policy."):
+                normalized.append(f"{flag}={value}")
+            else:
+                normalized.extend([flag, value])
+        return normalized
 
     def start(
         self,
@@ -450,18 +675,37 @@ class TrainingService:
         output_dir: Path,
         policy_type: str,
         extra_args: list[str] | None = None,
+        training_mode: TrainingMode = "new",
+        checkpoint_path: Path | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._job is not None and self._job.status == "running":
                 raise RuntimeError("A training job is already running")
 
+            if training_mode not in {"new", "fine_tune"}:
+                raise ValueError(f"Unsupported training mode: {training_mode}")
             repo_id, resolved_root = self._resolve_dataset(dataset_root)
+            output_dir = self._resolve_output_dir(output_dir)
+            checkpoint_info: dict[str, Any] | None = None
+            if training_mode == "fine_tune":
+                if checkpoint_path is None:
+                    raise ValueError("checkpoint_path is required for fine-tuning")
+                checkpoint_info = self.inspect_checkpoint(checkpoint_path)
+                policy_type = checkpoint_info["policy_type"]
+                self._validate_checkpoint_dataset(checkpoint_info, resolved_root)
             # lerobot-train creates output_dir itself and refuses to run if it
             # already exists (resume is False), so only ensure the parent here.
             output_dir.parent.mkdir(parents=True, exist_ok=True)
             section(
                 "Training Session",
-                f"policy={policy_type} dataset={resolved_root.name} output={output_dir.name}",
+                " ".join(
+                    [
+                        f"mode={training_mode}",
+                        f"policy={policy_type}",
+                        f"dataset={resolved_root.name}",
+                        f"output={output_dir.name}",
+                    ]
+                ),
                 style="bright_magenta",
             )
             info("Training dataset resolved", f"repo_id={repo_id} root={resolved_root}")
@@ -472,7 +716,7 @@ class TrainingService:
                 command = [
                     executable,
                     "-m",
-                    "lerobot.scripts.train",
+                    "lerobot.scripts.lerobot_train",
                 ]
             else:
                 command = [executable]
@@ -483,30 +727,48 @@ class TrainingService:
                     repo_id,
                     "--dataset.root",
                     str(resolved_root),
-                    "--policy.type",
-                    policy_type,
-                    # Concrete device resolved for this machine (cuda/mps/cpu),
-                    # so lerobot uses the GPU without its "Device None" auto-
-                    # detect line and stays portable across platforms.
-                    "--policy.device",
-                    resolve_training_device(self._settings.training.default_device),
-                    # Local trainer: never push checkpoints to the HF Hub.
-                    # Without this, lerobot requires a policy.repo_id and aborts.
-                    "--policy.push_to_hub",
-                    "false",
+                ]
+            )
+            device = resolve_training_device(self._settings.training.default_device)
+            if checkpoint_info is None:
+                command.extend(
+                    [
+                        "--policy.type",
+                        policy_type,
+                        "--policy.device",
+                        device,
+                        "--policy.push_to_hub",
+                        "false",
+                    ]
+                )
+            else:
+                command.extend(
+                    [
+                        f"--policy.path={checkpoint_info['model_path']}",
+                        f"--policy.device={device}",
+                        "--policy.push_to_hub=false",
+                    ]
+                )
+            command.extend(
+                [
                     "--output_dir",
                     str(output_dir),
                     "--job_name",
                     output_dir.name,
                 ]
             )
-            # All tunable knobs (save_freq, batch, per-policy --policy.* flags, incl.
-            # the diffusion sampler baked into the checkpoint) come from the Web UI
-            # form via extra_args; training_field_schema() is the single source of the
-            # form's fields, flags and defaults. The form always emits every field, so
-            # nothing here needs a fixed fallback.
+            # New-policy training receives the full form. Fine-tuning receives
+            # only the safe subset returned by inspect_checkpoint(), and the
+            # whitelist is enforced again here before spawning LeRobot.
             if extra_args:
-                command.extend(extra_args)
+                if checkpoint_info is None:
+                    command.extend(extra_args)
+                else:
+                    command.extend(
+                        self._fine_tune_extra_args(
+                            extra_args, checkpoint_info["fields"]
+                        )
+                    )
 
             print_command("Training command", command)
 
@@ -516,6 +778,12 @@ class TrainingService:
                 output_dir=output_dir,
                 dataset_root=resolved_root,
                 policy_type=policy_type,
+                training_mode=training_mode,
+                checkpoint_path=(
+                    Path(checkpoint_info["checkpoint_path"])
+                    if checkpoint_info is not None
+                    else None
+                ),
                 status="running",
             )
             job.process = subprocess.Popen(
