@@ -698,7 +698,7 @@ class RolloutService:
             getattr(getattr(policy, "config", None), "n_obs_steps", 1) - 1, 0
         )
         prev_chunk: np.ndarray | None = None
-        prev_chunk_start: float | None = None
+        prev_chunk_step: int | None = None
         step = 0
         try:
             while not self._stop_event.is_set():
@@ -765,19 +765,13 @@ class RolloutService:
                 seam_gap = None
                 if (
                     rtc_enabled and force
-                    and prev_chunk is not None and prev_chunk_start is not None
+                    and prev_chunk is not None and prev_chunk_step is not None
                 ):
-                    elapsed = max(1, round((loop_start - prev_chunk_start) / dt))
-                    if elapsed < len(prev_chunk):
+                    elapsed = step - prev_chunk_step
+                    if 0 < elapsed < len(prev_chunk):
                         tail_start = max(elapsed - rtc_start_offset, 0)
                         rtc_prev_actions = prev_chunk[tail_start:]
                         rtc_delay = rtc_start_offset + (rtc_delay_cfg or 1)
-                    else:
-                        self._append_log(
-                            "INFO", "ROLLOUT", f"step={step} rtc-skip",
-                            f"elapsed={elapsed} >= chunk_len={len(prev_chunk)} "
-                            f"(force={force} fresh_prev={prev_chunk is not None})",
-                        )
                 actions, fresh = _predict_action_chunk(
                     observation,
                     policy,
@@ -823,16 +817,18 @@ class RolloutService:
                         action_lists, target_times, now=time.monotonic()
                     )
                     if rtc_enabled:
-                        if prev_chunk is not None and prev_chunk_start is not None:
-                            old_i = min(
-                                round((loop_start - prev_chunk_start) / dt),
-                                len(prev_chunk) - 1,
-                            )
-                            seam_gap = float(
-                                np.linalg.norm(prev_chunk[old_i] - action_lists[0])
-                            )
-                        prev_chunk = np.asarray(action_lists, dtype=np.float32)
-                        prev_chunk_start = loop_start
+                        # Jerk proxy: velocity change across the fade edge -- the
+                        # step-to-step delta right after the frozen head vs right
+                        # before it. Position 0 is frozen so it is always ~0;
+                        # the kink lives at the handoff (index rtc_delay).
+                        new = np.asarray(action_lists, dtype=np.float32)
+                        if rtc_delay is not None and rtc_delay < len(new) - 1:
+                            k = rtc_delay
+                            d_before = new[k] - new[k - 1]
+                            d_after = new[k + 1] - new[k]
+                            seam_gap = float(np.linalg.norm(d_after - d_before))
+                        prev_chunk = new
+                        prev_chunk_step = step
                 if waypoint_executor.error is not None:
                     raise RuntimeError(waypoint_executor.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
