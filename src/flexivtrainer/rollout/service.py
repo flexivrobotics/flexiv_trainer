@@ -772,6 +772,12 @@ class RolloutService:
                         tail_start = max(elapsed - rtc_start_offset, 0)
                         rtc_prev_actions = prev_chunk[tail_start:]
                         rtc_delay = rtc_start_offset + (rtc_delay_cfg or 1)
+                    else:
+                        self._append_log(
+                            "INFO", "ROLLOUT", f"step={step} rtc-skip",
+                            f"elapsed={elapsed} >= chunk_len={len(prev_chunk)} "
+                            f"(force={force} fresh_prev={prev_chunk is not None})",
+                        )
                 actions, fresh = _predict_action_chunk(
                     observation,
                     policy,
@@ -844,6 +850,14 @@ class RolloutService:
                     "rtc_len": rtc_len,
                     "seam_gap": round(seam_gap, 4) if seam_gap is not None else None,
                 })
+                # Log RTC on replan steps (where its values are set), not on the
+                # log_every cadence -- the two rarely coincide.
+                if rtc_enabled and fresh:
+                    gap_str = f"{seam_gap:.4f}" if seam_gap is not None else "n/a"
+                    self._append_log(
+                        "INFO", "ROLLOUT", f"step={step} rtc",
+                        f"seam_gap={gap_str} d={rtc_delay} len={rtc_len}",
+                    )
                 if step % log_every == 0:
                     self._log_timing(
                         step,
@@ -851,12 +865,6 @@ class RolloutService:
                         infer_raw,
                         waypoint_executor.scheduled_count,
                     )
-                    if rtc_enabled:
-                        gap_str = f"{seam_gap:.4f}" if seam_gap is not None else "n/a"
-                        self._append_log(
-                            "INFO", "ROLLOUT", f"step={step} rtc",
-                            f"seam_gap={gap_str} d={rtc_delay} len={rtc_len}",
-                        )
                     self._log_step(
                         step, snapshot, action_lists[0], layout, sides,
                         images, camera_names, actual_hz,
