@@ -134,6 +134,7 @@ def rtc_conditional_sample(
     )
 
     model.noise_scheduler.set_timesteps(model.num_inference_steps)
+    model._rtc_last_clamped_s = None
 
     if prev_actions is None:
         # RTC off / first chunk: identical to the stock sampler.
@@ -156,6 +157,7 @@ def rtc_conditional_sample(
     s = int(execution_horizon) if execution_horizon else horizon // 2
     d = max(1, min(d, prefix_len, horizon - 1))
     s = max(d, min(s, prefix_len, horizon - d))
+    model._rtc_last_clamped_s = s
 
     prev_actions = _pad_prev_actions(
         prev_actions.to(device=device, dtype=dtype), horizon, action_dim
@@ -221,6 +223,10 @@ def rtc_generate_actions(
         execution_horizon=getattr(model, "_rtc_execution_horizon", None),
         prefix_schedule=getattr(model, "_rtc_prefix_schedule", "exp"),
     )
+
+    # Stash the full normalized horizon so the service can slice the RTC prefix
+    # from it (index 0 == first horizon step) without a normalize round-trip.
+    model._rtc_last_full_horizon = actions.detach()
 
     start = n_obs_steps - 1
     end = start + model.config.n_action_steps

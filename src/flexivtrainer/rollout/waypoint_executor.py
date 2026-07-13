@@ -88,6 +88,44 @@ class _TimedWaypoint:
     commands: list[_RobotCommand | None]
 
 
+def _boundary_gap(
+    old_last: _TimedWaypoint | None,
+    old_next: _TimedWaypoint | None,
+    new_first: _TimedWaypoint | None,
+) -> float | None:
+    """Max per-arm xyz velocity mismatch at the replan boundary.
+
+    Compares the velocity the incoming chunk imposes across the seam
+    (old-last-dispatched -> first-new) against the old chunk's own slope
+    (old-last-dispatched -> old-next-pending).
+    """
+    if old_last is None or old_next is None or new_first is None:
+        return None
+    gap: float | None = None
+    for arm in range(len(old_last.commands)):
+        prev = old_last.commands[arm]
+        after_old = old_next.commands[arm] if arm < len(old_next.commands) else None
+        after_new = new_first.commands[arm] if arm < len(new_first.commands) else None
+        if prev is None or after_old is None or after_new is None:
+            continue
+        boundary_dt = new_first.target_time - old_last.target_time
+        old_dt = old_next.target_time - old_last.target_time
+        if boundary_dt <= 1e-6 or old_dt <= 1e-6:
+            continue
+        prev_xyz = [float(v) for v in prev.pose[:3]]
+        boundary_vel = [
+            (float(after_new.pose[i]) - prev_xyz[i]) / boundary_dt for i in range(3)
+        ]
+        old_slope = [
+            (float(after_old.pose[i]) - prev_xyz[i]) / old_dt for i in range(3)
+        ]
+        diff = sum(
+            (boundary_vel[i] - old_slope[i]) ** 2 for i in range(3)
+        ) ** 0.5
+        gap = diff if gap is None else max(gap, diff)
+    return gap
+
+
 class WaypointExecutor:
     """Execute rollout waypoints at their target times."""
 
@@ -107,6 +145,9 @@ class WaypointExecutor:
         self._error: str | None = None
         self._scheduled_count = 0
         self._thread: threading.Thread | None = None
+        self._last_dispatched: _TimedWaypoint | None = None
+        self._last_boundary_gap: float | None = None
+        self._last_dropped = 0
 
     def replace_waypoints(
         self,
@@ -115,8 +156,10 @@ class WaypointExecutor:
         now: float,
     ) -> None:
         waypoints: list[_TimedWaypoint] = []
+        dropped = 0
         for action, target_time in zip(actions, target_times):
             if target_time <= now:
+                dropped += 1
                 continue
             commands: list[_RobotCommand | None] = []
             for index, arm_plan in enumerate(self._layout):
@@ -145,11 +188,17 @@ class WaypointExecutor:
                 )
             waypoints.append(_TimedWaypoint(float(target_time), commands))
         with self._condition:
+            old_last = self._last_dispatched
+            old_next = self._waypoints[0] if self._waypoints else None
+            new_first = waypoints[0] if waypoints else None
+            self._last_boundary_gap = _boundary_gap(old_last, old_next, new_first)
+            self._last_dropped = dropped
             self._waypoints = waypoints
             self._scheduled_count = len(waypoints)
             self._condition.notify()
 
     def _send_waypoint(self, waypoint: _TimedWaypoint) -> None:
+        self._last_dispatched = waypoint
         max_lin_vel, max_ang_vel, max_lin_acc, max_ang_acc = self._motion_limits
         for index, command in enumerate(waypoint.commands):
             if command is None or index >= len(self._robots):
@@ -203,3 +252,22 @@ class WaypointExecutor:
     @property
     def scheduled_count(self) -> int:
         return self._scheduled_count
+
+    @property
+    def last_dispatched_poses(self) -> list[list[float] | None] | None:
+        with self._condition:
+            waypoint = self._last_dispatched
+        if waypoint is None:
+            return None
+        return [
+            None if command is None else list(command.pose)
+            for command in waypoint.commands
+        ]
+
+    @property
+    def last_boundary_gap(self) -> float | None:
+        return self._last_boundary_gap
+
+    @property
+    def last_dropped(self) -> int:
+        return self._last_dropped

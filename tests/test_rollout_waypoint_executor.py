@@ -107,6 +107,62 @@ def test_anchor_offset_keeps_first_waypoint_ahead_of_filter() -> None:
         assert executor.scheduled_count == expected
 
 
+def test_last_dispatched_poses_populated_after_send() -> None:
+    executor = _executor()
+    dt = 1.0
+    now = 100.0
+    actions = [_unit_pose(float(index)) for index in range(3)]
+    times = [now + (index + 1) * dt for index in range(3)]
+    executor.replace_waypoints(actions, times, now=now)
+
+    assert executor.last_dispatched_poses is None
+    waypoint = executor._waypoints.pop(0)
+    executor._send_waypoint(waypoint)
+
+    poses = executor.last_dispatched_poses
+    assert poses is not None
+    assert poses[0] is not None
+    assert poses[0][0] == pytest.approx(0.0)
+
+
+def test_last_boundary_gap_measures_known_kink() -> None:
+    executor = _executor()
+    dt = 1.0
+    now = 100.0
+    # Dispatch old-last at x=0 (t0), leave old-next pending at x=1 (t0+1):
+    # old slope = 1 unit/s.
+    executor.replace_waypoints(
+        [_unit_pose(0.0), _unit_pose(1.0)],
+        [now + dt, now + 2 * dt],
+        now=now,
+    )
+    executor._send_waypoint(executor._waypoints.pop(0))
+
+    # New chunk's first waypoint at x=3 at the same time as old-next
+    # (t0 + 1): boundary velocity = 3 unit/s -> gap = |3 - 1| = 2.
+    executor.replace_waypoints(
+        [_unit_pose(3.0), _unit_pose(4.0)],
+        [now + 2 * dt, now + 3 * dt],
+        now=now + dt,
+    )
+
+    assert executor.last_boundary_gap == pytest.approx(2.0)
+
+
+def test_last_dropped_counts_past_filtered_waypoints() -> None:
+    executor = _executor()
+    dt = 0.05
+    now = 100.0
+    actions = [_unit_pose(float(index)) for index in range(8)]
+    # First two target times are at/before `now` and must be dropped.
+    target_times = [now + (index - 1) * dt for index in range(8)]
+
+    executor.replace_waypoints(actions, target_times, now=now)
+
+    assert executor.last_dropped == 2
+    assert executor.scheduled_count == 6
+
+
 def test_executor_thread_stops_after_stop_event() -> None:
     stop_event = threading.Event()
     executor = _executor(stop_event)

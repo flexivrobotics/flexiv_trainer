@@ -39,6 +39,11 @@ from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
+from flexivtrainer.rollout.seam_blend import (
+    apply_twist_mode,
+    blend_seam,
+    seam_weights,
+)
 from flexivtrainer.rollout.waypoint_executor import (
     WaypointExecutor,
     build_action_layout,
@@ -249,22 +254,6 @@ def _zero_ft_sensor(
     return True
 
 
-def _normalize_actions(preprocessor: Any, actions: Any) -> Any:
-    """Map real-unit actions to the model's normalized space via the
-    preprocessor's NormalizerProcessorStep (same stats the postprocessor inverts).
-    Returns None if the step is not found so the caller can disable RTC.
-    """
-    from lerobot.processor.normalize_processor import (  # noqa: PLC0415
-        NormalizerProcessorStep,
-    )
-
-    for step in getattr(preprocessor, "steps", []):
-        if isinstance(step, NormalizerProcessorStep):
-            return step._normalize_action(actions, inverse=False)
-    warn("RTC disabled: normalizer step not found", "")
-    return None
-
-
 def _predict_action_chunk(
     observation: dict[str, Any],
     policy: Any,
@@ -282,7 +271,9 @@ def _predict_action_chunk(
     When RTC is attached to the policy and ``rtc_prev_actions`` is given, it is
     stashed on ``policy.diffusion`` so the RTC sampler conditions the fresh
     chunk's head on the previous chunk's still-executing tail. ``rtc_prev_actions``
-    must be laid out on the full-horizon grid (index 0 == first horizon step).
+    must already be in normalized model space and laid out on the full-horizon
+    grid (index 0 == first horizon step); the service slices it from the sampler's
+    own normalized full-horizon output, so no normalize round-trip is needed here.
     """
     import torch  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
@@ -292,11 +283,9 @@ def _predict_action_chunk(
     queues = getattr(policy, "_queues", None)
     action_queue = queues.get(ACTION) if isinstance(queues, dict) else None
 
-    # RTC: hand the previous chunk's unexecuted tail to the attached sampler.
-    # The sampler works in normalized action space, but rtc_prev_actions arrives
-    # in real units (postprocessed), so normalize it via the preprocessor's own
-    # NormalizerProcessorStep (same stats the postprocessor later inverts).
-    # Cleared after inference so a stale prefix never leaks into a later chunk.
+    # RTC: hand the previous chunk's unexecuted tail (already normalized) to the
+    # attached sampler. Cleared after inference so a stale prefix never leaks into
+    # a later chunk.
     diffusion = getattr(policy, "diffusion", None)
     rtc_active = diffusion is not None and getattr(diffusion, "_rtc_attached", False)
     if rtc_active:
@@ -306,9 +295,8 @@ def _predict_action_chunk(
             )
             if prev.ndim == 2:
                 prev = prev.unsqueeze(0)  # (1, T, D)
-            prev = _normalize_actions(preprocessor, prev)
             diffusion._rtc_prev_actions = prev
-            if prev is not None and rtc_inference_delay is not None:
+            if rtc_inference_delay is not None:
                 diffusion._rtc_inference_delay = int(rtc_inference_delay)
         else:
             diffusion._rtc_prev_actions = None
@@ -343,6 +331,52 @@ def _predict_action_chunk(
         tail = postprocessor(torch.cat([t.to(torch_device) for t in tail], dim=0))
     chunk = torch.cat([first.reshape(1, -1), tail.reshape(len(tail), -1)], dim=0)
     return chunk, fresh
+
+
+def _seam_gaps(
+    chunk: np.ndarray,
+    layout: list[dict[str, Any]],
+    rtc_delay: int | None,
+    rtc_start_offset: int,
+    clamped_s: int | None,
+) -> tuple[float | None, float | None]:
+    """Max per-arm xyz 2nd-difference norms inside vs outside the RTC fade zone.
+
+    Returns ``(fade_gap, path_gap)``. Fade zone in executed-slice indices:
+    freeze = max(rtc_delay - rtc_start_offset, 1), fade_end = clamped_s -
+    rtc_start_offset. Second difference ``second[i]`` spans executed indices
+    i..i+2, so the fade zone [freeze, fade_end) over positions maps to second-
+    diff indices [freeze-1, fade_end-1). ``fade_gap`` = max over that window
+    (blend-driven kink); ``path_gap`` = max over the remaining indices (the
+    trajectory's own per-step acceleration baseline).
+    """
+    if rtc_delay is None or clamped_s is None:
+        return None, None
+    freeze = max(rtc_delay - rtc_start_offset, 1)
+    fade_end = clamped_s - rtc_start_offset
+    lo = max(freeze - 1, 0)
+    hi = fade_end - 1
+    fade_gap: float | None = None
+    path_gap: float | None = None
+    for arm_plan in layout:
+        pose_slice = arm_plan.get("pose")
+        if pose_slice is None:
+            continue
+        xyz = chunk[:, pose_slice][:, :3]
+        if len(xyz) < 3:
+            continue
+        second = np.diff(np.diff(xyz, axis=0), axis=0)
+        norms = np.linalg.norm(second, axis=1)
+        window_hi = min(hi, len(norms))
+        inside = norms[lo:window_hi] if window_hi > lo else norms[:0]
+        outside = np.concatenate([norms[:lo], norms[window_hi:]])
+        if len(inside):
+            arm_fade = float(np.max(inside))
+            fade_gap = arm_fade if fade_gap is None else max(fade_gap, arm_fade)
+        if len(outside):
+            arm_path = float(np.max(outside))
+            path_gap = arm_path if path_gap is None else max(path_gap, arm_path)
+    return fade_gap, path_gap
 
 
 def _cuda_sync(device: str) -> None:
@@ -697,6 +731,14 @@ class RolloutService:
         rtc_start_offset = max(
             getattr(getattr(policy, "config", None), "n_obs_steps", 1) - 1, 0
         )
+        rtc_exec_horizon = int(getattr(rollout_cfg, "rtc_execution_horizon", 0) or 0)
+        seam_schedule = getattr(rollout_cfg, "rtc_prefix_schedule", "linear")
+        twist_mode = getattr(rollout_cfg, "twist_mode", "raw")
+        seam_blend_enabled = bool(getattr(rollout_cfg, "seam_blend", False))
+        diffusion = getattr(policy, "diffusion", None)
+        # prev_chunk holds the real-unit *dispatched* executed slice (fed to the
+        # seam blend); the RTC prefix is sliced separately from the sampler's
+        # normalized full-horizon stash.
         prev_chunk: np.ndarray | None = None
         prev_chunk_step: int | None = None
         step = 0
@@ -758,19 +800,24 @@ class RolloutService:
 
                 # Replan early enough to retain a committed path during inference.
                 force = replan_steps is None or step % replan_steps == 0
+                # Steps elapsed since the last fresh chunk was installed; new
+                # horizon index 0 aligns to OLD full-horizon index `elapsed`.
+                elapsed = (
+                    step - prev_chunk_step if prev_chunk_step is not None else 0
+                )
                 # RTC: freeze the new chunk's head onto the previous chunk's tail,
-                # re-based to the horizon grid (index 0 == loop_start + anchor*dt).
+                # sliced from the sampler's normalized full-horizon output.
                 rtc_prev_actions = None
                 rtc_delay = None
-                seam_gap = None
-                if (
-                    rtc_enabled and force
-                    and prev_chunk is not None and prev_chunk_step is not None
-                ):
-                    elapsed = step - prev_chunk_step
-                    if 0 < elapsed < len(prev_chunk):
-                        tail_start = max(elapsed - rtc_start_offset, 0)
-                        rtc_prev_actions = prev_chunk[tail_start:]
+                fade_gap = None
+                path_gap = None
+                boundary_gap = None
+                dropped = 0
+                clamped_s = None
+                if rtc_enabled and force and 0 < elapsed:
+                    full = getattr(diffusion, "_rtc_last_full_horizon", None)
+                    if full is not None and full.shape[1] - elapsed >= 2:
+                        rtc_prev_actions = full[:, elapsed:, :]
                         rtc_delay = rtc_start_offset + (rtc_delay_cfg or 1)
                 actions, fresh = _predict_action_chunk(
                     observation,
@@ -813,28 +860,66 @@ class RolloutService:
                         loop_start + (k + anchor) * dt
                         for k in range(len(action_lists))
                     ]
+                    new = np.asarray(action_lists, dtype=np.float32)
+                    if (
+                        seam_blend_enabled
+                        and prev_chunk is not None
+                        and 0 < elapsed < len(prev_chunk)
+                    ):
+                        prev_tail = prev_chunk[elapsed:]
+                        freeze = (
+                            max(rtc_delay - rtc_start_offset, 1)
+                            if rtc_delay is not None
+                            else 1
+                        )
+                        max_fade = (rtc_exec_horizon or 8) - rtc_start_offset
+                        if max_fade < 1:
+                            max_fade = 7
+                        fade_end = min(max_fade, len(prev_tail))
+                        w = seam_weights(len(new), freeze, fade_end, seam_schedule)
+                        blended = blend_seam(
+                            prev_tail,
+                            new,
+                            layout,
+                            waypoint_executor.last_dispatched_poses,
+                            w,
+                        )
+                    else:
+                        blended = new
+                    dispatch = apply_twist_mode(
+                        blended,
+                        layout,
+                        twist_mode,
+                        dt,
+                        waypoint_executor.last_dispatched_poses,
+                    )
+                    # Downstream logging (cmd_twist) must reflect the dispatched
+                    # values, not the raw sampler output.
+                    action_lists = dispatch.tolist()
                     waypoint_executor.replace_waypoints(
                         action_lists, target_times, now=time.monotonic()
                     )
+                    boundary_gap = waypoint_executor.last_boundary_gap
+                    dropped = waypoint_executor.last_dropped
                     if rtc_enabled:
-                        # Jerk proxy: velocity change across the fade edge -- the
-                        # step-to-step delta right after the frozen head vs right
-                        # before it. Position 0 is frozen so it is always ~0;
-                        # the kink lives at the handoff (index rtc_delay).
-                        new = np.asarray(action_lists, dtype=np.float32)
-                        if rtc_delay is not None and rtc_delay < len(new) - 1:
-                            k = rtc_delay
-                            d_before = new[k] - new[k - 1]
-                            d_after = new[k + 1] - new[k]
-                            seam_gap = float(np.linalg.norm(d_after - d_before))
-                        prev_chunk = new
-                        prev_chunk_step = step
+                        clamped_s = getattr(diffusion, "_rtc_last_clamped_s", None)
+                        # Gaps measure the dispatched stream (blended), not raw.
+                        fade_gap, path_gap = _seam_gaps(
+                            blended, layout, rtc_delay, rtc_start_offset, clamped_s
+                        )
+                    # Store the dispatched pose stream so the next seam blends
+                    # against what was actually commanded.
+                    prev_chunk = blended
+                    prev_chunk_step = step
                 if waypoint_executor.error is not None:
                     raise RuntimeError(waypoint_executor.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
 
+                # Prefix length on the horizon grid (now up to horizon - elapsed).
                 rtc_len = (
-                    len(rtc_prev_actions) if rtc_prev_actions is not None else None
+                    int(rtc_prev_actions.shape[1])
+                    if rtc_prev_actions is not None
+                    else None
                 )
                 self._metrics.append({
                     "t": round(loop_start, 3),
@@ -844,15 +929,28 @@ class RolloutService:
                     "fresh": bool(fresh),
                     "rtc_d": rtc_delay,
                     "rtc_len": rtc_len,
-                    "seam_gap": round(seam_gap, 4) if seam_gap is not None else None,
+                    "rtc_s": clamped_s,
+                    "fade_gap": round(fade_gap, 4) if fade_gap is not None else None,
+                    "path_gap": round(path_gap, 4) if path_gap is not None else None,
+                    "boundary_gap": (
+                        round(boundary_gap, 4) if boundary_gap is not None else None
+                    ),
+                    "dropped": dropped,
                 })
                 # Log RTC on replan steps (where its values are set), not on the
                 # log_every cadence -- the two rarely coincide.
                 if rtc_enabled and fresh:
-                    gap_str = f"{seam_gap:.4f}" if seam_gap is not None else "n/a"
+                    fade_str = f"{fade_gap:.4f}" if fade_gap is not None else "n/a"
+                    path_str = f"{path_gap:.4f}" if path_gap is not None else "n/a"
+                    bound_str = (
+                        f"{boundary_gap:.4f}" if boundary_gap is not None else "n/a"
+                    )
+                    s_str = f"{clamped_s}" if clamped_s is not None else "n/a"
                     self._append_log(
                         "INFO", "ROLLOUT", f"step={step} rtc",
-                        f"seam_gap={gap_str} d={rtc_delay} len={rtc_len}",
+                        f"fade_gap={fade_str} path_gap={path_str} "
+                        f"boundary_gap={bound_str} "
+                        f"dropped={dropped} d={rtc_delay} s={s_str} len={rtc_len}",
                     )
                 if step % log_every == 0:
                     self._log_timing(
