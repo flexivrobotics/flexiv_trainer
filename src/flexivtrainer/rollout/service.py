@@ -831,6 +831,9 @@ class RolloutService:
                     raise RuntimeError(waypoint_executor.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
 
+                rtc_len = (
+                    len(rtc_prev_actions) if rtc_prev_actions is not None else None
+                )
                 self._metrics.append({
                     "t": round(loop_start, 3),
                     "step": step,
@@ -838,8 +841,7 @@ class RolloutService:
                     "infer_ms": round(infer_seconds * 1000.0, 1),
                     "fresh": bool(fresh),
                     "rtc_d": rtc_delay,
-                    "rtc_len": len(rtc_prev_actions)
-                    if rtc_prev_actions is not None else None,
+                    "rtc_len": rtc_len,
                     "seam_gap": round(seam_gap, 4) if seam_gap is not None else None,
                 })
                 if step % log_every == 0:
@@ -849,6 +851,12 @@ class RolloutService:
                         infer_raw,
                         waypoint_executor.scheduled_count,
                     )
+                    if rtc_enabled:
+                        gap_str = f"{seam_gap:.4f}" if seam_gap is not None else "n/a"
+                        self._append_log(
+                            "INFO", "ROLLOUT", f"step={step} rtc",
+                            f"seam_gap={gap_str} d={rtc_delay} len={rtc_len}",
+                        )
                     self._log_step(
                         step, snapshot, action_lists[0], layout, sides,
                         images, camera_names, actual_hz,
