@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -30,6 +31,8 @@ class StartTrainingRequest(BaseModel):
     output_dir: str
     policy_type: str = "diffusion"
     extra_args: list[str] = Field(default_factory=list)
+    training_mode: Literal["new", "fine_tune"] = "new"
+    checkpoint_path: str | None = None
 
 
 class TrainingDeviceRequest(BaseModel):
@@ -46,6 +49,29 @@ def bootstrap(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
 @router.get("/policies")
 def policies(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return runtime.training.list_policies()
+
+
+@router.get("/checkpoint-info")
+def checkpoint_info(
+    path: str,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    try:
+        result = runtime.training.inspect_checkpoint(Path(path))
+    except ValueError as exc:
+        status = 403 if str(exc).startswith("Access denied:") else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        key: result[key]
+        for key in (
+            "checkpoint_path",
+            "policy_type",
+            "policy_label",
+            "fields",
+        )
+    }
 
 
 @router.get("/devices")
@@ -78,14 +104,33 @@ def start_training(
 ) -> dict:
     info(
         "Training job requested",
-        f"policy={request.policy_type} dataset={request.dataset_path} output={request.output_dir}",
+        " ".join(
+            [
+                f"mode={request.training_mode}",
+                f"policy={request.policy_type}",
+                f"dataset={request.dataset_path}",
+                f"output={request.output_dir}",
+            ]
+        ),
     )
-    result = runtime.training.start(
-        dataset_root=Path(request.dataset_path).resolve(),
-        output_dir=Path(request.output_dir).resolve(),
-        policy_type=request.policy_type,
-        extra_args=request.extra_args,
-    )
+    try:
+        result = runtime.training.start(
+            dataset_root=Path(request.dataset_path),
+            output_dir=Path(request.output_dir),
+            policy_type=request.policy_type,
+            extra_args=request.extra_args,
+            training_mode=request.training_mode,
+            checkpoint_path=(
+                Path(request.checkpoint_path) if request.checkpoint_path else None
+            ),
+        )
+    except ValueError as exc:
+        status = 403 if str(exc).startswith("Access denied:") else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except (FileNotFoundError, FileExistsError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result.get("status") == "running":
         ok("Training job started", f"job_id={result.get('job_id', 'unknown')}")
     else:

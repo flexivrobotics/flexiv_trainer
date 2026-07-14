@@ -39,6 +39,10 @@ const state = {
     processingStep: 1,
     processingMode: null,
     trainingStep: 1,
+    trainingMode: null,
+    trainingCheckpointPath: "",
+    trainingCheckpointInfo: null,
+    fineTuneConfig: {},
     episodes: [],
     selectedEpisodes: [],
     preview: null,
@@ -4452,17 +4456,114 @@ function renderProcessing() {
     }
 }
 
+function renderTrainingModePicker(container) {
+    container.classList.remove("has-playback-bar");
+    container.innerHTML = `
+        <div class="panel-header"><div><h3>Policy Training</h3></div></div>
+        <div class="policy-grid" id="training-mode-grid"></div>
+    `;
+    const modes = {
+        new: {
+            title: "Train New Policy",
+            description: "Initialize a new policy and train it on an existing dataset.",
+        },
+        fine_tune: {
+            title: "Fine-tune Existing Policy",
+            description: "Initialize from a checkpoint and adapt it to an existing dataset.",
+        },
+    };
+    const grid = byId("training-mode-grid");
+    Object.entries(modes).forEach(([key, mode]) => {
+        const card = document.createElement("button");
+        card.className = "policy-card";
+        card.type = "button";
+        card.innerHTML = `<h3>${mode.title}</h3><p>${mode.description}</p>`;
+        card.onclick = () => {
+            resetTrainingRunViewState();
+            state.trainingMode = key;
+            state.trainingStep = 1;
+            state.trainingCheckpointPath = "";
+            state.trainingCheckpointInfo = null;
+            state.fineTuneConfig = {};
+            state.trainingOutputStamp = "";
+            renderTraining();
+        };
+        grid.appendChild(card);
+    });
+}
+
 function renderTraining() {
     const container = byId("training-content");
     _captureTrainingLogView(container);
+    if (!state.trainingMode) {
+        renderTrainingModePicker(container);
+        return;
+    }
+    const isFineTune = state.trainingMode === "fine_tune";
+    const checkpointStep = isFineTune ? 1 : null;
+    const datasetStep = isFineTune ? 2 : 1;
+    const previewStep = isFineTune ? 3 : 2;
+    const configStep = isFineTune ? 4 : 3;
+    const runStep = isFineTune ? 5 : 4;
     // The playback bar (and its bottom-padding reservation) only appears on
     // the dataset-preview step once a dataset is loaded and previewed.
     container.classList.toggle(
         "has-playback-bar",
-        state.trainingStep === 2 && !!state.mergedDatasetPreview
+        state.trainingStep === previewStep && !!state.mergedDatasetPreview
     );
 
-    if (state.trainingStep === 1) {
+    if (isFineTune && state.trainingStep === checkpointStep) {
+        const checkpoint = state.trainingCheckpointPath;
+        const checkpointName = checkpoint ? checkpoint.split("/").pop() : "";
+        const info = state.trainingCheckpointInfo;
+        const bodyHtml = checkpoint && info
+            ? `
+            <div class="merged-dataset-entry">
+                <div class="episode-entry-row">
+                    <div class="episode-entry-card">
+                        <strong class="episode-entry-card__index">1</strong>
+                        <span class="episode-entry-card__divider" aria-hidden="true"></span>
+                        <div>
+                            <span class="episode-entry-card__name">${escapeHtml(checkpointName)}</span>
+                            <div class="episode-row__meta">${escapeHtml(info.policy_label || info.policy_type)}</div>
+                        </div>
+                    </div>
+                    <button class="round-icon-button round-icon-button--remove" id="training-remove-checkpoint" type="button" aria-label="Remove checkpoint" title="Remove checkpoint"><span aria-hidden="true">&minus;</span></button>
+                </div>
+            </div>`
+            : `<div class="merged-dataset-entry"><div class="episode-empty-state"><span>No policy checkpoint selected.</span></div></div>`;
+        container.innerHTML = `
+            <div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Policy Checkpoint</h3></div></div>
+            ${bodyHtml}
+            <div class="control-bar control-bar--episode-step">
+                <button class="round-icon-button round-icon-button--add" id="training-browse-checkpoint" type="button" aria-label="Browse checkpoints" title="Browse checkpoints"><span aria-hidden="true">+</span></button>
+            </div>
+            <div class="control-bar control-bar--floating-step-nav">
+                <button class="secondary-button" id="training-back-modes" type="button">Back</button>
+                <button id="training-flow-next" type="button" ${checkpoint && info ? "" : "disabled"}>Next</button>
+            </div>`;
+        byId("training-browse-checkpoint").onclick = () => openTrainingCheckpointBrowser();
+        if (checkpoint && info) {
+            byId("training-remove-checkpoint").onclick = () => {
+                state.trainingCheckpointPath = "";
+                state.trainingCheckpointInfo = null;
+                state.fineTuneConfig = {};
+                state.trainingOutputStamp = "";
+                renderTraining();
+            };
+        }
+        byId("training-back-modes").onclick = () => {
+            state.trainingMode = null;
+            renderTraining();
+        };
+        byId("training-flow-next").onclick = () => {
+            state.trainingStep = datasetStep;
+            renderTraining();
+        };
+        return;
+    }
+
+    if (state.trainingStep === datasetStep) {
         const loaded = !!state.mergedDatasetPath;
         const datasetName = loaded ? state.mergedDatasetPath.split("/").pop() : "";
         const preview = state.mergedDatasetPreview;
@@ -4494,6 +4595,7 @@ function renderTraining() {
                 <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
             </div>
             <div class="control-bar control-bar--floating-step-nav">
+                <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
                 <button id="training-flow-next" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
             </div>`;
 
@@ -4506,6 +4608,14 @@ function renderTraining() {
         `;
 
         byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
+        byId("training-dataset-back").onclick = () => {
+            if (isFineTune) {
+                state.trainingStep = checkpointStep;
+            } else {
+                state.trainingMode = null;
+            }
+            renderTraining();
+        };
         if (loaded) {
             byId("training-remove-merged").onclick = () => {
                 state.mergedDatasetPath = "";
@@ -4519,13 +4629,13 @@ function renderTraining() {
             };
         }
         byId("training-flow-next").onclick = () => {
-            state.trainingStep = 2;
+            state.trainingStep = previewStep;
             renderTraining();
         };
         return;
     }
 
-    if (state.trainingStep === 2) {
+    if (state.trainingStep === previewStep) {
         const tSel = state.mergedDatasetSelectedEpisode;
         const tTitle = tSel == null ? "Whole Dataset" : `Episode ${tSel}`;
 
@@ -4552,56 +4662,67 @@ function renderTraining() {
             byId("merged-dataset-preview-block").innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Loading dataset preview…</div></div>`;
         }
         byId("training-prev-dataset").onclick = () => {
-            state.trainingStep = 1;
+            state.trainingStep = datasetStep;
             renderTraining();
         };
         byId("training-flow-next").onclick = () => {
-            state.trainingStep = 3;
+            state.trainingStep = configStep;
             renderTraining();
         };
         return;
     }
 
-    if (state.trainingStep === 3) {
+    if (state.trainingStep === configStep) {
         const catalog = state.trainingPolicies || { default: "diffusion", policies: {} };
         const policiesReady = !!state.trainingPolicies;
+        const fineTuneInfo = state.trainingCheckpointInfo;
+        const configReady = isFineTune ? !!fineTuneInfo : policiesReady;
         const outputDir = getTrainingOutputDir();
         container.innerHTML = `
-            <div class="panel-header"><div><h3>Choose Training Policy</h3></div></div>
-            <div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
+            <div class="panel-header"><div><h3>${isFineTune ? `Fine-tune ${escapeHtml(fineTuneInfo?.policy_label || "Policy")}` : "Choose Training Policy"}</h3></div></div>
+            ${isFineTune ? `
+                <div class="output-picker"><div><p class="eyebrow">Source Checkpoint</p><strong>${escapeHtml(state.trainingCheckpointPath || "—")}</strong></div></div>
+            ` : `<div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
                 <div class="policy-grid" id="policy-grid"></div>
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
-            </div>
+            </div>`}
             <div id="policy-config-panel"></div>
             <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
-            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Back</button><button id="policy-start" type="button" ${outputDir && policiesReady ? "" : "disabled"}>Next</button></div>
+            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Back</button><button id="policy-start" type="button" ${outputDir && configReady ? "" : "disabled"}>Next</button></div>
         `;
-        const grid = byId("policy-grid");
-        Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
-            const card = document.createElement("button");
-            card.className = `policy-card ${state.selectedPolicy === key ? "policy-card--selected" : ""}`;
-            card.type = "button";
-            card.innerHTML = `<h3>${policy.label}</h3><p>${policy.description}</p>`;
-            card.onclick = () => {
-                state.selectedPolicy = key;
-                renderTraining();
-            };
-            grid.appendChild(card);
-        });
-        renderPolicyConfigPanel(catalog.policies[state.selectedPolicy]);
+        if (isFineTune) {
+            renderPolicyConfigPanel(
+                { fields: fineTuneInfo?.fields || [] },
+                { fineTune: true, policyKey: fineTuneInfo?.policy_type }
+            );
+        } else {
+            const grid = byId("policy-grid");
+            Object.entries(catalog.policies || {}).forEach(([key, policy]) => {
+                const card = document.createElement("button");
+                card.className = `policy-card ${state.selectedPolicy === key ? "policy-card--selected" : ""}`;
+                card.type = "button";
+                card.innerHTML = `<h3>${policy.label}</h3><p>${policy.description}</p>`;
+                card.onclick = () => {
+                    state.selectedPolicy = key;
+                    renderTraining();
+                };
+                grid.appendChild(card);
+            });
+            renderPolicyConfigPanel(catalog.policies[state.selectedPolicy]);
+        }
         byId("policy-prev").onclick = () => {
-            state.trainingStep = 2;
+            state.trainingStep = previewStep;
             renderTraining();
         };
         byId("policy-start").onclick = () => {
-            state.trainingStep = 4;
+            state.trainingStep = runStep;
             renderTraining();
         };
         return;
     }
 
-    if (state.ui.trainingDeviceAutoTriggeredStep !== 4) {
-        state.ui.trainingDeviceAutoTriggeredStep = 4;
+    if (state.ui.trainingDeviceAutoTriggeredStep !== runStep) {
+        state.ui.trainingDeviceAutoTriggeredStep = runStep;
         refreshTrainingDevices({ silent: true }).catch((error) => showToast(error.message, true));
     }
 
@@ -4756,7 +4877,7 @@ function renderTraining() {
         };
     }
     byId("training-run-prev").onclick = () => {
-        state.trainingStep = 3;
+        state.trainingStep = configStep;
         renderTraining();
     };
 }
@@ -4853,7 +4974,7 @@ async function refreshTrainingDevices(options = {}) {
     try {
         if (options.clearBeforeFetch) {
             state.trainingDevices = { configured: "", resolved: "", devices: [] };
-            if (state.activeView === "training" && state.trainingStep === 4) {
+            if (state.activeView === "training" && state.trainingStep === (state.trainingMode === "fine_tune" ? 5 : 4)) {
                 renderTraining();
             }
         }
@@ -4874,7 +4995,7 @@ async function refreshTrainingDevices(options = {}) {
         return state.trainingDevices;
     } finally {
         setTrainingDeviceEvalBusy(false);
-        if (state.activeView === "training" && state.trainingStep === 4) {
+        if (state.activeView === "training" && state.trainingStep === (state.trainingMode === "fine_tune" ? 5 : 4)) {
             renderTraining();
         }
     }
@@ -4891,17 +5012,23 @@ function applyMergedDatasetToTraining() {
     state.mergedDatasetFrame = state.mergedFrame || 0;
     state.mergedDatasetPlaying = false;
     _stopDatasetPlayback("mergedDatasetPlaying");
+    state.trainingMode = null;
     state.trainingStep = 1;
 }
 
 function getTrainingOutputDir() {
     const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
     const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
+    const policyType = state.trainingMode === "fine_tune"
+        ? state.trainingCheckpointInfo?.policy_type
+        : state.selectedPolicy;
     if (!state.trainingOutputStamp) {
         state.trainingOutputStamp = _timestampSuffix();
     }
     return trainingRoot && datasetName
-        ? `${trainingRoot}/${datasetName}-${state.selectedPolicy}_${state.trainingOutputStamp}`
+        ? state.trainingMode === "fine_tune"
+            ? `${trainingRoot}/${datasetName}-${policyType}_finetune_${state.trainingOutputStamp}`
+            : `${trainingRoot}/${datasetName}-${policyType}_${state.trainingOutputStamp}`
         : trainingRoot;
 }
 
@@ -4912,23 +5039,27 @@ function policyFieldValue(policy, field) {
 }
 
 // steps = epochs * ceil(frames / batch_size); shown live under the epochs box.
-function computeTrainingSteps(policy) {
+function computeTrainingSteps(policy, editsOverride = null) {
     const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
-    const edits = state.policyConfig[policy] || {};
+    const edits = editsOverride || state.policyConfig[policy] || {};
     const batch = Number(edits.batch_size ?? 64);
     const epochs = Number(edits.epochs ?? 100);
     if (!frames || !batch || !epochs) return 0;
     return epochs * Math.ceil(frames / batch);
 }
 
-function renderPolicyConfigPanel(policy) {
+function renderPolicyConfigPanel(policy, options = {}) {
     const panel = byId("policy-config-panel");
     if (!panel || !policy || !Array.isArray(policy.fields)) return;
-    const key = state.selectedPolicy;
-    const edits = (state.policyConfig[key] = state.policyConfig[key] || {});
+    const key = options.policyKey || state.selectedPolicy;
+    const edits = options.fineTune
+        ? state.fineTuneConfig
+        : (state.policyConfig[key] = state.policyConfig[key] || {});
     const ensembleOn = !!edits.__temporal_ensemble;
     const rows = policy.fields.map((field) => {
-        const value = policyFieldValue(key, field);
+        const value = options.fineTune
+            ? (field.name in edits ? edits[field.name] : field.default)
+            : policyFieldValue(key, field);
         const hint = field.min != null && field.max != null
             ? `Range: ${field.min}–${field.max}` : "";
         let control;
@@ -4968,13 +5099,13 @@ function renderPolicyConfigPanel(policy) {
         </div>`;
     }).join("");
     panel.className = "policy-config-panel";
-    panel.innerHTML = `<p class="eyebrow">Training Configuration</p>
+    panel.innerHTML = `<p class="eyebrow">${options.fineTune ? "Fine-tuning Configuration" : "Training Configuration"}</p>
         <div class="config-grid">${rows}</div>`;
 
     const updateStepsReadout = () => {
         const el = byId("steps-readout");
         if (!el) return;
-        const steps = computeTrainingSteps(key);
+        const steps = computeTrainingSteps(key, edits);
         const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
         el.textContent = steps
             ? `= ${steps.toLocaleString()} steps (${edits.epochs ?? 100} epochs × ⌈${frames.toLocaleString()} frames / batch⌉)`
@@ -5052,24 +5183,55 @@ function buildTrainingExtraArgs(policy) {
     return args;
 }
 
+function buildFineTuneExtraArgs() {
+    const fields = state.trainingCheckpointInfo?.fields || [];
+    const edits = state.fineTuneConfig || {};
+    const policy = state.trainingCheckpointInfo?.policy_type || "";
+    const args = [];
+    fields.forEach((field) => {
+        if (field.name === "epochs") {
+            const steps = computeTrainingSteps(policy, edits);
+            if (steps) args.push(field.flag, String(steps));
+            return;
+        }
+        const value = field.name in edits ? edits[field.name] : field.default;
+        if (field.type === "tuple") {
+            args.push(field.flag, `[${value.join(", ")}]`);
+        } else {
+            args.push(field.flag, String(value));
+        }
+    });
+    return args;
+}
+
 async function startTrainingRun(outputDir) {
     state.trainingOutputStamp = "";
+    const runStep = state.trainingMode === "fine_tune" ? 5 : 4;
+    const configStep = state.trainingMode === "fine_tune" ? 4 : 3;
     try {
-        state.trainingStep = 4;
+        state.trainingStep = runStep;
         renderTraining();
         state.trainingStatus = await api("/training/start", {
             method: "POST",
             body: JSON.stringify({
                 dataset_path: state.mergedDatasetPath,
                 output_dir: outputDir,
-                policy_type: state.selectedPolicy,
-                extra_args: buildTrainingExtraArgs(state.selectedPolicy),
+                policy_type: state.trainingMode === "fine_tune"
+                    ? state.trainingCheckpointInfo?.policy_type
+                    : state.selectedPolicy,
+                extra_args: state.trainingMode === "fine_tune"
+                    ? buildFineTuneExtraArgs()
+                    : buildTrainingExtraArgs(state.selectedPolicy),
+                training_mode: state.trainingMode || "new",
+                checkpoint_path: state.trainingMode === "fine_tune"
+                    ? state.trainingCheckpointPath
+                    : null,
             }),
         });
         renderTraining();
         window.clearInterval(state.intervals.training);
         state.intervals.training = window.setInterval(async () => {
-            if (state.activeView !== "training" || state.trainingStep !== 4) {
+            if (state.activeView !== "training" || state.trainingStep !== runStep) {
                 return;
             }
             state.trainingStatus = await api("/training/status");
@@ -5077,7 +5239,7 @@ async function startTrainingRun(outputDir) {
         }, 2000);
     } catch (error) {
         showToast(error.message, true);
-        state.trainingStep = 3;
+        state.trainingStep = configStep;
         renderTraining();
         throw error;
     }
@@ -5556,6 +5718,12 @@ function renderBrowserList() {
             if (!item.is_dir && state.pathBrowser.directoriesOnly) {
                 return;
             }
+            if (isCheckpointBrowserMode() && !isStepCheckpoint) {
+                if (item.is_dir && state.pathBrowser.allowNavigation) {
+                    refreshBrowser(item.path).catch((error) => showToast(error.message, true));
+                }
+                return;
+            }
             if (state.pathBrowser.multiSelect) {
                 toggleBrowserSelection(item.path);
             } else {
@@ -5927,6 +6095,37 @@ function openCheckpointBrowser() {
             }
             closeBrowser();
             renderRollout();
+        },
+    }).catch((error) => showToast(error.message, true));
+}
+
+function openTrainingCheckpointBrowser() {
+    const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "/";
+    openBrowser({
+        mode: "checkpoint",
+        title: "Select Checkpoint for Fine-tuning",
+        startPath: trainingRoot,
+        rootPath: trainingRoot,
+        directoriesOnly: true,
+        multiSelect: false,
+        allowNavigation: true,
+        requireSelection: true,
+        emptyMessage: "No checkpoints here — open a training run's checkpoints folder.",
+        confirmLabel: "Load",
+        pathNote: "Training outputs directory",
+        eyebrow: "Pick a checkpoint step (for example, 005000)",
+        onConfirm: async (paths) => {
+            const path = paths[0];
+            if (!path) return;
+            const info = await api(`/training/checkpoint-info?path=${encodeURIComponent(path)}`);
+            resetTrainingRunViewState();
+            state.trainingCheckpointPath = info.checkpoint_path;
+            state.trainingCheckpointInfo = info;
+            state.selectedPolicy = info.policy_type;
+            state.fineTuneConfig = {};
+            state.trainingOutputStamp = "";
+            closeBrowser();
+            renderTraining();
         },
     }).catch((error) => showToast(error.message, true));
 }
