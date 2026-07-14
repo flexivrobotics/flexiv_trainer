@@ -730,6 +730,7 @@ class TrainingService:
                 ]
             )
             device = resolve_training_device(self._settings.training.default_device)
+            # Without a checkpoint, initialize a new policy for training from scratch.
             if checkpoint_info is None:
                 command.extend(
                     [
