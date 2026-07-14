@@ -42,6 +42,18 @@
     box-sizing: border-box;
 }
 
+/* Unified heading style: all panel titles render as the browser-default h3
+   (see the <h3> panel titles across index.html / app.js). Zero the top margin
+   on every heading level so titles sit flush against the panel top edge. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    margin-top: 0;
+}
+
 body {
     margin: 0;
     min-width: 320px;
@@ -205,7 +217,7 @@ button:disabled {
     border-radius: 24px;
     background: var(--panel);
     box-shadow: var(--shadow);
-    padding: 1.25rem;
+    padding: 1rem;
 }
 
 .panel-grid {
@@ -220,10 +232,6 @@ button:disabled {
        and let the robot-serial tiles grow enough to show the full placeholder. */
     grid-template-columns: minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 1rem;
-}
-
-.robot-config-panel {
-    padding: 1.1rem 1.2rem;
 }
 
 .robot-input-grid {
@@ -287,10 +295,6 @@ button:disabled {
 
 .end-effector-grid+.panel-grid {
     margin-top: 1rem;
-}
-
-.end-effector-tile {
-    padding: 1.1rem 1.2rem;
 }
 
 .end-effector-row {
@@ -482,9 +486,24 @@ button:disabled {
     color: var(--muted);
 }
 
-.view[data-view="home"] .panel>h2,
-.view[data-view="home"] .panel-header h2 {
-    font-size: 1.18rem;
+/* Single source of truth for panel-title spacing across every page: flush to
+   the panel's top padding (no margin above) and one uniform gap below. Both
+   title DOM shapes are covered — an <h3> wrapped in .panel-header and an <h3>
+   that is a direct child of .panel. Per-view overrides below must NOT reset
+   these margins, or the spacing drifts apart again. */
+.panel>h3,
+.panel-header h3 {
+    margin: 0 0 0.5rem;
+    font-size: revert;
+}
+
+/* Controls sharing the header row with the title (a select-all toggle, a status
+   dot): give them the same bottom margin as the title so the flex row centers
+   both on the same box, and the control's center lines up with the title text
+   (not the margin-inflated line). */
+.panel-header .toggle-all-button,
+.panel-header .teleop-system-card__dot {
+    margin-bottom: 0.5rem;
 }
 
 .kv-list {
@@ -602,23 +621,27 @@ button:disabled {
     background: rgba(255, 255, 255, 0.45);
     padding: 1rem;
 }
+
 .policy-config-panel .config-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 0.9rem;
     margin-top: 0.6rem;
 }
+
 .policy-config-panel .config-field {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
 }
+
 .policy-config-panel .field-label {
     color: var(--muted);
     font-size: 0.78rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
 }
+
 .policy-config-panel .text-input {
     width: 100%;
     border: 1px solid var(--line);
@@ -629,21 +652,25 @@ button:disabled {
     font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
     font-size: 0.9rem;
 }
+
 .policy-config-panel .text-input:disabled {
     opacity: 0.55;
     cursor: not-allowed;
 }
+
 .policy-config-panel .field-label--toggle {
     display: flex;
     align-items: center;
     gap: 0.4rem;
     min-width: 0;
 }
+
 .policy-config-panel .field-label__text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
 .policy-config-panel .config-toggle {
     display: inline-flex;
     align-items: center;
@@ -654,13 +681,16 @@ button:disabled {
     font-size: 0.72rem;
     cursor: pointer;
 }
+
 .policy-config-panel .config-toggle input {
     cursor: pointer;
 }
+
 .policy-config-panel .config-tuple-row {
     display: flex;
     gap: 0.4rem;
 }
+
 .policy-config-panel .field-hint {
     color: var(--muted);
     font-size: 0.72rem;
@@ -672,8 +702,8 @@ button:disabled {
     right: 1rem;
     bottom: 1rem;
     z-index: 24;
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+    align-items: center;
     justify-content: flex-end;
     padding: 0.72rem;
     border: 1px solid var(--line);
@@ -754,19 +784,24 @@ button:disabled {
 
 /* Slim framing for the Data Collection camera feeds (matching the dataset
    preview): tighter padding so the video fills more of the card, the title
-   pulled up tight against the top edge, and a bold title. */
-#teleop-cameras-wrap .feed {
+   pulled up tight against the top edge, and a bold title. The Policy Rollout
+   camera feeds (.rollout-cameras) reuse the exact same framing. */
+#teleop-cameras-wrap .feed,
+.rollout-cameras .feed {
     padding: 0.4rem;
     gap: 0.3rem;
     border-radius: 12px;
 }
 
 #teleop-cameras-wrap .feed__placeholder,
-#teleop-cameras-wrap .feed__image {
+#teleop-cameras-wrap .feed__image,
+.rollout-cameras .feed__placeholder,
+.rollout-cameras .feed__image {
     border-radius: 8px;
 }
 
-#teleop-cameras-wrap .feed__title {
+#teleop-cameras-wrap .feed__title,
+.rollout-cameras .feed__title {
     font-weight: 700;
     padding-left: 0.4rem;
 }
@@ -774,7 +809,8 @@ button:disabled {
 .rollout-cameras {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
-    gap: 1rem;
+    /* Match the slim spacing of the Data Collection camera feeds. */
+    gap: 0.3rem;
     min-width: 0;
 }
 
@@ -1209,18 +1245,6 @@ button:disabled {
 .control-panel {
     --control-section-gap: 0.58rem;
     margin: 0;
-    padding: 1rem;
-}
-
-.control-panel .panel-header h2,
-.teleop-status-panel .panel-header h2 {
-    font-size: 1.08rem;
-    margin: 0;
-}
-
-.control-panel .panel-header,
-.teleop-status-panel .panel-header {
-    margin-bottom: var(--control-section-gap);
 }
 
 .control-stack {
@@ -1459,6 +1483,7 @@ button:disabled {
     text-transform: uppercase;
     margin-bottom: -0.2rem;
 }
+
 .control-stack .text-input {
     width: 100%;
     border: 1px solid var(--line);
@@ -1469,11 +1494,13 @@ button:disabled {
     font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
     font-size: 0.95rem;
 }
+
 .control-stack .text-input:focus {
     outline: none;
     border-color: rgba(105, 185, 232, 0.55);
     box-shadow: 0 0 0 3px rgba(105, 185, 232, 0.14);
 }
+
 .control-stack .text-input:disabled {
     opacity: 0.55;
     cursor: not-allowed;
@@ -1733,8 +1760,8 @@ button:active {
 }
 
 /* Header and toolbar stay fixed; only the list between them scrolls. */
-.dialog-panel > .dialog-header,
-.dialog-panel > .dialog-toolbar {
+.dialog-panel>.dialog-header,
+.dialog-panel>.dialog-toolbar {
     flex: 0 0 auto;
 }
 
@@ -2081,6 +2108,7 @@ button:active {
     align-items: flex-start;
     gap: 0.25rem;
 }
+
 .episode-row__text .episode-row__job {
     margin-left: 0;
     max-width: 100%;
@@ -2109,15 +2137,8 @@ button:active {
     text-overflow: clip;
 }
 
-.panel-header--training-step {
-    margin-bottom: 0.25rem;
-}
-
 .training-step-title {
-    margin: 0;
     color: var(--ink);
-    font-size: 1.1rem;
-    font-weight: 700;
     letter-spacing: 0;
     text-transform: none;
 }
@@ -2201,6 +2222,7 @@ button:active {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
 .episode-row__job {
     margin-left: auto;
     max-width: 100%;
@@ -2218,20 +2240,27 @@ button:active {
     white-space: nowrap;
     vertical-align: top;
 }
+
 .episode-row__job--overflowing:hover .episode-row__job-text {
     max-width: none;
     overflow: visible;
     text-overflow: clip;
     animation: job-tag-roll var(--job-tag-duration, 4s) ease-in-out infinite alternate;
 }
+
 @keyframes job-tag-roll {
-    0%, 12% {
+
+    0%,
+    12% {
         transform: translateX(0);
     }
-    88%, 100% {
+
+    88%,
+    100% {
         transform: translateX(var(--job-tag-shift, 0));
     }
 }
+
 @media (prefers-reduced-motion: reduce) {
     .episode-row__job--overflowing:hover .episode-row__job-text {
         animation: none;
@@ -2382,6 +2411,7 @@ button:active {
     letter-spacing: 0.08em;
     text-transform: uppercase;
 }
+
 .browser-item__job-heading-text {
     flex: 1 1 auto;
     min-width: 0;
@@ -2389,16 +2419,19 @@ button:active {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
 /* Compact per-job select-all toggle that sits inline with the job heading. */
 .browser-item__job-toggle {
     flex: 0 0 auto;
     width: 1.6rem;
     height: 1.6rem;
 }
+
 .browser-item__job-toggle .icon-check {
     width: 1rem;
     height: 1rem;
 }
+
 .browser-item--in-job {
     margin-left: 0.9rem;
 }
@@ -2440,7 +2473,7 @@ button:active {
     min-width: 0;
 }
 
-.training-main > .panel {
+.training-main>.panel {
     min-width: 0;
 }
 
@@ -2517,17 +2550,11 @@ button:active {
     display: grid;
     gap: 0.55rem;
     min-width: 0;
-    padding: 0.68rem 1rem;
     border-radius: 18px;
 }
 
 .rollout-service-card__header {
     gap: 0.55rem;
-}
-
-.rollout-service-card .panel-header h2 {
-    margin: 0;
-    font-size: 1.08rem;
 }
 
 .rollout-service-card .training-controls__state {
@@ -2575,14 +2602,6 @@ button:active {
    clearance, so only a small amount is needed here on top. */
 #training-content.has-playback-bar {
     padding-bottom: 1.5rem;
-}
-
-#training-content .panel-header h2,
-#training-content .panel h3,
-#processing-content .panel-header h2,
-#processing-content .panel h3 {
-    margin: 0.1rem 0 0;
-    font-size: 1.1rem;
 }
 
 #training-content .episode-list {
@@ -2664,7 +2683,7 @@ button:active {
 
 /* Long episode/dataset names wrap onto extra lines so the row grows to fit
    instead of clipping (job tags keep their single-line ellipsis above). */
-#processing-content .episode-row__text > span:not(.episode-row__job) {
+#processing-content .episode-row__text>span:not(.episode-row__job) {
     white-space: normal;
     overflow-wrap: anywhere;
 }
@@ -2859,7 +2878,6 @@ button:active {
 }
 
 .log-pane {
-    margin-top: 1rem;
     min-height: 0;
     max-height: calc(100vh - 14rem);
     overflow-x: auto;
