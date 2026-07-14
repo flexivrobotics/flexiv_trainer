@@ -45,6 +45,42 @@ def test_grab_images_converts_bgr_capture_to_rgb() -> None:
     assert images["ego"].flags["C_CONTIGUOUS"]
 
 
+def test_grab_camera_data_keeps_uint16_depth_in_hwc_shape() -> None:
+    bgr = np.zeros((2, 3, 3), dtype=np.uint8)
+    depth = np.full((2, 3), 1250, dtype=np.uint16)
+    service = RecordingService.__new__(RecordingService)
+    service._cameras = SimpleNamespace(
+        capture_frame=lambda name, **kwargs: {"image": bgr, "depth": depth}
+    )
+
+    images, depths = service._grab_camera_data(
+        ["ego"], ["ego"], require_all=True, attempts=1
+    )
+
+    assert images["ego"].shape == (2, 3, 3)
+    assert depths["ego"].shape == (2, 3, 1)
+    assert depths["ego"].dtype == np.uint16
+    assert depths["ego"].flags["C_CONTIGUOUS"]
+
+
+def test_ensure_camera_streams_rejects_missing_selected_depth() -> None:
+    service = RecordingService.__new__(RecordingService)
+    service._cameras = SimpleNamespace(
+        start_streams=lambda camera_names: {
+            "cameras": {
+                "ego": {
+                    "started": True,
+                    "depth": {"enabled": True, "started": False},
+                }
+            },
+            "errors": {},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="depth stream is not started"):
+        service._ensure_camera_streams(["ego"], depth_names=["ego"])
+
+
 def _arm_snapshot_payload(base: float, *, gripper: dict | None = None) -> dict:
     payload = {
         "connected": True,

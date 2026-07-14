@@ -609,6 +609,39 @@ class TrainingService:
             result[key] = {"type": feature_type, "shape": shape}
         return result
 
+    @staticmethod
+    def _dataset_depth_keys(info: dict[str, Any]) -> set[str]:
+        features = info.get("features")
+        if not isinstance(features, dict):
+            raise ValueError("Dataset metadata has no features object")
+        return {
+            key
+            for key, raw in features.items()
+            if isinstance(raw, dict)
+            and isinstance(raw.get("info"), dict)
+            and raw["info"].get("is_depth_map") is True
+        }
+
+    def _rgb_only_policy_input_features(
+        self, dataset_root: Path
+    ) -> dict[str, dict[str, Any]] | None:
+        """Return explicit policy inputs when a dataset also contains depth.
+
+        LeRobot otherwise infers every non-action feature as a policy input. Its
+        dataset layer supports depth maps, but the policies exposed by this app
+        do not yet have a depth-specific ingestion path, so keep ordinary new
+        training on the RGB/state features only.
+        """
+        dataset_info = self._read_json(dataset_root / "meta" / "info.json")
+        depth_keys = self._dataset_depth_keys(dataset_info)
+        if not depth_keys:
+            return None
+        return {
+            key: feature
+            for key, feature in self._dataset_policy_features(dataset_info).items()
+            if key not in depth_keys and feature["type"] != "ACTION"
+        }
+
     def _validate_checkpoint_dataset(
         self, checkpoint_info: dict[str, Any], dataset_root: Path
     ) -> None:
@@ -742,6 +775,12 @@ class TrainingService:
                         "false",
                     ]
                 )
+                rgb_only_inputs = self._rgb_only_policy_input_features(resolved_root)
+                if rgb_only_inputs is not None:
+                    command.append(
+                        "--policy.input_features="
+                        + json.dumps(rgb_only_inputs, separators=(",", ":"))
+                    )
             else:
                 command.extend(
                     [

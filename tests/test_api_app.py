@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from flexivtrainer.api.app import create_app
+from flexivtrainer.api.routes.teleop import camera_frame
 from flexivtrainer.runtime.manager import get_runtime_manager
 
 
@@ -59,3 +62,21 @@ def test_camera_frame_route_returns_png() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_camera_frame_route_colorizes_depth() -> None:
+    class FakeCameras:
+        def capture_frame(self, camera_name: str):
+            return {
+                "image": [[[0, 0, 0]]],
+                "depth": [[0, 500, 1000]],
+            }
+
+    class FakeRuntime:
+        cameras = FakeCameras()
+        settings = SimpleNamespace(depth_max_m=2.0)
+
+    response = camera_frame("ego", "depth", FakeRuntime())
+
+    assert response.media_type == "image/png"
+    assert response.body.startswith(b"\x89PNG\r\n\x1a\n")

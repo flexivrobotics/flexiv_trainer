@@ -261,8 +261,8 @@ def _predict_action_chunk(
 ) -> tuple[Any, bool]:
     """Return an action chunk and whether it came from fresh inference."""
     import torch  # noqa: PLC0415
+    from lerobot.common.control_utils import predict_action  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
-    from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
 
     torch_device = torch.device(device)
     queues = getattr(policy, "_queues", None)

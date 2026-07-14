@@ -751,10 +751,16 @@ class RuntimeManager:
         # the optional dataset dependencies are importable.
         dataset_path, repo_id = self._resolve_dataset_repo(dataset_path)
         dataset = self._load_dataset(dataset_path)
+        depth_keys = [
+            key
+            for key, feature in dataset.features.items()
+            if isinstance(feature.get("info"), dict)
+            and feature["info"].get("is_depth_map") is True
+        ]
         camera_keys = [
             key
             for key, feature in dataset.features.items()
-            if feature["dtype"] in {"image", "video"}
+            if feature["dtype"] in {"image", "video"} and key not in depth_keys
         ]
         numeric_keys = [
             series_key for series_key, _, _ in self._numeric_channels(dataset)
@@ -767,6 +773,7 @@ class RuntimeManager:
             "num_frames": dataset.num_frames,
             "num_episodes": dataset.num_episodes,
             "camera_keys": camera_keys,
+            "depth_keys": depth_keys,
             "numeric_keys": numeric_keys,
             "episodes": self._episode_list(dataset),
         }
@@ -916,6 +923,11 @@ class RuntimeManager:
 
         if camera_key not in dataset.features:
             raise KeyError(f"Camera key '{camera_key}' not found in dataset")
+        feature = dataset.features[camera_key]
+        is_depth = (
+            isinstance(feature.get("info"), dict)
+            and feature["info"].get("is_depth_map") is True
+        )
 
         # Use __getitem__ rather than get_raw_item: the latter only returns the
         # parquet (numeric) columns, while video frames are decoded lazily on
@@ -927,14 +939,34 @@ class RuntimeManager:
                 f"No image data for key '{camera_key}' at frame {frame_index}"
             )
 
-        # Convert tensor to numpy HWC
+        # Convert tensors to displayable HWC arrays. Native LeRobot depth
+        # decoding returns float depth in millimeters, which must be mapped to
+        # colors rather than treated as a normalized RGB image.
         if isinstance(image_data, torch.Tensor):
             image_data = image_data.numpy()
         if isinstance(image_data, np.ndarray):
             if image_data.ndim == 3 and image_data.shape[0] in (1, 3, 4):
                 image_data = np.moveaxis(image_data, 0, -1)
-            # Scale from [0, 1] float to [0, 255] uint8 if needed
-            if image_data.dtype in (np.float32, np.float64):
+            if is_depth:
+                import cv2
+
+                depth = image_data
+                if depth.ndim == 3 and depth.shape[-1] == 1:
+                    depth = depth[:, :, 0]
+                elif depth.ndim == 3 and depth.shape[0] == 1:
+                    depth = depth[0]
+                depth = depth.astype(np.float32, copy=False)
+                max_depth_mm = max(float(self.settings.depth_max_m) * 1000.0, 1.0)
+                valid = np.isfinite(depth) & (depth > 0)
+                normalized = np.zeros(depth.shape, dtype=np.uint8)
+                normalized[valid] = (
+                    np.clip(depth[valid], 0, max_depth_mm) * (255.0 / max_depth_mm)
+                ).astype(np.uint8)
+                # JET returns BGR; PIL expects RGB. Invalid/zero depth remains black.
+                image_data = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)[:, :, ::-1]
+                image_data[~valid] = 0
+            elif image_data.dtype in (np.float32, np.float64):
+                # RGB tensors are decoded in [0, 1].
                 image_data = (image_data * 255).clip(0, 255).astype(np.uint8)
 
         img = Image.fromarray(image_data)

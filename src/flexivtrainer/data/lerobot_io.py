@@ -14,9 +14,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +96,12 @@ def active_camera_names(sides: list[str] | None = None) -> list[str]:
 def _image_entry_to_camera(sides: list[str]) -> dict[str, str]:
     cameras = ["ego"] + [_WRIST_CAMERA_BY_SIDE[side] for side in sides]
     return {f"observation.images.{name}": name for name in cameras}
+
+
+def _depth_entry_to_camera(sides: list[str]) -> dict[str, str]:
+    cameras = ["ego"] + [_WRIST_CAMERA_BY_SIDE[side] for side in sides]
+    return {f"observation.images.{name}_depth": name for name in cameras}
+
 
 # Per-metric axis names. The full sub-feature label is "<metric>.<axis>", e.g.
 # "tcp_pose.x" or "tcp_wrench.fz". tcp_pose carries position + quaternion.
@@ -186,6 +192,7 @@ def default_recording_entry_keys(sides: list[str] | None = None) -> list[str]:
     resolved = _resolve_sides(sides)
     return (
         list(_image_entry_to_camera(resolved))
+        + list(_depth_entry_to_camera(resolved))
         + [
             f"observation.state.{side}.{label}"
             for side in resolved
@@ -270,6 +277,31 @@ def extract_recording_images(
 ) -> dict[str, np.ndarray]:
     selected = resolve_recording_image_names(entries, sides)
     return {name: images[name] for name in selected if name in images}
+
+
+def resolve_recording_depth_names(
+    entries: list[str] | None = None, sides: list[str] | None = None
+) -> list[str]:
+    resolved_entries = resolve_recording_entries(entries, sides)
+    entry_to_camera = _depth_entry_to_camera(_resolve_sides(sides))
+    camera_names: list[str] = []
+    seen: set[str] = set()
+    for entry in resolved_entries:
+        camera_name = entry_to_camera.get(entry)
+        if not camera_name or camera_name in seen:
+            continue
+        camera_names.append(camera_name)
+        seen.add(camera_name)
+    return camera_names
+
+
+def extract_recording_depths(
+    depths: dict[str, np.ndarray],
+    entries: list[str] | None = None,
+    sides: list[str] | None = None,
+) -> dict[str, np.ndarray]:
+    selected = resolve_recording_depth_names(entries, sides)
+    return {name: depths[name] for name in selected if name in depths}
 
 
 def _collect_arm_group(
@@ -420,10 +452,12 @@ def build_features_from_sample(
     images: dict[str, np.ndarray],
     entries: list[str] | None = None,
     sides: list[str] | None = None,
+    depths: dict[str, np.ndarray] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
     resolved_list = resolve_recording_entries(entries, sides)
     resolved_entries = set(resolved_list)
     selected_images = extract_recording_images(images, resolved_list, sides)
+    selected_depths = extract_recording_depths(depths or {}, resolved_list, sides)
 
     features: dict[str, dict[str, Any]] = {}
 
@@ -443,6 +477,19 @@ def build_features_from_sample(
             # unconditionally when building policy features (and uses the last
             # axis to detect (h, w, c) layout). Order must match `shape` above.
             "names": ["height", "width", "channels"],
+        }
+
+    for camera_name, depth in selected_depths.items():
+        array = np.asarray(depth)
+        height = int(array.shape[0]) if array.ndim >= 2 else 0
+        width = int(array.shape[1]) if array.ndim >= 2 else 0
+        # Depth maps are single-channel; the is_depth_map flag routes LeRobot to
+        # the 12-bit depth encoder instead of the RGB video encoder.
+        features[f"observation.images.{camera_name}_depth"] = {
+            "dtype": "video",
+            "shape": [height, width, 1],
+            "names": ["height", "width", "channels"],
+            "info": {"is_depth_map": True},
         }
 
     # Both arms fold into a single observation.state and action vector feature,

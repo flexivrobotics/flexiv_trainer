@@ -126,6 +126,7 @@ const state = {
         teleopStartBusy: false,
         teleopZeroingSensors: false,
         teleopHomeBusy: false,
+        visualizeDepth: false,
         recordingStartBusy: false,
         recordingSaveBusy: false,
         recordingSaveProgress: 0,
@@ -303,7 +304,14 @@ function recordingEntryOptions() {
         const camera = WRIST_CAMERA_BY_SIDE[side];
         images.push({ id: `observation.images.${camera}`, label: camera, group: "observation.images", bucket: "image", sourceField: camera });
     });
-    return [...images, ...buildArmMetricRecordingOptions(sides)];
+    const depths = images.map((image) => ({
+        id: `${image.id}_depth`,
+        label: `${image.label}_depth`,
+        group: "observation.depth",
+        bucket: "depth",
+        sourceField: image.sourceField,
+    }));
+    return [...images, ...depths, ...buildArmMetricRecordingOptions(sides)];
 }
 
 function defaultRecordingEntryIds() {
@@ -1128,6 +1136,14 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
         </div>
     `;
     }).join("");
+    const depthFeedsHtml = (preview.depth_keys || []).map((depthKey) => `
+        <div class="feed">
+            <div class="feed__header"><span>${depthKey}</span></div>
+            <div class="feed__placeholder" data-render-mode="live">
+                <img class="feed__image dataset-depth-frame" data-camera-key="${depthKey}" alt="${depthKey} depth preview" />
+            </div>
+        </div>
+    `).join("");
 
     // Playback controls
     const playbackHtml = `
@@ -1161,8 +1177,8 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     }).join("");
 
     container.innerHTML = `
-        <span class="eyebrow dataset-feed-title">Videos</span>
-        <div class="feed-row dataset-feed-row">${feedsHtml}</div>
+        <span class="eyebrow dataset-feed-title">Camera Feeds</span>
+        <div class="feed-row dataset-feed-row">${feedsHtml}${depthFeedsHtml}</div>
         ${playbackHtml}
         <div class="dataset-plots-grid">${plotsHtml}</div>
     `;
@@ -1220,6 +1236,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
 
     // Restore the playhead position on the freshly-mounted videos.
     _seekDatasetVideos(container, preview, currentFrame);
+    _updateDatasetDepthImages(container, preview, currentFrame);
     // Start playback if already playing
     if (isPlaying) {
         _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey);
@@ -1250,6 +1267,20 @@ function _seekDatasetVideos(container, preview, frameIndex) {
         } else {
             video.addEventListener("loadedmetadata", () => { video.currentTime = t; }, { once: true });
         }
+    });
+}
+
+function _updateDatasetDepthImages(container, preview, frameIndex) {
+    container.querySelectorAll(".dataset-depth-frame").forEach((image) => {
+        const params = new URLSearchParams({
+            path: preview.path,
+            key: image.dataset.cameraKey,
+            index: String(frameIndex),
+        });
+        if (preview.episode_index !== null && preview.episode_index !== undefined) {
+            params.set("episode_index", String(preview.episode_index));
+        }
+        image.src = `/datasets/frame-image?${params.toString()}`;
     });
 }
 
@@ -1332,6 +1363,7 @@ function _rebuildDatasetLegends(container, preview, seriesData, frameKey) {
 function _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey) {
     _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
     _seekDatasetVideos(container, preview, state[frameKey]);
+    _updateDatasetDepthImages(container, preview, state[frameKey]);
 }
 
 function _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey) {
@@ -1343,7 +1375,25 @@ function _startDatasetPlayback(container, preview, seriesData, frameKey, playing
     const live = () => state[playingKey] && _datasetPlaybackGen[playingKey] === gen;
 
     const videos = [...container.querySelectorAll(".dataset-frame-video")];
-    if (!videos.length) return;
+    if (!videos.length) {
+        // A recording may intentionally contain depth only. In that case no
+        // browser-decodable RGB video exists to serve as the playback clock.
+        const startedAt = performance.now();
+        const startFrame = state[frameKey] || 0;
+        const tickDepthOnly = (now) => {
+            if (!live()) return;
+            const elapsedFrames = Math.floor(((now - startedAt) / 1000) * fps);
+            const frame = (startFrame + elapsedFrames) % numFrames;
+            if (frame !== state[frameKey]) {
+                state[frameKey] = frame;
+                _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+                _updateDatasetDepthImages(container, preview, frame);
+            }
+            _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tickDepthOnly);
+        };
+        _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tickDepthOnly);
+        return;
+    }
     const master = videos[0];
     const masterOffset = _videoWindowOffset(preview, master.dataset.cameraKey);
     const masterWindow = preview.video_windows && preview.video_windows[master.dataset.cameraKey];
@@ -1374,6 +1424,7 @@ function _startDatasetPlayback(container, preview, seriesData, frameKey, playing
         if (frame !== state[frameKey]) {
             state[frameKey] = frame;
             _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
+            _updateDatasetDepthImages(container, preview, frame);
             // Correct any drift between feeds without disrupting the master.
             for (let i = 1; i < videos.length; i++) {
                 const offsetDelta = _videoWindowOffset(preview, videos[i].dataset.cameraKey) - masterOffset;
@@ -2889,23 +2940,33 @@ function buildAwaitingDataMarkup() {
     `;
 }
 
-function buildCameraFrameUrl(cameraName) {
-    return `/teleop/cameras/${encodeURIComponent(cameraName)}/frame?ts=${Date.now()}`;
+function buildCameraFrameUrl(cameraName, view = "rgb") {
+    return `/teleop/cameras/${encodeURIComponent(cameraName)}/frame?view=${view}&ts=${Date.now()}`;
 }
 
-function stopCameraFeed(cameraName) {
-    const feed = state.cameraFeeds[cameraName];
-    if (feed) {
-        feed.stopped = true;
-        if (feed.retryTimer) {
-            window.clearTimeout(feed.retryTimer);
+function cameraFeedKey(cameraName, view) {
+    return `${cameraName}:${view}`;
+}
+
+function stopCameraFeed(cameraName, view = null) {
+    const prefix = `${cameraName}:`;
+    Object.keys(state.cameraFeeds).forEach((key) => {
+        if (key !== cameraName && key !== cameraFeedKey(cameraName, view) && !(view === null && key.startsWith(prefix))) {
+            return;
         }
-    }
-    delete state.cameraFeeds[cameraName];
+        const feed = state.cameraFeeds[key];
+        feed.stopped = true;
+        if (feed.retryTimer) window.clearTimeout(feed.retryTimer);
+        delete state.cameraFeeds[key];
+    });
 }
 
 function stopAllCameraFeeds() {
-    Object.keys(state.cameraFeeds).forEach((name) => stopCameraFeed(name));
+    Object.values(state.cameraFeeds).forEach((feed) => {
+        feed.stopped = true;
+        if (feed.retryTimer) window.clearTimeout(feed.retryTimer);
+    });
+    state.cameraFeeds = {};
 }
 
 function restoreAwaitingCameraPlaceholder(placeholder) {
@@ -2918,47 +2979,49 @@ function restoreAwaitingCameraPlaceholder(placeholder) {
     placeholder.innerHTML = buildAwaitingDataMarkup();
 }
 
-function startCameraFeedPump(cameraName, image) {
-    const feed = state.cameraFeeds[cameraName];
+function startCameraFeedPump(cameraName, view, image) {
+    const key = cameraFeedKey(cameraName, view);
+    const feed = state.cameraFeeds[key];
     if (!feed || feed.stopped) {
         return;
     }
 
-    const nextUrl = buildCameraFrameUrl(cameraName);
+    const nextUrl = buildCameraFrameUrl(cameraName, view);
     feed.lastUrl = nextUrl;
 
     image.onload = () => {
-        if (feed.stopped || state.cameraFeeds[cameraName] !== feed) {
+        if (feed.stopped || state.cameraFeeds[key] !== feed) {
             return;
         }
         feed.failed = false;
         // Pump: request next frame immediately; actual FPS is limited by server response time
-        window.setTimeout(() => startCameraFeedPump(cameraName, image), 0);
+        window.setTimeout(() => startCameraFeedPump(cameraName, view, image), 0);
     };
 
     image.onerror = () => {
-        if (feed.stopped || state.cameraFeeds[cameraName] !== feed) {
+        if (feed.stopped || state.cameraFeeds[key] !== feed) {
             return;
         }
         feed.failed = true;
         // Retry after a short delay — do NOT destroy the img element
-        feed.retryTimer = window.setTimeout(() => startCameraFeedPump(cameraName, image), 1000);
+        feed.retryTimer = window.setTimeout(() => startCameraFeedPump(cameraName, view, image), 1000);
     };
 
     image.src = nextUrl;
 }
 
-function ensureCameraFeedRunning(cameraName, image) {
-    const existing = state.cameraFeeds[cameraName];
+function ensureCameraFeedRunning(cameraName, view, image) {
+    const key = cameraFeedKey(cameraName, view);
+    const existing = state.cameraFeeds[key];
     if (existing && !existing.stopped && existing.image === image) {
         // Pump is already running for this image element
         return;
     }
     // Stop old feed if any
-    stopCameraFeed(cameraName);
+    stopCameraFeed(cameraName, view);
     const feed = { lastUrl: "", failed: false, stopped: false, retryTimer: null, image };
-    state.cameraFeeds[cameraName] = feed;
-    startCameraFeedPump(cameraName, image);
+    state.cameraFeeds[key] = feed;
+    startCameraFeedPump(cameraName, view, image);
 }
 
 function renderCameraFps(elementId, cameraName, camera) {
@@ -2994,8 +3057,70 @@ function renderCameraFps(elementId, cameraName, camera) {
 
     const image = placeholder.querySelector(".feed__image");
     if (image) {
-        ensureCameraFeedRunning(cameraName, image);
+        image.alt = `${cameraTitle} RGB live feed`;
+        ensureCameraFeedRunning(cameraName, "rgb", image);
     }
+}
+
+function renderDepthPreviewFeeds(cameras, cameraNames) {
+    const section = byId("teleop-depth-feeds");
+    const row = byId("teleop-depth-feed-row");
+    if (!section || !row) return;
+
+    section.classList.toggle("hidden", !state.ui.visualizeDepth);
+    if (!state.ui.visualizeDepth) {
+        cameraNames.forEach((name) => stopCameraFeed(name, "depth"));
+        row.innerHTML = "";
+        delete row.dataset.renderKey;
+        return;
+    }
+
+    const readyCameraNames = cameraNames.filter(
+        (name) => !!cameras?.[name]?.started && !!cameras?.[name]?.depth?.started,
+    );
+    const renderKey = readyCameraNames.join("|");
+    if (row.dataset.renderKey !== renderKey) {
+        cameraNames.forEach((name) => stopCameraFeed(name, "depth"));
+        row.innerHTML = readyCameraNames.map((name) => {
+            const label = CAMERA_LOCATION_LABELS[name] || name;
+            return `
+                <div class="feed">
+                    <div class="feed__header"><span class="feed__title">${label} Depth</span></div>
+                    <div class="feed__placeholder" data-render-mode="live">
+                        <img class="feed__image" data-depth-camera="${name}" alt="${label} depth live feed" />
+                    </div>
+                </div>
+            `;
+        }).join("");
+        row.dataset.renderKey = renderKey;
+    }
+
+    row.querySelectorAll("[data-depth-camera]").forEach((image) => {
+        const cameraName = image.dataset.depthCamera;
+        if (cameras?.[cameraName]?.depth?.started) {
+            ensureCameraFeedRunning(cameraName, "depth", image);
+        }
+    });
+}
+
+function renderDepthVisualizationControl(cameras, cameraNames) {
+    const input = byId("teleop-visualize-depth");
+    if (!input) return;
+
+    const depthReady = cameraNames.some((name) => {
+        const camera = cameras?.[name];
+        return !!camera?.started && !!camera?.depth?.started;
+    });
+    input.disabled = !depthReady;
+    input.title = depthReady
+        ? "Add aligned, colorized depth preview windows below the RGB feeds"
+        : "Depth visualization becomes available when a camera has a depth stream";
+
+    if (!depthReady && state.ui.visualizeDepth) {
+        state.ui.visualizeDepth = false;
+        cameraNames.forEach((name) => stopCameraFeed(name, "depth"));
+    }
+    input.checked = state.ui.visualizeDepth;
 }
 
 function renderRecordingOptions(recording = {}) {
@@ -3101,6 +3226,10 @@ function areSelectedRecordingEntriesAvailable(teleopStatus) {
         if (option.bucket === "image") {
             const camera = teleopStatus?.cameras?.cameras?.[option.sourceField];
             return !!camera?.started;
+        }
+        if (option.bucket === "depth") {
+            const camera = teleopStatus?.cameras?.cameras?.[option.sourceField];
+            return !!camera?.started && !!camera?.depth?.started;
         }
 
         // Each arm feature maps to one follower robot (side 0 = left, 1 = right).
@@ -4075,6 +4204,11 @@ function renderTeleop() {
     byId("wrist-feed-row")?.classList.toggle("feed-row--single", panels.length === 1);
 
     const cameras = teleopStatus.cameras?.cameras || {};
+    const activeCameraNames = ["ego", ...panels.map((panel) => panel.camera)];
+    renderDepthVisualizationControl(
+        cameras,
+        activeCameraNames,
+    );
     renderCameraFps("ego-fps", "ego", cameras.ego);
     panels.forEach((panel) => {
         const titleEl = byId(`${panel.slot}-wrist-title`);
@@ -4089,6 +4223,7 @@ function renderTeleop() {
         renderTrendGraph(panel.slot, "force", history, telemetry.force, panel.wrenchLabel);
         renderTrendGraph(panel.slot, "moment", history, telemetry.moment, panel.wrenchLabel);
     });
+    renderDepthPreviewFeeds(cameras, activeCameraNames);
 
     const grid = byId("teleop-status-grid");
     const services = teleopStatus.services || state.summary?.services || {};
@@ -6644,6 +6779,13 @@ function bindGlobalEvents() {
     const refreshButton = byId("teleop-refresh");
     if (refreshButton) {
         refreshButton.onclick = () => refreshTeleopStatusWithIndicator().catch((error) => showToast(error.message, true));
+    }
+    const depthVisualization = byId("teleop-visualize-depth");
+    if (depthVisualization) {
+        depthVisualization.onchange = () => {
+            state.ui.visualizeDepth = depthVisualization.checked;
+            renderTeleop();
+        };
     }
     byId("teleop-power").onclick = async () => {
         if (state.teleopStatus?.teleop?.started) {

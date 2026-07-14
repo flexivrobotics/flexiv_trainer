@@ -37,6 +37,7 @@ class CameraConfig(BaseModel):
     width: int = 640
     height: int = 480
     fps: int = 30
+    use_depth: bool = True
 
 
 class CameraSerialConfig(BaseModel):
@@ -219,6 +220,10 @@ class AppSettings(BaseSettings):
     # or name an explicit encoder. Resolved by resolve_recording_vcodec(); an
     # unavailable codec falls back to software 'h264' rather than failing.
     video_codec: str = "h264"
+    # Depth ceiling in meters for LeRobot's 12-bit depth quantization and for
+    # colorized previews. The 2 m default focuses the available range on a
+    # tabletop workspace; farther pixels are clamped.
+    depth_max_m: float = Field(default=2.0, gt=0)
     network_interface_whitelist: list[str] = Field(default_factory=list)
     teleop_robot_pairs: list[TeleopRobotPair] = Field(default_factory=list)
     cameras: list[CameraConfig] = Field(

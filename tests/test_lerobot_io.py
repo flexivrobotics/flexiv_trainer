@@ -19,8 +19,10 @@ from flexivtrainer.data.lerobot_io import (
     DEFAULT_RECORDING_ENTRY_KEYS,
     arm_side_label,
     build_features_from_sample,
+    extract_recording_depths,
     extract_recording_frame_values,
     extract_recording_images,
+    resolve_recording_depth_names,
     resolve_recording_image_names,
     resolve_recording_entries,
     resolve_recording_vcodec,
@@ -68,6 +70,21 @@ def test_resolve_recording_entries_accepts_single_arm_wrist() -> None:
     # and rejected observation.images.wrist, blocking recording).
     entries = ["observation.images.ego", "observation.images.wrist"]
     assert resolve_recording_entries(entries, ["single_arm"]) == entries
+
+
+def test_depth_entries_are_default_on_and_follow_active_cameras() -> None:
+    assert resolve_recording_depth_names(sides=["single_arm"]) == ["ego", "wrist"]
+    assert "observation.images.ego_depth" in DEFAULT_RECORDING_ENTRY_KEYS
+
+    depth = {
+        "ego": np.full((4, 5), 1000, dtype=np.uint16),
+        "left_wrist": np.full((4, 5), 500, dtype=np.uint16),
+    }
+    selected = extract_recording_depths(
+        depth,
+        ["observation.images.left_wrist_depth"],
+    )
+    assert list(selected) == ["left_wrist"]
 
 
 def test_resolve_recording_entries_rejects_dual_wrist_in_single_arm() -> None:
@@ -337,3 +354,22 @@ def test_build_features_from_sample_combines_arms_with_named_axes() -> None:
         "left_arm.tcp_wrench.my",
         "left_arm.tcp_wrench.mz",
     ]
+
+
+def test_build_features_marks_native_depth_video() -> None:
+    depth = np.full((4, 5, 1), 750, dtype=np.uint16)
+    features, _, _ = build_features_from_sample(
+        {},
+        {},
+        ["observation.images.ego_depth"],
+        depths={"ego": depth},
+    )
+
+    assert features == {
+        "observation.images.ego_depth": {
+            "dtype": "video",
+            "shape": [4, 5, 1],
+            "names": ["height", "width", "channels"],
+            "info": {"is_depth_map": True},
+        }
+    }
