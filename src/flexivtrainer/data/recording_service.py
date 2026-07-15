@@ -21,23 +21,25 @@ import shutil
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
 from flexivtrainer.config import AppSettings
 from flexivtrainer.data.lerobot_io import (
     build_features_from_sample,
+    extract_recording_depths,
     extract_recording_frame_values,
     extract_recording_images,
+    resolve_recording_depth_names,
     resolve_recording_entries,
     resolve_recording_image_names,
     resolve_recording_vcodec,
 )
 from flexivtrainer.observability import warn
-
 
 # Default training job name shown in the recording panel's Job name box and
 # used when a recording is started without an explicit name.
@@ -137,9 +139,16 @@ class RecordingService:
         episode_name, staging_path = self._create_staging_path()
 
         try:
-            camera_names = resolve_recording_image_names(entries, sides)
-            self._ensure_camera_streams(camera_names)
-            images = self._grab_images(camera_names, require_all=True, attempts=3)
+            image_names = resolve_recording_image_names(entries, sides)
+            depth_names = resolve_recording_depth_names(entries, sides)
+            camera_names = list(dict.fromkeys([*image_names, *depth_names]))
+            self._ensure_camera_streams(camera_names, depth_names=depth_names)
+            images, depths = self._grab_camera_data(
+                image_names,
+                depth_names,
+                require_all=True,
+                attempts=3,
+            )
             robot_snapshot = (
                 self._teleop.robot_data_snapshot(
                     include_states=includes_observation_values,
@@ -150,13 +159,14 @@ class RecordingService:
             )
 
             features, _, _ = build_features_from_sample(
-                robot_snapshot, images, entries, sides
+                robot_snapshot, images, entries, sides, depths=depths
             )
             if not features:
                 raise RuntimeError(
                     "No recording features resolved for the selected entries"
                 )
 
+            from lerobot.configs.video import DepthEncoderConfig, RGBEncoderConfig
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
             # Camera feeds are stored as MP4 (video dtype). Encode them in real
@@ -172,9 +182,12 @@ class RecordingService:
                 robot_type=self._settings.robot_type,
                 use_videos=True,
                 streaming_encoding=True,
-                # Resolve to a concrete, browser-playable H.264 encoder for this
-                # platform (see AppSettings.video_codec / resolve_recording_vcodec).
-                vcodec=resolve_recording_vcodec(self._settings.video_codec),
+                # RGB remains browser-playable H.264; depth uses LeRobot's native
+                # lossless 12-bit HEVC path with a tabletop-range depth ceiling.
+                rgb_encoder=RGBEncoderConfig(
+                    vcodec=resolve_recording_vcodec(self._settings.video_codec)
+                ),
+                depth_encoder=DepthEncoderConfig(depth_max=self._settings.depth_max_m),
             )
         except Exception as exc:
             shutil.rmtree(staging_path, ignore_errors=True)
@@ -373,7 +386,9 @@ class RecordingService:
 
         raise RuntimeError("Unable to allocate a unique staging directory")
 
-    def _ensure_camera_streams(self, camera_names: list[str]) -> None:
+    def _ensure_camera_streams(
+        self, camera_names: list[str], *, depth_names: list[str] | None = None
+    ) -> None:
         if not camera_names:
             return
 
@@ -388,6 +403,7 @@ class RecordingService:
         errors = status.get("errors") if isinstance(status, dict) else None
 
         unavailable: list[str] = []
+        required_depth = set(depth_names or [])
         for camera_name in camera_names:
             camera_status = (
                 cameras.get(camera_name) if isinstance(cameras, dict) else None
@@ -398,6 +414,12 @@ class RecordingService:
                 else False
             )
             if started:
+                if camera_name not in required_depth:
+                    continue
+                depth_status = camera_status.get("depth")
+                if isinstance(depth_status, dict) and depth_status.get("started"):
+                    continue
+                unavailable.append(f"{camera_name}: depth stream is not started")
                 continue
 
             detail = None
@@ -423,14 +445,37 @@ class RecordingService:
         timeout_ms: int = 1_200,
         block: bool = True,
     ) -> dict[str, np.ndarray]:
+        images, _ = self._grab_camera_data(
+            camera_names,
+            [],
+            require_all=require_all,
+            attempts=attempts,
+            timeout_ms=timeout_ms,
+            block=block,
+        )
+        return images
+
+    def _grab_camera_data(
+        self,
+        image_names: list[str],
+        depth_names: list[str],
+        *,
+        require_all: bool,
+        attempts: int,
+        timeout_ms: int = 1_200,
+        block: bool = True,
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        camera_names = list(dict.fromkeys([*image_names, *depth_names]))
         if not camera_names:
-            return {}
+            return {}, {}
 
         last_images: dict[str, np.ndarray] = {}
+        last_depths: dict[str, np.ndarray] = {}
         last_errors: list[str] = []
 
         for attempt in range(max(attempts, 1)):
             images: dict[str, np.ndarray] = {}
+            depths: dict[str, np.ndarray] = {}
             errors: list[str] = []
 
             for camera_name in camera_names:
@@ -445,40 +490,57 @@ class RecordingService:
                     errors.append(f"{camera_name}: {exc}")
                     continue
 
-                image = frame.get("image") if isinstance(frame, dict) else None
-                if image is None:
-                    errors.append(f"{camera_name}: missing image payload")
-                    continue
-                # Cameras capture BGR (rs.format.bgr8); LeRobot stores RGB, so
-                # reverse the channel order before writing frames. Materialize a
-                # contiguous array since the encoder assumes C-contiguous input.
-                images[camera_name] = np.ascontiguousarray(
-                    np.asarray(image)[:, :, ::-1]
-                )
+                if camera_name in image_names:
+                    image = frame.get("image") if isinstance(frame, dict) else None
+                    if image is None:
+                        errors.append(f"{camera_name}: missing image payload")
+                    else:
+                        # Cameras capture BGR; LeRobot stores RGB.
+                        images[camera_name] = np.ascontiguousarray(
+                            np.asarray(image)[:, :, ::-1]
+                        )
 
-            if not require_all or all(name in images for name in camera_names):
-                return images
+                if camera_name in depth_names:
+                    depth = frame.get("depth") if isinstance(frame, dict) else None
+                    if depth is None:
+                        errors.append(f"{camera_name}: missing depth payload")
+                    else:
+                        array = np.asarray(depth)
+                        if array.ndim == 2:
+                            array = array[:, :, None]
+                        depths[camera_name] = np.ascontiguousarray(array)
+
+            complete = all(name in images for name in image_names) and all(
+                name in depths for name in depth_names
+            )
+            if not require_all or complete:
+                return images, depths
 
             last_images = images
+            last_depths = depths
             last_errors = errors
             if attempt + 1 < attempts:
                 time.sleep(0.08)
 
         if require_all:
-            missing = [name for name in camera_names if name not in last_images]
+            missing = [
+                *[f"{name} RGB" for name in image_names if name not in last_images],
+                *[f"{name} depth" for name in depth_names if name not in last_depths],
+            ]
             detail = "; ".join(last_errors) if last_errors else "no frame returned"
             raise RuntimeError(
-                "No frame available for selected camera(s): "
+                "No frame available for selected camera stream(s): "
                 f"{', '.join(missing)}. {detail}"
             )
 
-        return last_images
+        return last_images, last_depths
 
     def _capture_loop(self) -> None:
         interval = 1.0 / (self._fps or 30)
         entries = list(self._recording_entries or [])
         sides = self._recording_sides
-        camera_names = resolve_recording_image_names(entries, sides)
+        image_names = resolve_recording_image_names(entries, sides)
+        depth_names = resolve_recording_depth_names(entries, sides)
         includes_observation_values = any(
             entry.startswith("observation.state.") for entry in entries
         )
@@ -489,8 +551,9 @@ class RecordingService:
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
             try:
-                images = self._grab_images(
-                    camera_names,
+                images, depths = self._grab_camera_data(
+                    image_names,
+                    depth_names,
                     require_all=False,
                     attempts=1,
                     timeout_ms=capture_timeout_ms,
@@ -506,9 +569,21 @@ class RecordingService:
                 )
 
                 selected_images = extract_recording_images(images, entries, sides)
-                if len(selected_images) != len(camera_names):
+                selected_depths = extract_recording_depths(depths, entries, sides)
+                if len(selected_images) != len(image_names) or len(
+                    selected_depths
+                ) != len(depth_names):
                     missing = [
-                        name for name in camera_names if name not in selected_images
+                        *[
+                            f"{name} RGB"
+                            for name in image_names
+                            if name not in selected_images
+                        ],
+                        *[
+                            f"{name} depth"
+                            for name in depth_names
+                            if name not in selected_depths
+                        ],
                     ]
                     with self._lock:
                         self._error = (
@@ -521,6 +596,8 @@ class RecordingService:
 
                 for camera_name, image in selected_images.items():
                     frame[f"observation.images.{camera_name}"] = image
+                for camera_name, depth in selected_depths.items():
+                    frame[f"observation.images.{camera_name}_depth"] = depth
 
                 if requires_robot_values:
                     arm_values = extract_recording_frame_values(

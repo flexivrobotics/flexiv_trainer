@@ -14,7 +14,9 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from flexivtrainer.config import AppSettings, RobotSerialConfig, StorageConfig
 from flexivtrainer.runtime.manager import RuntimeManager
@@ -219,3 +221,73 @@ def test_browse_path_annotates_created_time_for_sorting(tmp_path) -> None:
     assert result["items"], "expected at least one browsed entry"
     for item in result["items"]:
         assert isinstance(item["created"], float)
+
+
+class _PreviewDataset:
+    features = {
+        "observation.images.ego": {
+            "dtype": "video",
+            "shape": [2, 3, 3],
+            "names": ["height", "width", "channels"],
+        },
+        "observation.images.ego_depth": {
+            "dtype": "video",
+            "shape": [2, 3, 1],
+            "names": ["height", "width", "channels"],
+            "info": {"is_depth_map": True, "depth_unit": "mm"},
+        },
+    }
+    fps = 30
+    num_frames = 1
+    num_episodes = 1
+    meta = SimpleNamespace(episodes=None)
+
+    def get_raw_item(self, index):
+        return {"task": "depth test"}
+
+    def __getitem__(self, index):
+        return {
+            "observation.images.ego": np.zeros((3, 2, 3), dtype=np.float32),
+            "observation.images.ego_depth": np.array(
+                [[[0, 500, 1000], [1500, 2000, 2500]]], dtype=np.float32
+            ),
+        }
+
+
+def _preview_manager(tmp_path, monkeypatch) -> RuntimeManager:
+    manager = _bare_manager(tmp_path)
+    dataset_path = manager.settings.storage.merged_root / "rgbd"
+    dataset_path.mkdir()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_dataset_repo",
+        lambda path: (dataset_path, "local/rgbd"),
+    )
+    monkeypatch.setattr(manager, "_load_dataset", lambda path: _PreviewDataset())
+    return manager
+
+
+def test_preview_dataset_lists_depth_separately(tmp_path, monkeypatch) -> None:
+    manager = _preview_manager(tmp_path, monkeypatch)
+
+    preview = manager.preview_dataset(manager.settings.storage.merged_root / "rgbd")
+
+    assert preview["camera_keys"] == ["observation.images.ego"]
+    assert preview["depth_keys"] == ["observation.images.ego_depth"]
+
+
+def test_dataset_frame_image_colorizes_native_depth(tmp_path, monkeypatch) -> None:
+    import io
+
+    manager = _preview_manager(tmp_path, monkeypatch)
+
+    content = manager.dataset_frame_image(
+        manager.settings.storage.merged_root / "rgbd",
+        "observation.images.ego_depth",
+        0,
+    )
+
+    image = np.asarray(Image.open(io.BytesIO(content)))
+    assert image.shape == (2, 3, 3)
+    assert image[0, 0].max() < 40  # invalid zero depth is black (JPEG tolerance)
+    assert image[0, 2].max() > 20  # valid depth is colorized

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,41 @@ def _load_manifest(root: Path) -> Any:
     from flexivtrainer.data.lerobot_io import EpisodeManifest
 
     return EpisodeManifest.from_path(root)
+
+
+def _feature_keys(root: Path) -> set[str]:
+    info_path = root / "meta" / "info.json"
+    try:
+        payload = json.loads(info_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid dataset metadata: {info_path}") from exc
+    features = payload.get("features") if isinstance(payload, dict) else None
+    if not isinstance(features, dict):
+        raise ValueError(f"Dataset metadata has no features object: {info_path}")
+    return set(features)
+
+
+def _validate_matching_feature_keys(episode_roots: list[Path]) -> None:
+    expected = _feature_keys(episode_roots[0])
+    mismatches: list[str] = []
+    for root in episode_roots[1:]:
+        actual = _feature_keys(root)
+        if actual == expected:
+            continue
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append(f"missing={missing}")
+        if extra:
+            details.append(f"extra={extra}")
+        mismatches.append(f"{root.name} ({', '.join(details)})")
+    if mismatches:
+        raise ValueError(
+            "Datasets cannot be merged because their feature keys differ. "
+            "Depth-enabled and RGB-only recordings must be merged separately: "
+            + "; ".join(mismatches)
+        )
 
 
 def merge_episode_datasets(
@@ -44,6 +80,8 @@ def merge_episode_datasets(
 
     if not episode_roots:
         raise ValueError("At least one episode dataset is required")
+
+    _validate_matching_feature_keys(episode_roots)
 
     target_root = output_root / output_name
     if target_root.exists():

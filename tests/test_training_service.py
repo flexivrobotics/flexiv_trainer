@@ -438,3 +438,36 @@ def test_start_new_policy_keeps_existing_policy_arguments(
     assert command[command.index("--policy.type") + 1] == "act"
     assert command[command.index("--policy.device") + 1] == "cpu"
     assert "--policy.path" not in " ".join(command)
+
+
+def test_start_new_policy_explicitly_excludes_dataset_depth_inputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = make_service(tmp_path)
+    dataset = make_dataset(tmp_path)
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["features"]["observation.images.ego_depth"] = {
+        "dtype": "video",
+        "shape": [480, 640, 1],
+        "names": ["height", "width", "channels"],
+        "info": {"is_depth_map": True, "depth_unit": "mm"},
+    }
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    output = tmp_path / "training" / "rgb_only_run"
+    monkeypatch.setattr(train_policy.shutil, "which", lambda _: "/bin/lerobot-train")
+    monkeypatch.setattr(
+        train_policy.subprocess, "Popen", lambda *a, **kw: _FakeProcess()
+    )
+    monkeypatch.setattr(train_policy.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(train_policy, "Pulse", _FakePulse)
+    monkeypatch.setattr(train_policy, "resolve_training_device", lambda _: "cpu")
+
+    snapshot = service.start(dataset, output, "act")
+
+    input_arg = next(
+        arg for arg in snapshot["command"] if arg.startswith("--policy.input_features=")
+    )
+    inputs = json.loads(input_arg.split("=", 1)[1])
+    assert set(inputs) == {"observation.images.ego", "observation.state"}
+    assert "observation.images.ego_depth" not in inputs

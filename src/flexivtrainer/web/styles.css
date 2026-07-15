@@ -453,6 +453,35 @@ button:disabled {
     font-size: 0.85rem;
 }
 
+.camera-depth-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-top: 0.85rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(72, 103, 125, 0.2);
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.2;
+    cursor: pointer;
+    user-select: none;
+}
+
+.camera-depth-toggle input {
+    margin: 0;
+    accent-color: var(--accent-strong);
+    cursor: pointer;
+}
+
+.camera-depth-toggle:has(input:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.camera-depth-toggle input:disabled {
+    cursor: not-allowed;
+}
+
 .panel--wide {
     margin-top: 1rem;
 }
@@ -755,6 +784,19 @@ button:disabled {
 
 .feed-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.depth-feed-section {
+    display: grid;
+    gap: 0.45rem;
+}
+
+.depth-feed-section.hidden {
+    display: none;
+}
+
+.depth-feed-row {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 /* Single-arm mode: the lone wrist column fills the full width instead of

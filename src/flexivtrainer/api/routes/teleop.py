@@ -115,6 +115,28 @@ def _encode_png(image: np.ndarray) -> bytes:
     )
 
 
+def _colorize_depth(depth: np.ndarray, depth_max_m: float) -> np.ndarray:
+    import cv2
+
+    values = np.asarray(depth)
+    if values.ndim == 3 and values.shape[-1] == 1:
+        values = values[:, :, 0]
+    elif values.ndim == 3 and values.shape[0] == 1:
+        values = values[0]
+    values = values.astype(np.float32, copy=False)
+    if values.ndim != 2:
+        raise ValueError("Expected a depth image array with shape (H, W)")
+    max_depth_mm = max(float(depth_max_m) * 1000.0, 1.0)
+    valid = np.isfinite(values) & (values > 0)
+    normalized = np.zeros(values.shape, dtype=np.uint8)
+    normalized[valid] = (
+        np.clip(values[valid], 0, max_depth_mm) * (255.0 / max_depth_mm)
+    ).astype(np.uint8)
+    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
+    colored[~valid] = 0
+    return colored
+
+
 @router.post("/bootstrap")
 def bootstrap(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     result = runtime.bootstrap_teleop_module()
@@ -166,8 +188,12 @@ def update_camera_config(
 
 @router.get("/cameras/{camera_name}/frame")
 def camera_frame(
-    camera_name: str, runtime: RuntimeManager = Depends(get_runtime_manager)
+    camera_name: str,
+    view: str = "rgb",
+    runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> Response:
+    if view not in {"rgb", "depth"}:
+        raise HTTPException(status_code=400, detail="view must be 'rgb' or 'depth'")
     try:
         frame_payload = runtime.cameras.capture_frame(camera_name)
     except ValueError as exc:
@@ -176,7 +202,19 @@ def camera_frame(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     try:
-        content = _encode_png(frame_payload["image"])
+        if view == "depth":
+            depth = frame_payload.get("depth")
+            if depth is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Depth stream is unavailable for camera: {camera_name}",
+                )
+            frame = _colorize_depth(depth, runtime.settings.depth_max_m)
+        else:
+            frame = frame_payload["image"]
+        content = _encode_png(frame)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

@@ -44,6 +44,13 @@ class CameraRuntime:
     fps: float = 0.0
     capture_thread: Any | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
+    # Depth is requested per config.use_depth; depth_started reflects whether the
+    # pipeline actually came up with a depth stream (it can fall back to color).
+    depth_started: bool = False
+    align: Any | None = None
+    # RealSense Z16 values are device units. Recording stores uint16
+    # millimeters so LeRobot can infer and preserve the depth unit.
+    depth_scale_m: float = 0.001
 
 
 class RealSenseService:
@@ -213,6 +220,9 @@ class RealSenseService:
                 self._errors[runtime.config.name] = describe_exception(exc)
         runtime.pipeline = None
         runtime.started = False
+        runtime.depth_started = False
+        runtime.align = None
+        runtime.depth_scale_m = 0.001
         runtime.last_frame_time = None
         runtime.fps = 0.0
 
@@ -243,21 +253,60 @@ class RealSenseService:
             runtime.started = False
             return
 
+        def _build_config(with_depth: bool) -> Any:
+            config = rs.config()
+            if serial:
+                config.enable_device(serial)
+            config.enable_stream(
+                rs.stream.color,
+                runtime.config.width,
+                runtime.config.height,
+                rs.format.bgr8,
+                runtime.config.fps,
+            )
+            if with_depth:
+                config.enable_stream(
+                    rs.stream.depth,
+                    runtime.config.width,
+                    runtime.config.height,
+                    rs.format.z16,
+                    runtime.config.fps,
+                )
+            return config
+
+        want_depth = bool(runtime.config.use_depth)
         pipeline = rs.pipeline()
-        config = rs.config()
-        if serial:
-            config.enable_device(serial)
-        config.enable_stream(
-            rs.stream.color,
-            runtime.config.width,
-            runtime.config.height,
-            rs.format.bgr8,
-            runtime.config.fps,
-        )
         try:
-            profile = pipeline.start(config)
+            depth_started = want_depth
+            if want_depth:
+                try:
+                    profile = pipeline.start(_build_config(True))
+                except Exception as exc:  # pragma: no cover - hardware specific
+                    # Depth may be unsupported on this device; retry color-only so
+                    # recording still comes up (surfaced via the status warning).
+                    self._errors[runtime.config.name] = (
+                        f"Depth stream unavailable, using color only: "
+                        f"{describe_exception(exc)}"
+                    )
+                    # A failed start can leave an SDK pipeline unusable; retry
+                    # with a fresh instance for the color-only fallback.
+                    pipeline = rs.pipeline()
+                    profile = pipeline.start(_build_config(False))
+                    depth_started = False
+            else:
+                profile = pipeline.start(_build_config(False))
             runtime.pipeline = pipeline
             runtime.started = True
+            runtime.depth_started = depth_started
+            runtime.align = rs.align(rs.stream.color) if depth_started else None
+            runtime.depth_scale_m = 0.001
+            if depth_started:
+                try:
+                    runtime.depth_scale_m = float(
+                        profile.get_device().first_depth_sensor().get_depth_scale()
+                    )
+                except Exception:  # pragma: no cover - device/API specific
+                    pass
             runtime.last_frame_time = None
             runtime.fps = 0.0
             try:
@@ -266,7 +315,9 @@ class RealSenseService:
                 )
             except Exception:  # pragma: no cover - hardware specific
                 runtime.actual_serial = serial
-            self._errors.pop(runtime.config.name, None)
+            # Keep the depth-fallback warning; clear only genuine prior errors.
+            if depth_started or not want_depth:
+                self._errors.pop(runtime.config.name, None)
             # A single background thread owns the pipeline and continuously
             # pulls frames into the cache. Consumers (live preview + recording)
             # read the cached frame instead of polling the pipeline themselves,
@@ -380,6 +431,10 @@ class RealSenseService:
                         self._runtimes[name].config.width,
                         self._runtimes[name].config.height,
                     ],
+                    "depth": {
+                        "enabled": bool(self._runtimes[name].config.use_depth),
+                        "started": self._runtimes[name].depth_started,
+                    },
                     "error": self._errors.get(name),
                 }
                 for name in self._active_locations
@@ -399,17 +454,35 @@ class RealSenseService:
         how many consumers (live preview, recording) are reading concurrently.
         """
         pipeline = runtime.pipeline
+        align = runtime.align
         name = runtime.config.name
         while not runtime.stop_event.is_set():
             try:
                 raw_frames = pipeline.wait_for_frames(1_000)
                 if not raw_frames:
                     continue
-                color_frame = raw_frames.get_color_frame()
+                # Align depth to color so the cached depth map shares the color
+                # frame's pixel grid; align.process replaces the frame set.
+                frames = align.process(raw_frames) if align is not None else raw_frames
+                color_frame = frames.get_color_frame()
                 if color_frame is None:
                     continue
 
                 image = np.asanyarray(color_frame.get_data())
+                depth = None
+                if runtime.depth_started:
+                    depth_frame = frames.get_depth_frame()
+                    if depth_frame is not None:
+                        raw_depth = np.asanyarray(depth_frame.get_data())
+                        # Convert RealSense device units to the uint16-mm unit
+                        # LeRobot 0.6 recognizes natively.
+                        scale_to_mm = runtime.depth_scale_m * 1000.0
+                        if abs(scale_to_mm - 1.0) < 1e-6:
+                            depth = raw_depth.astype(np.uint16, copy=False)
+                        else:
+                            depth = np.rint(
+                                raw_depth.astype(np.float32) * scale_to_mm
+                            ).clip(0, np.iinfo(np.uint16).max).astype(np.uint16)
                 timestamp_ms = color_frame.get_timestamp()
                 now = time.monotonic()
                 with self._lock:
@@ -440,13 +513,23 @@ class RealSenseService:
                     else:
                         runtime.last_frame_time = now
                     runtime.frame_count += 1
-                    self._last_frames[name] = {
+                    payload: dict[str, Any] = {
                         "image": image,
                         "timestamp_ms": timestamp_ms,
                         "fps": runtime.fps,
                         "width": image.shape[1],
                         "height": image.shape[0],
                     }
+                    if runtime.depth_started:
+                        # Keep the previous depth map on a missing depth frame so
+                        # a momentary drop never loses the tick's color frame.
+                        if depth is None:
+                            previous = self._last_frames.get(name)
+                            if previous is not None and "depth" in previous:
+                                depth = previous["depth"]
+                        if depth is not None:
+                            payload["depth"] = depth
+                    self._last_frames[name] = payload
             except Exception as exc:  # pragma: no cover - hardware specific
                 self._errors[name] = describe_exception(exc)
                 runtime.stop_event.wait(timeout=0.05)
