@@ -54,7 +54,7 @@ jobs:
             "scipy>=1.11" \
             "pytest>=8.4,<9.0" \
             "httpx>=0.28,<1.0" \
-            "lerobot==0.5.1"
+            "lerobot==0.6.0"
 
       - name: Run test suite
         run: pytest
