@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
+from collections import OrderedDict
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -40,7 +43,10 @@ def make_manager(tmp_path, started_camera_count: int) -> RuntimeManager:
     )
     camera_names = ["ego", "left_wrist", "right_wrist"]
     camera_status = {
-        name: {"started": index < started_camera_count}
+        name: {
+            "started": index < started_camera_count,
+            "streaming": index < started_camera_count,
+        }
         for index, name in enumerate(camera_names)
     }
     manager.cameras = SimpleNamespace(
@@ -70,6 +76,28 @@ def test_service_summary_reports_camera_count_and_tone(
 
     assert summary["cameras"]["state"] == expected_state
     assert summary["cameras"]["tone"] == expected_tone
+
+
+def test_service_summary_reports_starting_cameras_as_working(tmp_path) -> None:
+    # Started but not yet streaming (warming up / watchdog recovering) must show
+    # as connecting, not a 0/N failure, so the UI keeps its spinner.
+    manager = make_manager(tmp_path, 0)
+    manager.cameras = SimpleNamespace(
+        status=lambda: {
+            "available": True,
+            "cameras": {
+                "ego": {"started": True, "streaming": False},
+                "left_wrist": {"started": True, "streaming": False},
+                "right_wrist": {"started": True, "streaming": False},
+            },
+            "errors": {},
+        }
+    )
+
+    summary = manager.service_summary()
+
+    assert summary["cameras"]["state"] == "0/3 connected"
+    assert summary["cameras"]["tone"] == "working"
 
 
 def test_bootstrap_teleop_module_is_not_ready_when_camera_start_fails(tmp_path) -> None:
@@ -120,6 +148,11 @@ def _bare_manager(tmp_path) -> RuntimeManager:
     manager = RuntimeManager.__new__(RuntimeManager)
     manager.settings = AppSettings(storage=StorageConfig(root=tmp_path))
     manager.settings.ensure_storage()
+    manager._dataset_cache = {}
+    manager._depth_jpeg_cache = OrderedDict()
+    manager._depth_frame_lru = OrderedDict()
+    manager._depth_prewarming = set()
+    manager._depth_lock = threading.Lock()
     return manager
 
 
@@ -241,6 +274,7 @@ class _PreviewDataset:
     num_frames = 1
     num_episodes = 1
     meta = SimpleNamespace(episodes=None)
+    root = "/tmp/_preview_rgbd"
 
     def get_raw_item(self, index):
         return {"task": "depth test"}
@@ -280,6 +314,22 @@ def test_dataset_frame_image_colorizes_native_depth(tmp_path, monkeypatch) -> No
     import io
 
     manager = _preview_manager(tmp_path, monkeypatch)
+    # The first depth request serves an on-demand single-frame decode; feed it a
+    # known mm-depth frame so the colorize path (black for invalid, color for
+    # valid) is exercised without a real HEVC file. Prewarm is disabled so the
+    # background thread never touches a nonexistent file.
+    depth_mm = np.array([[0, 500, 1000], [1500, 2000, 2500]], dtype=np.float32)
+    monkeypatch.setattr(
+        manager,
+        "dataset_video_path",
+        lambda *a, **k: Path("/tmp/_preview_depth.mp4"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_decode_one_depth_frame",
+        lambda video_path, info, file_index: manager._colorize_depth_mm(depth_mm),
+    )
+    monkeypatch.setattr(manager, "_prewarm_depth_clip", lambda *a, **k: None)
 
     content = manager.dataset_frame_image(
         manager.settings.storage.merged_root / "rgbd",

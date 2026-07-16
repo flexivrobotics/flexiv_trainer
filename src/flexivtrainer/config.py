@@ -23,6 +23,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from flexivtrainer.policies import PolicyConfig
 
+# Flexiv "Home" primitive default for the Rizon 4 (degrees, joints A1..A7).
+DEFAULT_HOME_POSTURE_DEG: list[float] = [0.0, -40.0, 0.0, 90.0, 0.0, 40.0, 0.0]
+
 
 class TeleopRobotPair(BaseModel):
     leader_serial: str = ""
@@ -142,6 +145,10 @@ class RobotSerialConfig(BaseModel):
     # "right_arm", "single_arm"). Cached alongside the serials so selections
     # survive reloads.
     end_effector_config: dict[str, EndEffectorSideConfig] = Field(default_factory=dict)
+    # Shared 7-DOF home posture (degrees) for the "Home All Robots" action.
+    home_posture_deg: list[float] = Field(
+        default_factory=lambda: list(DEFAULT_HOME_POSTURE_DEG)
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -176,6 +183,16 @@ class RobotSerialConfig(BaseModel):
         serials.extend([""] * (count - len(serials)))
         return serials
 
+    def _normalize_home_posture(self) -> list[float]:
+        # Coerce to exactly 7 floats; missing/bad joints fall back to defaults.
+        posture: list[float] = []
+        for index in range(7):
+            try:
+                posture.append(float(self.home_posture_deg[index]))
+            except (IndexError, TypeError, ValueError):
+                posture.append(DEFAULT_HOME_POSTURE_DEG[index])
+        return posture
+
     def normalized(self) -> RobotSerialConfig:
         return RobotSerialConfig(
             arm_mode=self.arm_mode,
@@ -184,6 +201,7 @@ class RobotSerialConfig(BaseModel):
             # Preserve selections for every side (even ones not currently active),
             # so toggling between single/dual keeps cached choices.
             end_effector_config=dict(self.end_effector_config),
+            home_posture_deg=self._normalize_home_posture(),
         )
 
     @classmethod

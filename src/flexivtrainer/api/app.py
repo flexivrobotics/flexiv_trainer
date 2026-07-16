@@ -54,6 +54,13 @@ def create_app() -> FastAPI:
             name="device-warmup",
             daemon=True,
         ).start()
+        # Warm the depth-decode imports (lerobot.datasets.depth_utils pulls in
+        # torch, ~2.7s cold) so the first depth preview frame isn't stalled.
+        threading.Thread(
+            target=runtime.warm_up_depth_decode,
+            name="depth-decode-warmup",
+            daemon=True,
+        ).start()
         yield
         if get_runtime_manager.cache_info().currsize:
             get_runtime_manager().shutdown()

@@ -151,6 +151,12 @@ const state = {
             teleop: false,
             cameras: false,
         },
+        // Which action ("connect"/"disconnect") is currently in flight per
+        // service, so the matching button shows the right spinner label.
+        serviceBusyAction: {
+            teleop: null,
+            cameras: null,
+        },
         rolloutServiceBusy: {
             teleop: null,
             cameras: null,
@@ -1270,18 +1276,50 @@ function _seekDatasetVideos(container, preview, frameIndex) {
     });
 }
 
+function _depthFrameUrl(preview, cameraKey, frameIndex) {
+    const params = new URLSearchParams({
+        path: preview.path,
+        key: cameraKey,
+        index: String(frameIndex),
+    });
+    if (preview.episode_index !== null && preview.episode_index !== undefined) {
+        params.set("episode_index", String(preview.episode_index));
+    }
+    return `/datasets/frame-image?${params.toString()}`;
+}
+
+// Each depth frame is a server-side HEVC decode+colorize (~0.3s), far slower
+// than the ~10fps playback tick. Assigning img.src every tick cancels the
+// still-loading previous request, freezing the tile on frame 0. Instead gate on
+// load: hold only the latest requested frame, and fetch it once the current
+// request settles -- the tile keeps up by skipping intermediate frames.
 function _updateDatasetDepthImages(container, preview, frameIndex) {
     container.querySelectorAll(".dataset-depth-frame").forEach((image) => {
-        const params = new URLSearchParams({
-            path: preview.path,
-            key: image.dataset.cameraKey,
-            index: String(frameIndex),
-        });
-        if (preview.episode_index !== null && preview.episode_index !== undefined) {
-            params.set("episode_index", String(preview.episode_index));
+        image._pendingFrame = frameIndex;
+        if (image._loading) {
+            return;
         }
-        image.src = `/datasets/frame-image?${params.toString()}`;
+        _pumpDepthImage(image, preview);
     });
+}
+
+function _pumpDepthImage(image, preview) {
+    const frame = image._pendingFrame;
+    if (frame === undefined || frame === image._shownFrame) {
+        return;
+    }
+    image._loading = true;
+    const settle = () => {
+        image._loading = false;
+        image._shownFrame = frame;
+        // A newer frame was requested while this one loaded -- chase it.
+        if (image._pendingFrame !== frame) {
+            _pumpDepthImage(image, preview);
+        }
+    };
+    image.onload = settle;
+    image.onerror = settle;
+    image.src = _depthFrameUrl(preview, image.dataset.cameraKey, frame);
 }
 
 function _formatPlaybackTime(seconds) {
@@ -2025,6 +2063,7 @@ function updateTeleopSystemCard(card, serviceKey, service = {}) {
 
 function createServiceStatusCard(serviceKey, service) {
     const card = document.createElement("div");
+    card.dataset.serviceKey = serviceKey;
     card.className = `status-card status-card--${service.tone || "neutral"} status-card--service`;
     card.innerHTML = `
         <span class="eyebrow">${service.label}</span>
@@ -2049,15 +2088,17 @@ function createServiceStatusCard(serviceKey, service) {
         if (definition.className) {
             button.classList.add(definition.className);
         }
-        const connecting = !!state.ui.serviceConnectBusy?.[definition.serviceName];
-        if (definition.control === "connect" && connecting) {
+        const busy = !!state.ui.serviceConnectBusy?.[definition.serviceName];
+        const busyAction = state.ui.serviceBusyAction?.[definition.serviceName];
+        if (busy && definition.control === busyAction) {
             button.classList.add("button--busy");
             button.disabled = true;
-            button.innerHTML = `<span class="button-spinner" aria-hidden="true"></span><span>Connecting…</span>`;
+            const label = busyAction === "connect" ? "Connecting…" : "Disconnecting…";
+            button.innerHTML = `<span class="button-spinner" aria-hidden="true"></span><span>${label}</span>`;
         } else {
             button.textContent = definition.label;
-            // While a connect is in progress, keep the sibling actions inert too.
-            button.disabled = connecting;
+            // While an action is in progress, keep the sibling button inert too.
+            button.disabled = busy;
         }
         // The teleop service can only connect once all four robot serials are set.
         if (
@@ -2274,6 +2315,44 @@ function renderHomeRobotConfigInputs() {
     });
 }
 
+const DEFAULT_HOME_POSTURE_DEG = [0.0, -40.0, 0.0, 90.0, 0.0, 40.0, 0.0];
+
+// Shared 7-DOF home posture, persisted via the same PUT /system/robot-config
+// path as the serials. Lazily seed defaults if absent.
+function getHomePosture() {
+    const robotConfig = state.summary.robot_config || (state.summary.robot_config = {});
+    if (!Array.isArray(robotConfig.home_posture_deg) || robotConfig.home_posture_deg.length !== 7) {
+        robotConfig.home_posture_deg = [...DEFAULT_HOME_POSTURE_DEG];
+    }
+    return robotConfig.home_posture_deg;
+}
+
+function renderHomePosture() {
+    if (!state.summary) {
+        return;
+    }
+    const container = byId("home-posture");
+    if (!container) {
+        return;
+    }
+    const posture = getHomePosture();
+    container.innerHTML = "";
+    for (let index = 0; index < 7; index += 1) {
+        const field = document.createElement("label");
+        field.className = "robot-input-group";
+        field.innerHTML = `
+            <span>A${index + 1}</span>
+            <input type="number" step="1" value="${posture[index]}" />
+        `;
+        const input = field.querySelector("input");
+        input.oninput = () => {
+            getHomePosture()[index] = Number(input.value);
+            queueRobotConfigSave();
+        };
+        container.appendChild(field);
+    }
+}
+
 function renderHomeStorage() {
     if (!state.summary) {
         return;
@@ -2480,6 +2559,7 @@ function renderHome() {
     }
     renderArmConfig();
     renderHomeRobotConfigInputs();
+    renderHomePosture();
     renderHomeStatus();
     renderHomeEndEffectors();
     renderHomeStorage();
@@ -2994,6 +3074,7 @@ function startCameraFeedPump(cameraName, view, image) {
             return;
         }
         feed.failed = false;
+        feed.attempts = 0;
         // Pump: request next frame immediately; actual FPS is limited by server response time
         window.setTimeout(() => startCameraFeedPump(cameraName, view, image), 0);
     };
@@ -3003,8 +3084,11 @@ function startCameraFeedPump(cameraName, view, image) {
             return;
         }
         feed.failed = true;
-        // Retry after a short delay — do NOT destroy the img element
-        feed.retryTimer = window.setTimeout(() => startCameraFeedPump(cameraName, view, image), 1000);
+        feed.attempts = (feed.attempts || 0) + 1;
+        // Retry fast at first (heals the startup first-frame race without a
+        // manual refresh), backing off for a persistently dead stream.
+        const delay = feed.attempts <= 5 ? 200 : 1000;
+        feed.retryTimer = window.setTimeout(() => startCameraFeedPump(cameraName, view, image), delay);
     };
 
     image.src = nextUrl;
@@ -3039,7 +3123,9 @@ function renderCameraFps(elementId, cameraName, camera) {
         return;
     }
 
-    if (!camera?.started) {
+    // Require frames to actually flow (streaming), not just an opened pipeline.
+    const live = camera?.streaming ?? camera?.started;
+    if (!live) {
         stopCameraFeed(cameraName);
         if (placeholder.dataset.renderMode !== "awaiting") {
             restoreAwaitingCameraPlaceholder(placeholder);
@@ -4126,6 +4212,43 @@ async function fetchAndRenderTeleopStatus() {
     renderTeleop();
 }
 
+async function pollUntilServiceReady(serviceName, timeoutMs = 30000, intervalMs = 500) {
+    const serviceKey = SERVICE_NAME_TO_KEY[serviceName];
+    const deadline = Date.now() + timeoutMs;
+    let services = state.summary.services;
+    while (Date.now() < deadline) {
+        const status = serviceKey ? services?.[serviceKey] : null;
+        // "ok" tone means every configured camera is streaming, not just started.
+        if (!status || status.tone === "ok" || status.tone === "error") {
+            break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+        const summary = await api("/system/summary");
+        services = summary.services;
+        state.summary.services = services;
+        // Update the card text in place; a full renderHomeStatus() would rebuild
+        // the button and restart its spinner animation mid-spin.
+        updateServiceCardText(serviceKey, services?.[serviceKey]);
+    }
+    return services;
+}
+
+function updateServiceCardText(serviceKey, service) {
+    if (!service) {
+        return;
+    }
+    const card = byId("home-status")?.querySelector(
+        `.status-card--service[data-service-key="${serviceKey}"]`,
+    );
+    if (!card) {
+        return;
+    }
+    const stateEl = card.querySelector("h3");
+    const detailEl = card.querySelector(".status-card__detail");
+    if (stateEl) stateEl.textContent = formatValue(service.state);
+    if (detailEl) detailEl.textContent = service.detail || "";
+}
+
 async function controlHomeService(serviceName, action, options = {}) {
     if (serviceName === "teleop" && action === "connect" && !allRobotSerialsConfigured()) {
         if (!options.silentToast) {
@@ -4133,21 +4256,37 @@ async function controlHomeService(serviceName, action, options = {}) {
         }
         return;
     }
-    const tracksBusy = action === "connect" && serviceName in state.ui.serviceConnectBusy;
+    const tracksBusy = serviceName in state.ui.serviceConnectBusy;
     if (tracksBusy) {
         state.ui.serviceConnectBusy[serviceName] = true;
+        state.ui.serviceBusyAction[serviceName] = action;
         renderHomeStatus();
     }
     let result;
     try {
         result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
+        state.summary.services = result.services;
+        // Connecting cameras returns before every stream delivers its first
+        // frame (a wedged camera is recovered in the background), so keep the
+        // spinner up and poll until the service reports fully connected.
+        if (serviceName === "cameras" && action === "connect") {
+            result.services = await pollUntilServiceReady(serviceName);
+            state.summary.services = result.services;
+        }
+        // Teleop connect blocks the backend while it builds the TDK controller,
+        // which can briefly starve the camera acquire threads -- the returned
+        // snapshot may show cameras mid-transient. Re-settle so the home panel
+        // reflects their true steady state instead of a frozen "connecting".
+        if (serviceName === "teleop" && action === "connect" && state.summary.services?.cameras?.tone === "working") {
+            state.summary.services = await pollUntilServiceReady("cameras", 5000);
+        }
     } finally {
         if (tracksBusy) {
             state.ui.serviceConnectBusy[serviceName] = false;
+            state.ui.serviceBusyAction[serviceName] = null;
             renderHomeStatus();
         }
     }
-    state.summary.services = result.services;
     renderHomeStatus();
     const serviceKey = SERVICE_NAME_TO_KEY[serviceName];
     const serviceStatus = serviceKey ? result.services?.[serviceKey] : null;

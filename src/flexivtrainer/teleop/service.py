@@ -14,11 +14,17 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 from typing import Callable
 
-from flexivtrainer.config import AppSettings, EndEffectorSideConfig, TeleopRobotPair
+from flexivtrainer.config import (
+    DEFAULT_HOME_POSTURE_DEG,
+    AppSettings,
+    EndEffectorSideConfig,
+    TeleopRobotPair,
+)
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.teleop.end_effector import EndEffectorController
 
@@ -28,6 +34,11 @@ except (
     ImportError
 ):  # pragma: no cover - dependency availability is environment-specific
     flexivtdk = None
+
+try:
+    import flexivrdk
+except ImportError:  # pragma: no cover - environment-specific
+    flexivrdk = None
 
 TransparentCartesianTeleopLAN = (
     getattr(flexivtdk, "TransparentCartesianTeleopLAN", None)
@@ -571,28 +582,73 @@ class TeleopService:
         if self._controller is None:
             return {"ok": False, "error": "Teleoperation controller is not initialized"}
         if self._started:
-            # HomeAll() throws if the teleop control loop is running. The UI
-            # gates the Home button behind Stop, but guard here as well.
+            # Homing requires the teleop control loop to be stopped. The UI gates
+            # the Home button behind Stop, but guard here as well.
             return {
                 "ok": False,
                 "error": "Stop teleoperation before homing the robots",
             }
+        if flexivrdk is None:
+            return {"ok": False, "error": "flexivrdk is not importable"}
 
-        home_all = getattr(self._controller, "HomeAll", None)
-        if not callable(home_all):
+        instances_reader = getattr(self._controller, "instances", None)
+        if not callable(instances_reader):
             return {
                 "ok": False,
-                "error": "Connected controller does not support HomeAll()",
+                "error": "Connected controller does not expose robot instances",
             }
 
-        try:
-            # HomeAll() is blocking and moves every connected robot to its home
-            # posture simultaneously, so no per-robot wait is needed.
-            home_all()
-        except Exception as exc:  # pragma: no cover - hardware specific
-            return {"ok": False, "error": describe_exception(exc)}
+        posture = self._home_posture()
 
-        return {"ok": True, "warnings": []}
+        warnings: list[str] = []
+        homed_any = False
+        for idx in range(self._engageable_pair_count()):
+            try:
+                robots = instances_reader(idx)
+            except Exception as exc:  # pragma: no cover - hardware specific
+                warnings.append(f"Pair {idx}: {describe_exception(exc)}")
+                continue
+            for robot in robots if isinstance(robots, (tuple, list)) else (robots,):
+                error = self._move_to_home(robot, posture)
+                if error is None:
+                    homed_any = True
+                else:
+                    warnings.append(error)
+
+        if not homed_any:
+            return {
+                "ok": False,
+                "error": warnings[0] if warnings else "No robots were homed",
+            }
+        return {"ok": True, "warnings": warnings}
+
+    def _home_posture(self) -> list[float]:
+        for pair in self._get_robot_pairs():
+            if pair.leader_home_posture:
+                return [float(value) for value in pair.leader_home_posture]
+        return list(DEFAULT_HOME_POSTURE_DEG)
+
+    def _move_to_home(
+        self, robot: Any, posture: list[float], timeout_sec: float = 30.0
+    ) -> str | None:
+        # Drive one robot to `posture` (degrees) via the MoveJ primitive, then
+        # block on reachedTarget. Returns None on success or an error string.
+        switch_mode = getattr(robot, "SwitchMode", None)
+        execute = getattr(robot, "ExecutePrimitive", None)
+        states = getattr(robot, "primitive_states", None)
+        if not (callable(switch_mode) and callable(execute) and callable(states)):
+            return "Connected robot does not support primitive execution"
+        try:
+            switch_mode(flexivrdk.Mode.NRT_PRIMITIVE_EXECUTION)
+            execute("MoveJ", {"target": flexivrdk.JPos(posture)})
+            deadline = time.monotonic() + timeout_sec
+            while not states().get("reachedTarget"):
+                if time.monotonic() >= deadline:
+                    return "Timed out waiting for a robot to reach home"
+                time.sleep(0.5)
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return describe_exception(exc)
+        return None
 
     def _read_fault(self) -> str | None:
         """Return a fault message if the controller reports a fault.

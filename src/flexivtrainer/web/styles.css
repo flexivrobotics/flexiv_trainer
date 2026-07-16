@@ -297,6 +297,22 @@ button:disabled {
     margin-top: 1rem;
 }
 
+#home-posture-panel {
+    margin-top: 1rem;
+}
+
+/* Flat row of the seven joint fields; wraps on narrow viewports. */
+.home-posture-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+}
+
+.home-posture-row .robot-input-group {
+    flex: 1 1 0;
+    min-width: 5.5rem;
+}
+
 .end-effector-row {
     display: flex;
     flex-wrap: wrap;

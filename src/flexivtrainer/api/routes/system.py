@@ -30,6 +30,7 @@ class RobotConfigRequest(BaseModel):
     leader_robot_serials: list[str] = Field(default_factory=list)
     follower_robot_serials: list[str] = Field(default_factory=list)
     end_effector_config: dict[str, EndEffectorSideConfig] = Field(default_factory=dict)
+    home_posture_deg: list[float] = Field(default_factory=list)
 
 
 @router.get("/summary")
