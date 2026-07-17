@@ -2043,6 +2043,15 @@ function createServiceStatusCard(serviceKey, service) {
             { label: "Disconnect", serviceName: "cameras", control: "disconnect", className: "stop-button" },
         ],
     };
+    // Status tone drives the button gating. "ok" means fully connected;
+    // "working" means partially connected (e.g. only some camera feeds are up).
+    // Connect is only disabled once fully connected: start_streams() is
+    // idempotent (already-started cameras are skipped), so leaving Connect
+    // enabled while partial lets the user retry the missing feeds without
+    // tearing down the running ones. Disconnect is enabled whenever anything is
+    // connected ("ok" or "working").
+    const fullyConnected = service.tone === "ok";
+    const anyConnected = fullyConnected || service.tone === "working";
     (definitions[serviceKey] || []).forEach((definition) => {
         const button = document.createElement("button");
         button.type = "button";
@@ -2057,7 +2066,11 @@ function createServiceStatusCard(serviceKey, service) {
         } else {
             button.textContent = definition.label;
             // While a connect is in progress, keep the sibling actions inert too.
-            button.disabled = connecting;
+            // Otherwise gate on connection state: Connect is disabled once fully
+            // connected, Disconnect is disabled while nothing is connected.
+            const gatedByState =
+                definition.control === "connect" ? fullyConnected : !anyConnected;
+            button.disabled = connecting || gatedByState;
         }
         // The teleop service can only connect once all four robot serials are set.
         if (
