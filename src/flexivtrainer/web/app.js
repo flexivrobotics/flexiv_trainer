@@ -151,8 +151,7 @@ const state = {
             teleop: false,
             cameras: false,
         },
-        // Which action ("connect"/"disconnect") is currently in flight per
-        // service, so the matching button shows the right spinner label.
+        // In-flight action per service, so the right button shows its spinner.
         serviceBusyAction: {
             teleop: null,
             cameras: null,
@@ -1288,11 +1287,9 @@ function _depthFrameUrl(preview, cameraKey, frameIndex) {
     return `/datasets/frame-image?${params.toString()}`;
 }
 
-// Each depth frame is a server-side HEVC decode+colorize (~0.3s), far slower
-// than the ~10fps playback tick. Assigning img.src every tick cancels the
-// still-loading previous request, freezing the tile on frame 0. Instead gate on
-// load: hold only the latest requested frame, and fetch it once the current
-// request settles -- the tile keeps up by skipping intermediate frames.
+// Depth frames decode slower than playback ticks, so gate on load: hold only
+// the latest requested frame and fetch it once the current request settles.
+// Assigning img.src every tick would cancel the in-flight load and freeze.
 function _updateDatasetDepthImages(container, preview, frameIndex) {
     container.querySelectorAll(".dataset-depth-frame").forEach((image) => {
         image._pendingFrame = frameIndex;
@@ -3085,8 +3082,7 @@ function startCameraFeedPump(cameraName, view, image) {
         }
         feed.failed = true;
         feed.attempts = (feed.attempts || 0) + 1;
-        // Retry fast at first (heals the startup first-frame race without a
-        // manual refresh), backing off for a persistently dead stream.
+        // Retry fast at first (heals the startup race), then back off.
         const delay = feed.attempts <= 5 ? 200 : 1000;
         feed.retryTimer = window.setTimeout(() => startCameraFeedPump(cameraName, view, image), delay);
     };
@@ -4226,8 +4222,7 @@ async function pollUntilServiceReady(serviceName, timeoutMs = 30000, intervalMs 
         const summary = await api("/system/summary");
         services = summary.services;
         state.summary.services = services;
-        // Update the card text in place; a full renderHomeStatus() would rebuild
-        // the button and restart its spinner animation mid-spin.
+        // Update text in place; renderHomeStatus() would restart the spinner.
         updateServiceCardText(serviceKey, services?.[serviceKey]);
     }
     return services;
@@ -4266,17 +4261,13 @@ async function controlHomeService(serviceName, action, options = {}) {
     try {
         result = await api(`/system/services/${serviceName}/${action}`, { method: "POST" });
         state.summary.services = result.services;
-        // Connecting cameras returns before every stream delivers its first
-        // frame (a wedged camera is recovered in the background), so keep the
-        // spinner up and poll until the service reports fully connected.
+        // Connect returns before frames flow; keep the spinner up until ready.
         if (serviceName === "cameras" && action === "connect") {
             result.services = await pollUntilServiceReady(serviceName);
             state.summary.services = result.services;
         }
-        // Teleop connect blocks the backend while it builds the TDK controller,
-        // which can briefly starve the camera acquire threads -- the returned
-        // snapshot may show cameras mid-transient. Re-settle so the home panel
-        // reflects their true steady state instead of a frozen "connecting".
+        // Teleop connect briefly starves the camera threads; re-settle so the
+        // panel doesn't stay stuck on a transient "connecting".
         if (serviceName === "teleop" && action === "connect" && state.summary.services?.cameras?.tone === "working") {
             state.summary.services = await pollUntilServiceReady("cameras", 5000);
         }

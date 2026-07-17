@@ -146,12 +146,8 @@ class RuntimeManager:
         # Building one parses metadata and the parquet index, which is far too
         # costly to repeat for every frame request during preview playback.
         self._dataset_cache: dict[str, tuple[int, Any]] = {}
-        # Colorized depth frames (JPEG bytes) per video file, filled by a
-        # background prewarm so scrubbing/playback is memory-speed. Until a
-        # file's prewarm finishes, single frames are decoded on demand (~15ms)
-        # and held in _depth_frame_lru so the first paint is instant. All three
-        # structures are shared with the prewarm thread, so _depth_lock guards
-        # every access; the decode itself runs outside the lock.
+        # Depth frames served on demand (single-frame LRU) until a background
+        # prewarm fills the whole-clip cache. _depth_lock guards all three.
         self._depth_jpeg_cache: OrderedDict[str, tuple[int, list[bytes]]] = (
             OrderedDict()
         )
@@ -326,16 +322,13 @@ class RuntimeManager:
         camera_status = self.cameras.status()
         cameras = camera_status["cameras"]
         configured_camera_count = len(cameras)
-        # Count cameras actually delivering frames, not merely started: a
-        # started-but-silent pipeline must not show as connected.
+        # Count cameras actually streaming, not merely started.
         streaming_count = sum(1 for c in cameras.values() if c.get("streaming"))
         camera_errors = [
             str(value) for value in camera_status["errors"].values() if value
         ]
-        # A started-but-not-streaming camera is still coming up: either warming
-        # up, or wedged and being recovered by the (never-give-up) watchdog.
-        # Report it as connecting, not failed, so the UI keeps its spinner
-        # instead of flashing 0/N. Only a camera that never opened is a failure.
+        # Started-but-not-streaming = still connecting; report it as working,
+        # not failed, so the UI keeps its spinner instead of flashing 0/N.
         starting = any(
             c.get("started") and not c.get("streaming") for c in cameras.values()
         )
@@ -941,9 +934,8 @@ class RuntimeManager:
             else None
         )
 
-        # Depth: LeRobot's per-item decode re-seeks (~30ms/frame), too slow for
-        # data-rate preview. Sequential-decode the whole file once and serve
-        # colorized JPEGs from memory instead.
+        # Depth: LeRobot's per-item decode is too slow for preview; use our
+        # on-demand + prewarmed-cache path instead.
         if is_depth:
             return self._depth_frame_jpeg(
                 dataset, camera_key, frame_index, info, record
@@ -1000,8 +992,7 @@ class RuntimeManager:
         normalized[valid] = (
             np.clip(depth[valid], 0, max_depth_mm) * (255.0 / max_depth_mm)
         ).astype(np.uint8)
-        # applyColorMap emits BGR, which is exactly what imencode expects, so no
-        # channel flip is needed. Invalid/zero depth stays black.
+        # applyColorMap emits BGR, which imencode expects. Invalid depth is black.
         colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
         colored[~valid] = 0
         ok, buf = cv2.imencode(".jpg", colored, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -1019,11 +1010,9 @@ class RuntimeManager:
     ) -> bytes:
         """Return a colorized depth frame as JPEG.
 
-        Serve order: the fully-prewarmed clip cache, else a per-frame LRU, else
-        an on-demand single-frame decode (~15ms). The first request for a file
-        also kicks off a background prewarm of the whole clip so subsequent
-        scrubbing/playback is memory-speed. For a merged/multi-episode dataset,
-        ``record`` selects the episode's video file and time offset within it.
+        Serve order: prewarmed clip cache, per-frame LRU, else on-demand decode;
+        the first request also kicks off a background full-clip prewarm.
+        ``record`` selects the episode's video file/offset in a merged dataset.
         """
         file_offset = 0
         chunk_index = file_index = 0

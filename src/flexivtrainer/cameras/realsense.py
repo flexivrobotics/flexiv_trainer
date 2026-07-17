@@ -75,9 +75,7 @@ class RealSenseService:
         self._last_frames: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, str] = {}
         self._lock = threading.Lock()
-        # Serializes whole start/stop/restart cycles across request threads.
-        # _lock alone cannot: _stop_runtime releases it mid-join, letting a
-        # concurrent lifecycle call interleave and double-start a camera.
+        # Serializes whole start/stop/restart cycles (_lock is released mid-join).
         self._lifecycle_lock = threading.RLock()
 
     def set_active_locations(self, names: list[str]) -> None:
@@ -172,8 +170,7 @@ class RealSenseService:
         if not any(rt.started for rt in self._runtimes.values()):
             return
 
-        # Only active slots: restarting an inactive slot (e.g. "wrist" in dual
-        # mode) can grab a device an active slot needs.
+        # Active slots only; an inactive slot could grab a device an active one needs.
         active = [self._runtimes[name] for name in self._active_locations]
         for runtime in active:
             if runtime.started:
@@ -233,8 +230,7 @@ class RealSenseService:
         runtime.depth_scale_m = 0.001
         runtime.last_frame_time = None
         runtime.fps = 0.0
-        # Drop the cached frame so a stopped camera can never serve (or record)
-        # a stale image.
+        # Drop the cached frame so a stopped camera never serves a stale image.
         self._last_frames.pop(runtime.config.name, None)
 
     def _resolve_runtime_serial(
@@ -337,9 +333,7 @@ class RealSenseService:
             # read the cached frame instead of polling the pipeline themselves,
             # which previously made two readers contend for frames and made the
             # measured FPS swing wildly whenever recording started.
-            # The thread gets its own stop_event/pipeline references: a restart
-            # that replaces them on the runtime can then never orphan a live
-            # thread (it always sees the event it was started with).
+            # Pass stop_event/pipeline as args so a restart can't orphan this thread.
             runtime.stop_event = threading.Event()
             runtime.capture_thread = threading.Thread(
                 target=self._acquire_loop,
@@ -437,8 +431,7 @@ class RealSenseService:
         return self.status()
 
     def _is_streaming(self, runtime: CameraRuntime) -> bool:
-        # Started AND recently delivered a frame; a started-but-silent pipeline
-        # must not report as healthy.
+        # Started AND delivered a frame recently (not just an open pipeline).
         return (
             runtime.started
             and runtime.last_frame_time is not None
@@ -572,13 +565,8 @@ class RealSenseService:
                 last_frame = time.monotonic()
                 restarts = 0
             except Exception as exc:  # pragma: no cover - hardware specific
-                # A camera that has never delivered a frame is still connecting
-                # (some cameras take several seconds to start streaming) -- stay
-                # silent so the UI shows "connecting", not an error, however long
-                # it takes. Only surface a timeout once a camera that WAS
-                # streaming drops out for longer than the watchdog's grace
-                # window, i.e. a genuine mid-session failure. The watchdog keeps
-                # retrying either way.
+                # Stay silent while a camera is still connecting (never streamed);
+                # only report a timeout once a streaming camera drops out.
                 never_streamed = runtime.last_frame_time is None
                 if (
                     not never_streamed
@@ -600,11 +588,8 @@ class RealSenseService:
         last_frame: float,
         restarts: int,
     ) -> tuple[Any, float, int]:
-        # A started-but-silent stream only recovers via a restart (what a manual
-        # camera reconnect does). Plain stop/start is unreliable for D405 on a
-        # shared USB hub -- it often re-wedges -- so escalate to a device
-        # hardware_reset() after a couple of failed plain restarts. Never give up:
-        # the camera must eventually come back on its own, no repeated clicking.
+        # Restart a silent stream, escalating to hardware_reset (D405 on a shared
+        # hub often re-wedges on a plain restart). Never gives up.
         if (
             time.monotonic() - last_frame < SILENT_RESTART_AFTER_S
             or stop_event.is_set()
@@ -614,8 +599,7 @@ class RealSenseService:
             pipeline.stop()
         except Exception:  # pragma: no cover - hardware specific
             pass
-        # Every 3rd attempt escalate to a hardware reset; plain restarts in
-        # between are cheap and often enough.
+        # Every 3rd attempt escalate to a hardware reset.
         if restarts > 0 and restarts % 3 == 0:
             self._hardware_reset(runtime, stop_event)
         pipeline = rs.pipeline()
@@ -632,9 +616,7 @@ class RealSenseService:
     def _hardware_reset(
         self, runtime: CameraRuntime, stop_event: threading.Event
     ) -> None:
-        # hardware_reset() reliably recovers a D405 that a plain restart can't;
-        # it drops the USB device, so wait for it to re-enumerate before the
-        # caller reopens the pipeline.
+        # hardware_reset drops the USB device; wait for it to re-enumerate.
         serial = runtime.actual_serial or runtime.config.device_serial
         if not serial:
             return
