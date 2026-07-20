@@ -92,6 +92,81 @@ class TestPreviewDatasetSecurity:
         with pytest.raises(ValueError, match="Access denied"):
             manager.preview_dataset(tmp_path / ".." / ".." / "etc" / "passwd")
 
+    def test_preview_with_storage_prefix_collision_raises(
+        self, tmp_path: Path
+    ) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        sibling = tmp_path.with_name(f"{tmp_path.name}-other")
+        sibling.mkdir()
+
+        with pytest.raises(ValueError, match="Access denied"):
+            manager._resolve_dataset_repo(sibling)
+
+
+class TestDatasetVideoPathSecurity:
+    @staticmethod
+    def _video_path(
+        manager: RuntimeManager, camera_key: str = "observation.images.ego"
+    ) -> Path:
+        video = (
+            manager.settings.storage.merged_root
+            / "rgbd"
+            / "videos"
+            / camera_key
+            / "chunk-000"
+            / "file-000.mp4"
+        )
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"video")
+        return video
+
+    def test_existing_camera_video_resolves(self, tmp_path: Path) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        video = self._video_path(manager)
+        dataset = manager.settings.storage.merged_root / "rgbd"
+
+        assert manager.dataset_video_path(
+            dataset, "observation.images.ego"
+        ) == video.resolve()
+
+    @pytest.mark.parametrize(
+        "camera_key", ["../outside", "../../etc/passwd", "/etc/passwd", r"..\outside"]
+    )
+    def test_camera_key_traversal_raises(
+        self, tmp_path: Path, camera_key: str
+    ) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        video = self._video_path(manager)
+
+        with pytest.raises(ValueError, match="Access denied"):
+            manager.dataset_video_path(video.parents[3], camera_key)
+
+    def test_camera_directory_symlink_escape_raises(self, tmp_path: Path) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        dataset = manager.settings.storage.merged_root / "rgbd"
+        videos = dataset / "videos"
+        videos.mkdir(parents=True)
+        outside = tmp_path.parent / "outside-camera-videos"
+        outside.mkdir()
+        (videos / "observation.images.ego").symlink_to(
+            outside, target_is_directory=True
+        )
+
+        with pytest.raises(ValueError, match="Access denied"):
+            manager.dataset_video_path(dataset, "observation.images.ego")
+
+    def test_video_file_symlink_escape_raises(self, tmp_path: Path) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        dataset = manager.settings.storage.merged_root / "rgbd"
+        chunk = dataset / "videos" / "observation.images.ego" / "chunk-000"
+        chunk.mkdir(parents=True)
+        outside = tmp_path.parent / "outside-video.mp4"
+        outside.write_bytes(b"video")
+        (chunk / "file-000.mp4").symlink_to(outside)
+
+        with pytest.raises(ValueError, match="Access denied"):
+            manager.dataset_video_path(dataset, "observation.images.ego")
+
 
 class TestCheckpointPathSecurity:
     def test_checkpoint_within_storage_root_succeeds(self, tmp_path: Path) -> None:

@@ -678,7 +678,20 @@ def test_can_home_when_connected_and_not_running(tmp_path) -> None:
     assert service.stop().can_home is True
 
 
-def _homeable_service(tmp_path, robots):
+def _homeable_service(tmp_path, robots, monkeypatch):
+    # Keep these unit tests independent of the platform-specific flexivrdk
+    # binary. macOS CI cannot import it, but the behavior under test is the
+    # TeleopService primitive flow against the fake robot handles below.
+    from flexivtrainer.teleop import service as teleop_service
+
+    monkeypatch.setattr(
+        teleop_service,
+        "flexivrdk",
+        SimpleNamespace(
+            Mode=SimpleNamespace(NRT_PRIMITIVE_EXECUTION="primitive"),
+            JPos=lambda posture: list(posture),
+        ),
+    )
     pairs = [
         TeleopRobotPair(
             leader_serial=f"LEADER_{i}",
@@ -696,9 +709,9 @@ def _homeable_service(tmp_path, robots):
     return service
 
 
-def test_reset_home_executes_movej_when_stopped(tmp_path) -> None:
+def test_reset_home_executes_movej_when_stopped(tmp_path, monkeypatch) -> None:
     robots = (FakeRobot(), FakeRobot())
-    service = _homeable_service(tmp_path, robots)
+    service = _homeable_service(tmp_path, robots, monkeypatch)
 
     result = service.reset_home()
 
@@ -711,9 +724,9 @@ def test_reset_home_executes_movej_when_stopped(tmp_path) -> None:
         assert robot.modes  # SwitchMode was called first
 
 
-def test_reset_home_is_blocked_while_teleop_running(tmp_path) -> None:
+def test_reset_home_is_blocked_while_teleop_running(tmp_path, monkeypatch) -> None:
     robots = (FakeRobot(),)
-    service = _homeable_service(tmp_path, robots)
+    service = _homeable_service(tmp_path, robots, monkeypatch)
     service._started = True
 
     result = service.reset_home()
@@ -722,9 +735,11 @@ def test_reset_home_is_blocked_while_teleop_running(tmp_path) -> None:
     assert all(not robot.calls for robot in robots)
 
 
-def test_reset_home_errors_when_primitive_execution_unsupported(tmp_path) -> None:
+def test_reset_home_errors_when_primitive_execution_unsupported(
+    tmp_path, monkeypatch
+) -> None:
     # A controller whose handles cannot run primitives yields no homed robot.
-    service = _homeable_service(tmp_path, (SimpleNamespace(),))
+    service = _homeable_service(tmp_path, (SimpleNamespace(),), monkeypatch)
 
     result = service.reset_home()
 

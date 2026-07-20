@@ -647,7 +647,7 @@ class RuntimeManager:
         storage_root = self.settings.storage.root.expanduser().resolve()
         roots = [Path(path).resolve() for path in episode_paths]
         for root in roots:
-            if not str(root).startswith(str(storage_root)):
+            if not root.is_relative_to(storage_root):
                 raise ValueError(
                     f"Access denied: path must be within storage root ({storage_root})"
                 )
@@ -659,7 +659,7 @@ class RuntimeManager:
         """Validate the path against the storage root and resolve its repo id."""
         storage_root = self.settings.storage.root.expanduser().resolve()
         dataset_path = dataset_path.resolve()
-        if not str(dataset_path).startswith(str(storage_root)):
+        if not dataset_path.is_relative_to(storage_root):
             raise ValueError(
                 f"Access denied: path must be within storage root ({storage_root})"
             )
@@ -1178,12 +1178,42 @@ class RuntimeManager:
         whole clip is one MP4 and ``time = frame_index / fps``.
         """
         dataset_path, _ = self._resolve_dataset_repo(dataset_path)
-        relative = (
-            f"videos/{camera_key}/" f"chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
-        )
-        video_path = (dataset_path / relative).resolve()
-        # Guard against a camera_key that tries to escape the dataset directory.
-        if not str(video_path).startswith(str(dataset_path)):
+        if (
+            not camera_key
+            or camera_key in {".", ".."}
+            or "/" in camera_key
+            or "\\" in camera_key
+        ):
+            raise ValueError("Access denied: invalid camera key")
+        if chunk_index < 0 or file_index < 0:
+            raise ValueError("Access denied: video indexes must be non-negative")
+
+        # Select the camera directory from entries already present on disk rather
+        # than interpolating the request-provided key into a filesystem path. This
+        # breaks the untrusted-input data flow before any filesystem operation and
+        # also limits callers to camera keys the dataset actually contains.
+        videos_root = (dataset_path / "videos").resolve()
+        if not videos_root.is_relative_to(dataset_path):
+            raise ValueError("Access denied: videos path escapes the dataset root")
+        if not videos_root.is_dir():
+            raise FileNotFoundError(f"Dataset has no videos directory: {dataset_path}")
+
+        camera_dir: Path | None = None
+        for entry in videos_root.iterdir():
+            if entry.name == camera_key:
+                camera_dir = entry.resolve()
+                break
+        if camera_dir is None or not camera_dir.is_dir():
+            raise FileNotFoundError(f"No video directory for '{camera_key}'")
+        if not camera_dir.is_relative_to(videos_root):
+            raise ValueError("Access denied: camera path escapes the videos root")
+
+        video_path = (
+            camera_dir
+            / f"chunk-{chunk_index:03d}"
+            / f"file-{file_index:03d}.mp4"
+        ).resolve()
+        if not video_path.is_relative_to(camera_dir):
             raise ValueError("Access denied: video path escapes the dataset root")
         if not video_path.is_file():
             raise FileNotFoundError(f"No video file for '{camera_key}': {video_path}")
