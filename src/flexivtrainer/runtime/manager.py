@@ -644,25 +644,55 @@ class RuntimeManager:
                 _optional_dependency_error("Dataset merge", exc)
             ) from exc
 
-        storage_root = self.settings.storage.root.expanduser().resolve()
-        roots = [Path(path).resolve() for path in episode_paths]
-        for root in roots:
-            if not root.is_relative_to(storage_root):
-                raise ValueError(
-                    f"Access denied: path must be within storage root ({storage_root})"
-                )
+        roots = [self._resolve_storage_entry(Path(path)) for path in episode_paths]
         return merge_episode_datasets(
             roots, self.settings.storage.merged_root, output_name, on_progress
         )
 
-    def _resolve_dataset_repo(self, dataset_path: Path) -> tuple[Path, str]:
-        """Validate the path against the storage root and resolve its repo id."""
+    def _resolve_storage_entry(self, requested_path: Path) -> Path:
+        """Resolve a request path by walking entries below the trusted storage root.
+
+        The returned path is built from directory entries discovered on disk,
+        rather than by appending user-provided path components. Besides enforcing
+        containment, this prevents request taint from reaching filesystem sinks.
+        """
         storage_root = self.settings.storage.root.expanduser().resolve()
-        dataset_path = dataset_path.resolve()
-        if not dataset_path.is_relative_to(storage_root):
+        requested = requested_path.expanduser()
+        if not requested.is_absolute():
+            requested = Path.cwd() / requested
+
+        root_parts = storage_root.parts
+        requested_parts = requested.parts
+        if requested_parts[: len(root_parts)] != root_parts:
             raise ValueError(
                 f"Access denied: path must be within storage root ({storage_root})"
             )
+
+        relative_parts = requested_parts[len(root_parts) :]
+        if any(part in {"", ".", ".."} for part in relative_parts):
+            raise ValueError("Access denied: invalid storage path component")
+
+        resolved = storage_root
+        for requested_name in relative_parts:
+            try:
+                entry = next(
+                    (child for child in resolved.iterdir() if child.name == requested_name),
+                    None,
+                )
+            except OSError as exc:
+                raise FileNotFoundError(f"Path does not exist: {requested_path}") from exc
+            if entry is None:
+                raise FileNotFoundError(f"Path does not exist: {requested_path}")
+            resolved = entry.resolve()
+            if not resolved.is_relative_to(storage_root):
+                raise ValueError("Access denied: storage path escapes the storage root")
+        return resolved
+
+    def _resolve_dataset_repo(self, dataset_path: Path) -> tuple[Path, str]:
+        """Validate the path against the storage root and resolve its repo id."""
+        dataset_path = self._resolve_storage_entry(dataset_path)
+        if not dataset_path.is_dir():
+            raise FileNotFoundError(f"Dataset path is not a directory: {dataset_path}")
         # Recordings and merged datasets carry no extra manifest; their repo id
         # is local/<name>, exactly what the recorder/merge write into the dataset.
         repo_id = f"local/{dataset_path.name}"
