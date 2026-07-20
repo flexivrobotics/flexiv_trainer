@@ -15,9 +15,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
-from typing import Callable
 
 from flexivtrainer.config import (
     DEFAULT_HOME_POSTURE_DEG,
@@ -25,7 +25,7 @@ from flexivtrainer.config import (
     EndEffectorSideConfig,
     TeleopRobotPair,
 )
-from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.observability import describe_exception, info, warn
 from flexivtrainer.teleop.end_effector import EndEffectorController
 
 try:
@@ -279,6 +279,17 @@ class TeleopService:
                     robot_pairs_sn=robot_pairs,
                     network_interface_whitelist=self._settings.network_interface_whitelist,
                 )
+                # Reject an incompatible flexivtdk package up front rather than
+                # reporting a false "connected" and then silently failing to
+                # enable robots / read telemetry / drive grippers. Some packages
+                # (e.g. flexivtdk 1.6.1) do not expose the instances() accessor
+                # that the whole teleop layer depends on; fail the connection
+                # with a message the UI surfaces instead of degrading silently.
+                incompatibility = self._controller_incompatibility()
+                if incompatibility is not None:
+                    self._error = incompatibility
+                    self._controller = None
+                    return self.snapshot()
                 self._initialized = True
                 self._started = False
                 self._engaged = False
@@ -292,15 +303,41 @@ class TeleopService:
                 self._controller = None
         return self.snapshot()
 
+    def _controller_incompatibility(self) -> str | None:
+        # The teleop layer reaches the underlying rdk::Robot handles through
+        # controller.instances(idx) for enabling, telemetry, and gripper control.
+        # A build that omits it cannot teleoperate at all, so treat its absence
+        # as a hard connection failure with an actionable message.
+        if not callable(getattr(self._controller, "instances", None)):
+            version = getattr(flexivtdk, "__version__", "unknown")
+            return (
+                f"Installed flexivtdk ({version}) package is incompatible: the "
+                "teleop controller does not expose instances(). Reinstall a "
+                "package that exposes it."
+            )
+        return None
+
     def _enable_all_robots(self) -> None:
         # Enable both robots of every configured pair via the underlying
         # rdk::Robot handles from instances(idx). Best-effort per robot so one
         # failed Enable() does not abort the rest or the connection.
+        #
+        # Every failure mode here is logged rather than swallowed silently: when
+        # the same code enables robots on one machine but not another, the cause
+        # is machine-local (missing/incomplete robot_serials.json, a mismatched
+        # flexivtdk package whose handle lacks Enable, or a robot in fault/E-stop),
+        # and a silent no-op makes that impossible to diagnose from the field.
         if self._controller is None:
             return
         instances_reader = getattr(self._controller, "instances", None)
         if not callable(instances_reader):
+            warn(
+                "Skipped enabling robots on connect",
+                "controller has no callable instances(); check the installed "
+                "flexivtdk package",
+            )
             return
+        enabled = 0
         for idx in range(self._engageable_pair_count()):
             try:
                 robots = instances_reader(idx)
@@ -313,11 +350,19 @@ class TeleopService:
             for robot in robots if isinstance(robots, (tuple, list)) else (robots,):
                 enable = getattr(robot, "Enable", None)
                 if not callable(enable):
+                    warn(
+                        f"Robot handle for pair {idx} has no Enable()",
+                        f"handle type={type(robot).__name__}; check the "
+                        "flexivtdk/flexivrdk package",
+                    )
                     continue
                 try:
                     enable()
+                    enabled += 1
                 except Exception as exc:  # pragma: no cover - hardware specific
                     warn("Failed to enable robot", describe_exception(exc))
+        if enabled:
+            info(f"Enabled {enabled} robot(s) on connect")
 
     def _engageable_pair_count(self) -> int:
         return sum(

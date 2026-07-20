@@ -260,6 +260,118 @@ def test_start_then_stop_tracks_started_flag(tmp_path) -> None:
     assert stopped.stopped is True
 
 
+class FakeEnableRobot:
+    """rdk::Robot handle exposing the Enable() the connect path calls."""
+
+    def __init__(self) -> None:
+        self.enable_calls = 0
+
+    def Enable(self) -> None:  # noqa: N802
+        self.enable_calls += 1
+
+
+class FakeEnableController:
+    """Controller whose instances(idx) returns the pair's (leader, follower)."""
+
+    def __init__(self, robots_by_index: dict) -> None:
+        self._robots_by_index = robots_by_index
+
+    def instances(self, idx: int):
+        return self._robots_by_index[idx]
+
+
+def _connect_with_controller(tmp_path, monkeypatch, controller, pairs):
+    """Drive initialize() with a stubbed TDK controller and capture the
+    observability messages _enable_all_robots() emits."""
+    from flexivtrainer.teleop import service as teleop_service
+
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        teleop_service, "warn", lambda msg, detail=None: messages.append(("warn", msg))
+    )
+    monkeypatch.setattr(
+        teleop_service, "info", lambda msg, detail=None: messages.append(("info", msg))
+    )
+    monkeypatch.setattr(
+        teleop_service,
+        "TransparentCartesianTeleopLAN",
+        lambda **kwargs: controller,
+    )
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    service = TeleopService(settings, get_robot_pairs=lambda: pairs)
+    service.initialize()
+    return messages
+
+
+def test_initialize_enables_every_configured_robot(tmp_path, monkeypatch) -> None:
+    # The core behavior of the home-page Connect button: on a successful
+    # connection every robot of every fully-configured pair is enabled.
+    leader_a, follower_a = FakeEnableRobot(), FakeEnableRobot()
+    leader_b, follower_b = FakeEnableRobot(), FakeEnableRobot()
+    controller = FakeEnableController(
+        {0: (leader_a, follower_a), 1: (leader_b, follower_b)}
+    )
+    pairs = [
+        TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A"),
+        TeleopRobotPair(leader_serial="LEADER_B", follower_serial="FOLLOWER_B"),
+    ]
+
+    messages = _connect_with_controller(tmp_path, monkeypatch, controller, pairs)
+
+    for robot in (leader_a, follower_a, leader_b, follower_b):
+        assert robot.enable_calls == 1
+    assert ("info", "Enabled 4 robot(s) on connect") in messages
+
+
+def test_initialize_warns_when_handle_has_no_enable(tmp_path, monkeypatch) -> None:
+    # Regression for the "robots not enabled on connect, only on some machines"
+    # field report: a mismatched flexivtdk/flexivrdk build can return handles
+    # without an Enable() method. That used to be skipped silently; it must now
+    # surface a warning so the per-machine cause is diagnosable from the logs.
+    class NoEnableRobot:
+        pass
+
+    controller = FakeEnableController({0: (NoEnableRobot(), NoEnableRobot())})
+    pairs = [
+        TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A"),
+    ]
+
+    messages = _connect_with_controller(tmp_path, monkeypatch, controller, pairs)
+
+    assert any(
+        kind == "warn" and "has no Enable()" in msg for kind, msg in messages
+    )
+
+
+def test_initialize_rejects_controller_without_instances(tmp_path, monkeypatch) -> None:
+    # Regression for flexivtdk 1.6.1: that build's TransparentCartesianTeleopLAN
+    # does not expose the instances() accessor the teleop layer depends on
+    # (enable, telemetry, gripper control). Connecting against it must fail the
+    # connection with a surfaced error and tear the controller down, rather than
+    # reporting a false "connected" and silently degrading.
+    from flexivtrainer.teleop import service as teleop_service
+
+    class Controller161:
+        """Mirrors flexivtdk 1.6.1: no instances()."""
+
+    monkeypatch.setattr(
+        teleop_service,
+        "TransparentCartesianTeleopLAN",
+        lambda **kwargs: Controller161(),
+    )
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
+    service = TeleopService(settings, get_robot_pairs=lambda: pairs)
+
+    snapshot = service.initialize()
+
+    assert service._controller is None
+    assert snapshot.error is not None
+    assert "instances()" in snapshot.error
+
+
 def _configured_service(tmp_path) -> TeleopService:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     pairs = [
