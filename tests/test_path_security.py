@@ -80,6 +80,30 @@ class TestBrowsePathSecurity:
 
 
 class TestPreviewDatasetSecurity:
+    def test_existing_dataset_resolves(self, tmp_path: Path) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        dataset = manager.settings.storage.merged_root / "rgbd"
+        dataset.mkdir()
+
+        resolved, repo_id = manager._resolve_dataset_repo(dataset)
+
+        assert resolved == dataset.resolve()
+        assert repo_id == "local/rgbd"
+
+    def test_relative_dataset_path_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        dataset = manager.settings.storage.merged_root / "rgbd"
+        dataset.mkdir()
+        monkeypatch.chdir(tmp_path.parent)
+        relative = Path(tmp_path.name) / "datasets" / "rgbd"
+
+        resolved, repo_id = manager._resolve_dataset_repo(relative)
+
+        assert resolved == dataset.resolve()
+        assert repo_id == "local/rgbd"
+
     def test_preview_outside_storage_root_raises(self, tmp_path: Path) -> None:
         manager = make_manager_with_storage(tmp_path)
 
@@ -101,6 +125,16 @@ class TestPreviewDatasetSecurity:
 
         with pytest.raises(ValueError, match="Access denied"):
             manager._resolve_dataset_repo(sibling)
+
+    def test_preview_with_symlink_escape_raises(self, tmp_path: Path) -> None:
+        manager = make_manager_with_storage(tmp_path)
+        outside = tmp_path.parent / "outside-dataset"
+        outside.mkdir()
+        link = manager.settings.storage.merged_root / "linked-dataset"
+        link.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="Access denied"):
+            manager._resolve_dataset_repo(link)
 
 
 class TestDatasetVideoPathSecurity:

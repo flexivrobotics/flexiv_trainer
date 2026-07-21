@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from collections import OrderedDict
 from functools import lru_cache
@@ -650,39 +651,42 @@ class RuntimeManager:
         )
 
     def _resolve_storage_entry(self, requested_path: Path) -> Path:
-        """Resolve a request path by walking entries below the trusted storage root.
-
-        The returned path is built from directory entries discovered on disk,
-        rather than by appending user-provided path components. Besides enforcing
-        containment, this prevents request taint from reaching filesystem sinks.
-        """
+        """Resolve a storage path by walking trusted filesystem entries."""
         storage_root = self.settings.storage.root.expanduser().resolve()
-        requested = requested_path.expanduser()
-        if not requested.is_absolute():
-            requested = Path.cwd() / requested
+        storage_text = str(storage_root)
+        storage_prefix = f"{storage_text}{os.sep}"
+        requested_text = str(requested_path)
 
-        root_parts = storage_root.parts
-        requested_parts = requested.parts
-        if requested_parts[: len(root_parts)] != root_parts:
+        candidates = (requested_text, f"{Path.cwd().resolve()}{os.sep}{requested_text}")
+        relative_text: str | None = None
+        for candidate in candidates:
+            if candidate == storage_text:
+                relative_text = ""
+                break
+            if candidate.startswith(storage_prefix):
+                relative_text = candidate[len(storage_prefix) :]
+                break
+        if relative_text is None:
             raise ValueError(
                 f"Access denied: path must be within storage root ({storage_root})"
             )
 
-        relative_parts = requested_parts[len(root_parts) :]
+        relative_parts = relative_text.split(os.sep) if relative_text else []
         if any(part in {"", ".", ".."} for part in relative_parts):
             raise ValueError("Access denied: invalid storage path component")
 
         resolved = storage_root
+        missing_error = f"Path does not exist: {requested_path}"
         for requested_name in relative_parts:
             try:
+                children = resolved.iterdir()
                 entry = next(
-                    (child for child in resolved.iterdir() if child.name == requested_name),
-                    None,
+                    (child for child in children if child.name == requested_name), None
                 )
             except OSError as exc:
-                raise FileNotFoundError(f"Path does not exist: {requested_path}") from exc
+                raise FileNotFoundError(missing_error) from exc
             if entry is None:
-                raise FileNotFoundError(f"Path does not exist: {requested_path}")
+                raise FileNotFoundError(missing_error)
             resolved = entry.resolve()
             if not resolved.is_relative_to(storage_root):
                 raise ValueError("Access denied: storage path escapes the storage root")
