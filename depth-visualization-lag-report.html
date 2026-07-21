@@ -304,6 +304,29 @@
   .evidence .path { color: var(--accent-ink); }
   .evidence .what { color: var(--ink-soft); }
 
+  /* ---- TODO list ---- */
+  .todos { display: flex; flex-direction: column; gap: .9rem; margin-top: 1.2rem; }
+  .todo {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 1.15rem 1.3rem; box-shadow: var(--shadow);
+    display: grid; grid-template-columns: auto 1fr; gap: 0 1.1rem; align-items: start;
+  }
+  .todo__box {
+    flex: none; width: 1.5rem; height: 1.5rem; margin-top: .15rem;
+    border: 2px solid var(--accent); border-radius: 4px;
+    background: var(--panel);
+  }
+  .todo__title {
+    font-weight: 660; font-size: 1.05rem; margin: 0 0 .35rem;
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+  }
+  .todo__body { grid-column: 2; }
+  .todo__body p { margin: 0; max-width: none; color: var(--ink-soft); font-size: .96rem; }
+  .todo__num {
+    font-family: var(--mono); font-size: .78rem; font-weight: 700; color: var(--accent);
+  }
+  .todo__meta { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .7rem; }
+
   footer {
     margin-top: 4rem; padding-top: 1.4rem; border-top: 1px solid var(--rule);
     font-family: var(--mono); font-size: .74rem; color: var(--ink-faint);
@@ -341,6 +364,56 @@
       <strong>saturate that shared pool</strong> and starve the 10&nbsp;Hz status polls and the
       self-clocked live-camera feed — which is what you feel as lag.</p>
   </div>
+
+  <!-- TODO -->
+  <section class="prose">
+    <div class="sec-head"><span class="sec-num">TODO</span><h2 class="sec-title">Action items</h2></div>
+    <p>Concrete follow-ups to cut the decode load and its downstream memory cost.</p>
+    <div class="todos">
+
+      <div class="todo">
+        <div class="todo__box" role="img" aria-label="unchecked"></div>
+        <div class="todo__body">
+          <div class="todo__title"><span class="todo__num">1.</span> Downsize images at episode merging</div>
+          <p>Resize camera frames to a smaller resolution during the merge step so every downstream
+            read — preview decode, training load — moves fewer pixels. Fits the current
+            <code>enhancement/downsize_image</code> work.</p>
+          <div class="todo__meta">
+            <span class="chip">stage: <b>merge</b></span>
+            <span class="chip">cuts: <b>decode + I/O + memory</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="todo">
+        <div class="todo__box" role="img" aria-label="unchecked"></div>
+        <div class="todo__body">
+          <div class="todo__title"><span class="todo__num">2.</span> Don't load images during training</div>
+          <p>Skip loading image/video observations into the training pipeline when they aren't needed,
+            to save GPU memory.</p>
+          <div class="todo__meta">
+            <span class="chip">stage: <b>training</b></span>
+            <span class="chip">saves: <b>GPU memory</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="todo">
+        <div class="todo__box" role="img" aria-label="unchecked"></div>
+        <div class="todo__body">
+          <div class="todo__title"><span class="todo__num">3.</span> Don't visualize depth images</div>
+          <p>Skip server-side depth decode/colorize for preview entirely — the direct fix for the lag
+            described in this report. The <code>visualizeDepth</code> toggle already defaults off; this
+            makes not-decoding the standing behavior.</p>
+          <div class="todo__meta">
+            <span class="chip">stage: <b>preview</b></span>
+            <span class="chip">removes: <b>the lag source</b></span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
 
   <!-- 1 -->
   <section class="prose">
