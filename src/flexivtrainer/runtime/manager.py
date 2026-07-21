@@ -15,8 +15,6 @@
 from __future__ import annotations
 
 import os
-import threading
-from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -51,6 +49,33 @@ def _entry_created_time(path: Path) -> float:
         return path.stat().st_ctime
     except OSError:
         return 0.0
+
+
+def _dataset_resolution_from_info(dataset_dir: Path) -> list[int] | None:
+    """Image [height, width] from meta/info.json (no dataset load), or None.
+    Cheap enough to call while listing; lets the merge picker block datasets of
+    differing resolution (LeRobot's merge_datasets rejects mismatched shapes)."""
+    import json
+
+    try:
+        info = json.loads(
+            (dataset_dir / "meta" / "info.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    features = info.get("features")
+    if not isinstance(features, dict):
+        return None
+    for feature in features.values():
+        if not isinstance(feature, dict) or feature.get("dtype") not in {
+            "image",
+            "video",
+        }:
+            continue
+        shape = feature.get("shape")
+        if isinstance(shape, list | tuple) and len(shape) >= 2:
+            return [int(shape[0]), int(shape[1])]
+    return None
 
 
 class _UnavailableRecordingService:
@@ -147,14 +172,6 @@ class RuntimeManager:
         # Building one parses metadata and the parquet index, which is far too
         # costly to repeat for every frame request during preview playback.
         self._dataset_cache: dict[str, tuple[int, Any]] = {}
-        # Depth frames served on demand (single-frame LRU) until a background
-        # prewarm fills the whole-clip cache. _depth_lock guards all three.
-        self._depth_jpeg_cache: OrderedDict[str, tuple[int, list[bytes]]] = (
-            OrderedDict()
-        )
-        self._depth_frame_lru: OrderedDict[tuple[str, int], bytes] = OrderedDict()
-        self._depth_prewarming: set[str] = set()
-        self._depth_lock = threading.Lock()
 
     def _load_robot_config(self) -> RobotSerialConfig:
         path = self.settings.storage.runtime_config_path
@@ -552,6 +569,9 @@ class RuntimeManager:
                         "is_valid_episode": is_episode,
                         "job": None,
                         "created": _entry_created_time(child),
+                        "resolution": (
+                            _dataset_resolution_from_info(child) if is_episode else None
+                        ),
                     }
                 )
                 continue
@@ -603,6 +623,7 @@ class RuntimeManager:
                         "is_valid_episode": True,
                         "job": job_dir.name,
                         "created": _entry_created_time(child),
+                        "resolution": _dataset_resolution_from_info(child),
                     }
                 )
         return episodes
@@ -814,6 +835,13 @@ class RuntimeManager:
         numeric_keys = [
             series_key for series_key, _, _ in self._numeric_channels(dataset)
         ]
+        # [height, width] from the camera feature shape; None if no cameras.
+        resolution: list[int] | None = None
+        for key in camera_keys:
+            shape = dataset.features[key].get("shape")
+            if shape and len(shape) >= 2:
+                resolution = [int(shape[0]), int(shape[1])]
+                break
         result: dict[str, Any] = {
             "name": dataset_path.name,
             "path": str(dataset_path),
@@ -822,8 +850,8 @@ class RuntimeManager:
             "num_frames": dataset.num_frames,
             "num_episodes": dataset.num_episodes,
             "camera_keys": camera_keys,
-            "depth_keys": depth_keys,
             "numeric_keys": numeric_keys,
+            "resolution": resolution,
             "episodes": self._episode_list(dataset),
         }
 
@@ -935,268 +963,6 @@ class RuntimeManager:
             "series": series,
             "numeric_keys": numeric_keys,
         }
-
-    def dataset_frame_image(
-        self,
-        dataset_path: Path,
-        camera_key: str,
-        frame_index: int,
-        episode_index: int | None = None,
-    ) -> bytes:
-        """Return a single frame image as JPEG bytes.
-
-        When ``episode_index`` is given, ``frame_index`` is episode-local and is
-        mapped to the dataset-global frame.
-        """
-        import io
-
-        import numpy as np
-        import torch
-        from PIL import Image
-
-        dataset = self._load_dataset(dataset_path)
-
-        if camera_key not in dataset.features:
-            raise KeyError(f"Camera key '{camera_key}' not found in dataset")
-        feature = dataset.features[camera_key]
-        info = feature.get("info") if isinstance(feature.get("info"), dict) else {}
-        is_depth = info.get("is_depth_map") is True
-
-        record = (
-            self._episode_record(dataset, episode_index)
-            if episode_index is not None
-            else None
-        )
-
-        # Depth: LeRobot's per-item decode is too slow for preview; use our
-        # on-demand + prewarmed-cache path instead.
-        if is_depth:
-            return self._depth_frame_jpeg(
-                dataset, camera_key, frame_index, info, record
-            )
-
-        if record is not None:
-            start = int(record["dataset_from_index"])
-            end = int(record["dataset_to_index"])
-            if frame_index < 0 or frame_index >= (end - start):
-                raise IndexError(
-                    f"Frame index {frame_index} out of range [0, {end - start})"
-                )
-            frame_index = start + frame_index
-        elif frame_index < 0 or frame_index >= dataset.num_frames:
-            raise IndexError(
-                f"Frame index {frame_index} out of range [0, {dataset.num_frames})"
-            )
-
-        # Use __getitem__ rather than get_raw_item: the latter only returns the
-        # parquet (numeric) columns, while video frames are decoded lazily on
-        # item access. get_raw_item would yield no image for video features.
-        item = dataset[frame_index]
-        image_data = item.get(camera_key)
-        if image_data is None:
-            raise KeyError(
-                f"No image data for key '{camera_key}' at frame {frame_index}"
-            )
-
-        # RGB video frames decode to CHW; move to HWC and scale [0,1] floats.
-        if isinstance(image_data, torch.Tensor):
-            image_data = image_data.numpy()
-        if isinstance(image_data, np.ndarray):
-            if image_data.ndim == 3 and image_data.shape[0] in (1, 3, 4):
-                image_data = np.moveaxis(image_data, 0, -1)
-            if image_data.dtype in (np.float32, np.float64):
-                image_data = (image_data * 255).clip(0, 255).astype(np.uint8)
-
-        img = Image.fromarray(image_data)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=80)
-        return buf.getvalue()
-
-    def _colorize_depth_mm(self, depth_mm: Any) -> bytes:
-        """JET-colorize a float mm depth map and return JPEG bytes."""
-        import cv2
-        import numpy as np
-
-        depth = np.asarray(depth_mm, dtype=np.float32)
-        if depth.ndim == 3:
-            depth = depth[:, :, 0] if depth.shape[-1] == 1 else depth[0]
-        max_depth_mm = max(float(self.settings.depth_max_m) * 1000.0, 1.0)
-        valid = np.isfinite(depth) & (depth > 0)
-        normalized = np.zeros(depth.shape, dtype=np.uint8)
-        normalized[valid] = (
-            np.clip(depth[valid], 0, max_depth_mm) * (255.0 / max_depth_mm)
-        ).astype(np.uint8)
-        # applyColorMap emits BGR, which imencode expects. Invalid depth is black.
-        colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-        colored[~valid] = 0
-        ok, buf = cv2.imencode(".jpg", colored, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if not ok:
-            raise RuntimeError("Failed to JPEG-encode depth frame")
-        return buf.tobytes()
-
-    def _depth_frame_jpeg(
-        self,
-        dataset: Any,
-        camera_key: str,
-        frame_index: int,
-        info: dict[str, Any],
-        record: dict[str, Any] | None,
-    ) -> bytes:
-        """Return a colorized depth frame as JPEG.
-
-        Serve order: prewarmed clip cache, per-frame LRU, else on-demand decode;
-        the first request also kicks off a background full-clip prewarm.
-        ``record`` selects the episode's video file/offset in a merged dataset.
-        """
-        file_offset = 0
-        chunk_index = file_index = 0
-        if record is not None:
-            # frame_index is episode-local; map it into the episode's video file.
-            chunk_index = int(record.get(f"videos/{camera_key}/chunk_index") or 0)
-            file_index = int(record.get(f"videos/{camera_key}/file_index") or 0)
-            from_ts = float(record.get(f"videos/{camera_key}/from_timestamp") or 0.0)
-            file_offset = round(from_ts * float(dataset.fps))
-
-        video_path = self.dataset_video_path(
-            Path(dataset.root), camera_key, chunk_index, file_index
-        )
-        key = str(video_path)
-        try:
-            mtime = video_path.stat().st_mtime_ns
-        except OSError:
-            mtime = 0
-        file_index_in_video = file_offset + frame_index
-        if file_index_in_video < 0:
-            raise IndexError(f"Frame index {frame_index} out of range")
-
-        with self._depth_lock:
-            cached = self._depth_jpeg_cache.get(key)
-            if cached is not None and cached[0] == mtime:
-                frames = cached[1]
-                if file_index_in_video >= len(frames):
-                    raise IndexError(
-                        f"Frame index {frame_index} out of range for depth clip "
-                        f"(resolved {file_index_in_video} of {len(frames)})"
-                    )
-                self._depth_jpeg_cache.move_to_end(key)
-                return frames[file_index_in_video]
-            lru_hit = self._depth_frame_lru.get((key, file_index_in_video))
-            if lru_hit is not None:
-                self._depth_frame_lru.move_to_end((key, file_index_in_video))
-            start_prewarm = key not in self._depth_prewarming
-            if start_prewarm:
-                self._depth_prewarming.add(key)
-
-        if start_prewarm:
-            threading.Thread(
-                target=self._prewarm_depth_clip,
-                args=(video_path, key, mtime, dict(info)),
-                name="depth-prewarm",
-                daemon=True,
-            ).start()
-
-        if lru_hit is not None:
-            return lru_hit
-
-        # On-demand: decode just this frame so the first paint is instant.
-        jpeg = self._decode_one_depth_frame(video_path, info, file_index_in_video)
-        with self._depth_lock:
-            self._depth_frame_lru[(key, file_index_in_video)] = jpeg
-            self._depth_frame_lru.move_to_end((key, file_index_in_video))
-            while len(self._depth_frame_lru) > 64:
-                self._depth_frame_lru.popitem(last=False)
-        return jpeg
-
-    def _prewarm_depth_clip(
-        self, video_path: Path, key: str, mtime: int, info: dict[str, Any]
-    ) -> None:
-        try:
-            frames = self._decode_depth_jpegs(video_path, info)
-        except Exception as exc:  # pragma: no cover - decode/hardware specific
-            warn("Depth prewarm failed", describe_exception(exc))
-            with self._depth_lock:
-                self._depth_prewarming.discard(key)
-            return
-        with self._depth_lock:
-            self._depth_jpeg_cache[key] = (mtime, frames)
-            self._depth_jpeg_cache.move_to_end(key)
-            # Bound memory: a colorized JPEG is ~30KB, so ~8 clips is modest.
-            while len(self._depth_jpeg_cache) > 8:
-                self._depth_jpeg_cache.popitem(last=False)
-            # The per-frame LRU is now redundant for this file; drop its entries.
-            for lru_key in [k for k in self._depth_frame_lru if k[0] == key]:
-                self._depth_frame_lru.pop(lru_key, None)
-            self._depth_prewarming.discard(key)
-
-    def _depth_quant_params(self, info: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "depth_min": float(info.get("video.depth_min", 0.01)),
-            "depth_max": float(info.get("video.depth_max", 2.0)),
-            "shift": float(info.get("video.shift", 3.5)),
-            "use_log": bool(info.get("video.use_log", True)),
-            "pix_fmt": str(info.get("video.pix_fmt", "gray12le")),
-        }
-
-    def warm_up_depth_decode(self) -> None:
-        """Preload the heavy depth-decode imports so the first preview is fast.
-
-        ``lerobot.datasets.depth_utils`` pulls in torch (~2.7s cold); importing
-        it at startup moves that cost off the first depth-frame request.
-        """
-        try:
-            import av  # noqa: F401
-            from lerobot.datasets.depth_utils import dequantize_depth  # noqa: F401
-        except Exception as exc:  # pragma: no cover - optional deps
-            warn("Depth decode warm-up failed", describe_exception(exc))
-
-    def _decode_one_depth_frame(
-        self, video_path: Path, info: dict[str, Any], file_index: int
-    ) -> bytes:
-        import av
-        from lerobot.datasets.depth_utils import dequantize_depth
-
-        params = self._depth_quant_params(info)
-        container = av.open(str(video_path))
-        try:
-            stream = container.streams.video[0]
-            rate = float(stream.average_rate)
-            target_pts = int(file_index / rate / stream.time_base)
-            container.seek(target_pts, stream=stream)
-            chosen = None
-            for frame in container.decode(stream):
-                chosen = frame
-                cur = int(round(float(frame.pts * stream.time_base) * rate))
-                if cur >= file_index:
-                    break
-            if chosen is None:
-                raise IndexError(f"Frame index {file_index} not found in depth clip")
-            depth_mm = dequantize_depth(
-                chosen, output_unit="mm", output_tensor=False,
-                output_channel_last=True, **params,
-            )
-        finally:
-            container.close()
-        return self._colorize_depth_mm(depth_mm)
-
-    def _decode_depth_jpegs(
-        self, video_path: Path, info: dict[str, Any]
-    ) -> list[bytes]:
-        import av
-        from lerobot.datasets.depth_utils import dequantize_depth
-
-        params = self._depth_quant_params(info)
-        frames: list[bytes] = []
-        container = av.open(str(video_path))
-        try:
-            for frame in container.decode(container.streams.video[0]):
-                depth_mm = dequantize_depth(
-                    frame, output_unit="mm", output_tensor=False,
-                    output_channel_last=True, **params,
-                )
-                frames.append(self._colorize_depth_mm(depth_mm))
-        finally:
-            container.close()
-        return frames
 
     def dataset_video_path(
         self,

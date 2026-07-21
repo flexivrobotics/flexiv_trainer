@@ -63,6 +63,43 @@ def test_grab_camera_data_keeps_uint16_depth_in_hwc_shape() -> None:
     assert depths["ego"].flags["C_CONTIGUOUS"]
 
 
+def test_grab_camera_data_downsizes_rgb_and_depth_when_resolution_set() -> None:
+    # Depth (metric uint16) must use nearest-neighbor: no blended near/far edge,
+    # 0 = invalid sentinel preserved.
+    bgr = (np.random.default_rng(0).random((480, 640, 3)) * 255).astype(np.uint8)
+    depth = np.zeros((480, 640), dtype=np.uint16)
+    depth[:, 320:] = 1500  # far half; near half stays 0 (invalid sentinel)
+    service = RecordingService.__new__(RecordingService)
+    service._resolution = (240, 320)
+    service._cameras = SimpleNamespace(
+        capture_frame=lambda name, **kwargs: {"image": bgr, "depth": depth}
+    )
+
+    images, depths = service._grab_camera_data(
+        ["ego"], ["ego"], require_all=True, attempts=1
+    )
+
+    assert images["ego"].shape == (240, 320, 3)
+    assert images["ego"].dtype == np.uint8
+    assert depths["ego"].shape == (240, 320, 1)
+    assert depths["ego"].dtype == np.uint16
+    assert set(np.unique(depths["ego"]).tolist()) <= {0, 1500}  # no blended edge
+    assert 0 in np.unique(depths["ego"])
+
+
+def test_grab_camera_data_no_resize_when_resolution_unset() -> None:
+    # No _resolution set (getattr default) -> native pass-through.
+    bgr = np.zeros((2, 3, 3), dtype=np.uint8)
+    service = RecordingService.__new__(RecordingService)
+    service._cameras = SimpleNamespace(
+        capture_frame=lambda name, **kwargs: {"image": bgr}
+    )
+
+    images = service._grab_images(["ego"], require_all=True, attempts=1)
+
+    assert images["ego"].shape == (2, 3, 3)
+
+
 def test_ensure_camera_streams_rejects_missing_selected_depth() -> None:
     service = RecordingService.__new__(RecordingService)
     service._cameras = SimpleNamespace(

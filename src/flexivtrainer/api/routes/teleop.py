@@ -61,6 +61,8 @@ class StartRecordingRequest(BaseModel):
     # episodes/<job_name>/ subfolder. Sanitized server-side into one path
     # segment, falling back to the default when blank.
     job_name: str | None = None
+    # [height, width]; frames are downsized before encoding. None = native.
+    resolution: tuple[int, int] | None = None
 
 
 def _bootstrap_issue_detail(result: dict) -> str | None:
@@ -353,6 +355,7 @@ def start_recording(
             fps=request.fps,
             recording_entries=recording_entries,
             job_name=request.job_name,
+            resolution=request.resolution,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

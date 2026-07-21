@@ -344,25 +344,27 @@
       <span>flexiv_trainer</span><span class="sep">/</span>
       <span>WebUI &middot; depth preview</span>
     </div>
-    <h1>Depth previews stall the whole WebUI while they decode</h1>
-    <p class="dek">Depth frames are the only images decoded on the server. The decode work runs
-      in the same single, GIL-bound process that answers every poll and live camera request — so
-      opening a depth preview starves the entire UI, not just the depth panel.</p>
+    <h1>The first depth-preview decode stalls the WebUI — once per dataset</h1>
+    <p class="dek">Opening a merged dataset's depth preview kicks off a one-time, whole-clip decode on
+      the server. That grind saturates the single, GIL-bound process behind every request, so the UI
+      lags briefly. Once the clip is cached the preview is instant and the lag is gone — which is
+      exactly why it only happens the first time.</p>
     <div class="meta-row">
       <span class="tag tag--crit">Root cause confirmed</span>
-      <span class="tag">Server-side, single process</span>
+      <span class="tag">One-time, per dataset</span>
+      <span class="tag">Merge-preview only</span>
       <span class="tag">FastAPI + uvicorn</span>
-      <span class="tag">No code changed</span>
     </div>
   </header>
 
   <div class="verdict">
     <h2>The one-sentence verdict</h2>
-    <p>Every backend endpoint is a synchronous <code>def</code> sharing one 40-thread pool inside a
-      single GIL-bound process. Depth previews are the <strong>only</strong> images decoded server-side
-      (RGB plays natively in the browser), so the whole-clip prewarm thread plus per-frame decodes
-      <strong>saturate that shared pool</strong> and starve the 10&nbsp;Hz status polls and the
-      self-clocked live-camera feed — which is what you feel as lag.</p>
+    <p>Opening a merged dataset's depth preview spawns a background thread that decodes the
+      <strong>entire</strong> depth clip at once. Because every backend endpoint is a synchronous
+      <code>def</code> sharing one 40-thread pool inside a single GIL-bound process, that one-time
+      decode <strong>saturates the shared pool</strong> and briefly starves the polls that keep the UI
+      responsive. Once the clip lands in cache, every later frame is a cache hit — so
+      <strong>the lag happens only the first time per dataset</strong>.</p>
   </div>
 
   <!-- TODO -->
@@ -425,8 +427,9 @@
       Zero decode load on the Python process.</p>
     <p><strong>Depth</strong> is stored as 12-bit HEVC, which the browser cannot play. So the server must
       decode each frame with PyAV, dequantize it (via torch/numpy), colorize it with an OpenCV JET map,
-      and JPEG-encode it — then hand back a single image. The frontend fetches these
-      <em>one JPEG per frame</em> from <code>/datasets/frame-image</code>.</p>
+      and JPEG-encode it before handing back an image. Live teleop depth does this one fresh frame at a
+      time and stays smooth. The dataset preview is different: to make later frames instant it decodes
+      the <em>whole clip</em> in one background pass — and that up-front burst is what lags the UI.</p>
 
     <div class="diagram breakout">
       <div class="cap">Frame delivery — two paths, one process</div>
@@ -472,34 +475,42 @@
       feeling alive.</p>
 
     <div class="diagram breakout">
-      <div class="cap">Shared 40-thread pool — before vs. during a depth preview</div>
+      <div class="cap">Shared 40-thread pool — normal vs. first depth-preview open</div>
       <div class="pool">
         <div class="pool__row">
-          <div class="pool__label"><b>Idle</b>polls + live feed only</div>
+          <div class="pool__label"><b>Normal</b>polls + preview browsing</div>
           <div class="bar">
             <span class="seg-poll" style="width:22%">status polls</span>
-            <span class="seg-live" style="width:20%">live feed</span>
-            <span class="seg-free" style="width:58%">headroom</span>
+            <span class="seg-live" style="width:18%">UI requests</span>
+            <span class="seg-free" style="width:60%">headroom</span>
           </div>
         </div>
         <div class="pool__row">
-          <div class="pool__label"><b>Depth preview open</b>prewarm + per-frame decodes</div>
+          <div class="pool__label"><b>First open, one clip</b>whole-clip prewarm decode</div>
           <div class="bar">
-            <span class="seg-decode" style="width:70%">depth decode (prewarm + on-demand)</span>
-            <span class="seg-poll" style="width:12%">polls</span>
-            <span class="seg-live" style="width:12%">feed</span>
-            <span class="seg-free" style="width:6%"></span>
+            <span class="seg-decode" style="width:76%">whole-clip depth decode (one-time)</span>
+            <span class="seg-poll" style="width:14%">polls</span>
+            <span class="seg-free" style="width:10%"></span>
+          </div>
+        </div>
+        <div class="pool__row">
+          <div class="pool__label"><b>After cache</b>every frame is a hit</div>
+          <div class="bar">
+            <span class="seg-poll" style="width:22%">status polls</span>
+            <span class="seg-live" style="width:14%">cached frames</span>
+            <span class="seg-free" style="width:64%">headroom</span>
           </div>
         </div>
       </div>
     </div>
 
     <div class="note note--info">
-      <span class="note__tag">Why it feels UI-wide, not local</span>
+      <span class="note__tag">Why it feels UI-wide, not just the depth panel</span>
       <p>The frontend is a <strong>polling</strong> app — no websockets. Teleop status polls at
         <strong>10&nbsp;Hz</strong>, rollout at ~3&nbsp;Hz, recording save at 4&nbsp;Hz, plus fault and
-        training pollers. Each hits a sync endpoint on the same pool. When decode saturates it, the
-        heartbeat polls queue behind decodes too — so the sluggishness shows up everywhere at once.</p>
+        training pollers. Each hits a sync endpoint on the same pool. While the one-time decode runs,
+        the heartbeat polls queue behind it too — so the brief sluggishness shows up across the whole
+        UI, not only where the depth frames render.</p>
     </div>
   </section>
 
@@ -507,29 +518,32 @@
   <section class="prose">
     <div class="sec-head"><span class="sec-num">03</span><h2 class="sec-title">The two things that compound</h2></div>
 
-    <h3>Thread-pool starvation</h3>
-    <p>Opening a depth preview fires a background <code>depth-prewarm</code> thread that decodes the
-      <em>entire</em> clip, while scrubbing/playback also drives per-frame on-demand decodes through the
-      sync <code>/datasets/frame-image</code> endpoint. The live camera feed is a self-clocked pump —
-      it requests the next frame the instant the previous one loads, so its FPS is
-      <em>entirely</em> gated by server response time. Starve the pool and the live feed's frame rate
-      collapses directly.</p>
+    <h3>A whole-clip decode, all at once</h3>
+    <p>Opening a merged dataset's depth preview fires a background <code>depth-prewarm</code> thread
+      that decodes the <em>entire</em> clip up front — not one frame as needed. For a multi-second
+      episode that's hundreds of frames of PyAV decode + dequantize + colorize in a tight loop, kicked
+      off the moment the panel opens. That burst is what briefly starves the shared pool and the polls
+      running on it.</p>
 
     <h3>GIL contention</h3>
-    <p>Even setting thread slots aside, the decode is CPU-bound Python. <code>cv2.applyColorMap</code>
-      and <code>cv2.imencode</code> release the GIL, but <code>dequantize_depth</code> (torch/numpy) and
-      the Python-level frame iteration do not — so the prewarm thread genuinely holds the interpreter,
-      not just a pool slot. On a 16-core box the cores are there; the single interpreter is the
-      bottleneck.</p>
+    <p>The decode is CPU-bound Python. <code>cv2.applyColorMap</code> and <code>cv2.imencode</code>
+      release the GIL, but <code>dequantize_depth</code> (torch/numpy) and the Python-level frame
+      iteration do not — so the prewarm thread genuinely holds the interpreter, not just a pool slot.
+      On a 16-core box the cores are there; the single interpreter is the bottleneck for that window.</p>
+
+    <h3>Why it self-heals</h3>
+    <p>When prewarm finishes, the decoded JPEGs land in <code>_depth_jpeg_cache</code>, keyed by the
+      video file's mtime. Every later frame request for that clip is a cache hit — no decode, no pool
+      contention. So the cost is paid <strong>exactly once per dataset</strong> (until the file
+      changes), which is why re-opening the same preview afterwards is instant.</p>
 
     <div class="note note--good">
-      <span class="note__tag">What is already mitigated (and isn't the bug)</span>
-      <p>The frontend gates <code>img.src</code> on load and holds only the latest requested frame, so a
-        single client doesn't spam its own requests. There are caches too: a per-frame LRU (64 entries)
-        and a whole-clip cache (8 clips), plus <code>immutable</code> browser caching on responses. And
-        the <strong>merge job itself is cheap</strong> — a file-level copy with no re-encode. The cost is
-        purely in <em>previewing</em> merged/episode data. None of these address cross-request pool and
-        GIL contention.</p>
+      <span class="note__tag">Two things this is NOT</span>
+      <p>It is <strong>not the live teleop feed</strong> — that decodes one frame at a time and never
+        floods the pool, so it stays smooth. And it is <strong>not the merge job</strong>, which is a
+        cheap file-level copy with no re-encode. The cost is purely the first-time <em>preview</em>
+        decode of a merged clip. The whole-clip cache (8 clips) and per-frame LRU (64 entries) are what
+        make it a one-time cost rather than a recurring one.</p>
     </div>
   </section>
 

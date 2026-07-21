@@ -54,12 +54,6 @@ def create_app() -> FastAPI:
             name="device-warmup",
             daemon=True,
         ).start()
-        # Warm the depth-decode imports (~2.7s cold) off the first request.
-        threading.Thread(
-            target=runtime.warm_up_depth_decode,
-            name="depth-decode-warmup",
-            daemon=True,
-        ).start()
         yield
         if get_runtime_manager.cache_info().currsize:
             get_runtime_manager().shutdown()
