@@ -689,7 +689,7 @@ def _homeable_service(tmp_path, robots, monkeypatch):
         "flexivrdk",
         SimpleNamespace(
             Mode=SimpleNamespace(NRT_PRIMITIVE_EXECUTION="primitive"),
-            JPos=lambda posture: list(posture),
+            JPos=list,
         ),
     )
     pairs = [
