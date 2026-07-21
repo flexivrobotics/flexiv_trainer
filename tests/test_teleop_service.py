@@ -21,6 +21,10 @@ from flexivtrainer.teleop.service import TeleopService
 class FakeRobot:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict | None]] = []
+        self.modes: list[object] = []
+
+    def SwitchMode(self, mode: object) -> None:
+        self.modes.append(mode)
 
     def ExecutePrimitive(self, primitive: str, params: dict | None = None) -> None:
         self.calls.append((primitive, params))
@@ -674,37 +678,73 @@ def test_can_home_when_connected_and_not_running(tmp_path) -> None:
     assert service.stop().can_home is True
 
 
-def test_reset_home_calls_home_all_when_stopped(tmp_path) -> None:
-    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
-    controller = FakeController((FakeRobot(), FakeRobot()))
-    service._controller = controller
+def _homeable_service(tmp_path, robots, monkeypatch):
+    # Keep these unit tests independent of the platform-specific flexivrdk
+    # binary. macOS CI cannot import it, but the behavior under test is the
+    # TeleopService primitive flow against the fake robot handles below.
+    from flexivtrainer.teleop import service as teleop_service
+
+    monkeypatch.setattr(
+        teleop_service,
+        "flexivrdk",
+        SimpleNamespace(
+            Mode=SimpleNamespace(NRT_PRIMITIVE_EXECUTION="primitive"),
+            JPos=list,
+        ),
+    )
+    pairs = [
+        TeleopRobotPair(
+            leader_serial=f"LEADER_{i}",
+            follower_serial=f"FOLLOWER_{i}",
+            leader_home_posture=[0.0, -40.0, 0.0, 90.0, 0.0, 40.0, 0.0],
+        )
+        for i in range(len(robots))
+    ]
+    service = TeleopService(
+        AppSettings(storage=StorageConfig(root=tmp_path)),
+        get_robot_pairs=lambda: pairs,
+    )
+    service._controller = FakeController(robots)
+    service._initialized = True
+    return service
+
+
+def test_reset_home_executes_movej_when_stopped(tmp_path, monkeypatch) -> None:
+    robots = (FakeRobot(), FakeRobot())
+    service = _homeable_service(tmp_path, robots, monkeypatch)
 
     result = service.reset_home()
 
     assert result == {"ok": True, "warnings": []}
-    assert controller.home_all_calls == 1
+    # instances(idx) returns (follower, follower), so each pair's handle is
+    # driven with a MoveJ carrying the configured posture.
+    for robot in robots:
+        primitives = [name for name, _ in robot.calls]
+        assert primitives == ["MoveJ", "MoveJ"]
+        assert robot.modes  # SwitchMode was called first
 
 
-def test_reset_home_is_blocked_while_teleop_running(tmp_path) -> None:
-    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
-    controller = FakeController((FakeRobot(),))
-    service._controller = controller
+def test_reset_home_is_blocked_while_teleop_running(tmp_path, monkeypatch) -> None:
+    robots = (FakeRobot(),)
+    service = _homeable_service(tmp_path, robots, monkeypatch)
     service._started = True
 
     result = service.reset_home()
 
     assert result["ok"] is False
-    assert controller.home_all_calls == 0
+    assert all(not robot.calls for robot in robots)
 
 
-def test_reset_home_errors_when_home_all_unsupported(tmp_path) -> None:
-    service = TeleopService(AppSettings(storage=StorageConfig(root=tmp_path)))
-    service._controller = SimpleNamespace()
+def test_reset_home_errors_when_primitive_execution_unsupported(
+    tmp_path, monkeypatch
+) -> None:
+    # A controller whose handles cannot run primitives yields no homed robot.
+    service = _homeable_service(tmp_path, (SimpleNamespace(),), monkeypatch)
 
     result = service.reset_home()
 
     assert result["ok"] is False
-    assert "HomeAll" in str(result["error"])
+    assert "primitive execution" in str(result["error"])
 
 
 def test_robot_data_snapshot_uses_instance_states_and_actions(tmp_path) -> None:

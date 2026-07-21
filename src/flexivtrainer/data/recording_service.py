@@ -134,7 +134,7 @@ class RecordingService:
         )
         includes_action_values = any(entry.startswith("action.") for entry in entries)
         requires_robot_values = includes_observation_values or includes_action_values
-        target_fps = fps or 10
+        target_fps = fps or 30
         resolved_job_name = sanitize_job_name(job_name)
         episode_name, staging_path = self._create_staging_path()
 

@@ -31,6 +31,9 @@ except (
 ):  # pragma: no cover - dependency availability is environment-specific
     rs = None
 
+# Restart a started-but-silent pipeline after this long without a frame.
+SILENT_RESTART_AFTER_S = 3.0
+
 
 @dataclass
 class CameraRuntime:
@@ -72,9 +75,11 @@ class RealSenseService:
         self._last_frames: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, str] = {}
         self._lock = threading.Lock()
+        # Serializes whole start/stop/restart cycles (_lock is released mid-join).
+        self._lifecycle_lock = threading.RLock()
 
     def set_active_locations(self, names: list[str]) -> None:
-        with self._lock:
+        with self._lifecycle_lock, self._lock:
             self._active_locations = [name for name in names if name in self._runtimes]
             # Release cameras held by slots that are no longer active so their
             # devices return to the pool for the new mode's active slots.
@@ -122,7 +127,7 @@ class RealSenseService:
         streaming camera is stopped and restarted so the new mapping resolves
         cleanly even when serials are swapped between locations.
         """
-        with self._lock:
+        with self._lifecycle_lock, self._lock:
             before = {
                 name: runtime.config.device_serial
                 for name, runtime in self._runtimes.items()
@@ -165,7 +170,9 @@ class RealSenseService:
         if not any(rt.started for rt in self._runtimes.values()):
             return
 
-        for runtime in self._runtimes.values():
+        # Active slots only; an inactive slot could grab a device an active one needs.
+        active = [self._runtimes[name] for name in self._active_locations]
+        for runtime in active:
             if runtime.started:
                 self._stop_runtime(runtime)
             # Drop sticky auto-assignments so each slot is re-resolved freshly.
@@ -174,10 +181,8 @@ class RealSenseService:
         if rs is None:
             return
 
-        # Re-resolve every slot, not just the ones that happened to be running:
-        # freeing a device from one slot may now let another slot acquire it.
         available_serials = self._available_serials()
-        for runtime in self._runtimes.values():
+        for runtime in active:
             self._start_runtime(runtime, available_serials)
 
     def _resolve_camera_names(self, camera_names: list[str] | None = None) -> list[str]:
@@ -225,6 +230,8 @@ class RealSenseService:
         runtime.depth_scale_m = 0.001
         runtime.last_frame_time = None
         runtime.fps = 0.0
+        # Drop the cached frame so a stopped camera never serves a stale image.
+        self._last_frames.pop(runtime.config.name, None)
 
     def _resolve_runtime_serial(
         self, runtime: CameraRuntime, available_serials: list[str]
@@ -280,7 +287,8 @@ class RealSenseService:
             depth_started = want_depth
             if want_depth:
                 try:
-                    profile = pipeline.start(_build_config(True))
+                    started_config = _build_config(True)
+                    profile = pipeline.start(started_config)
                 except Exception as exc:  # pragma: no cover - hardware specific
                     # Depth may be unsupported on this device; retry color-only so
                     # recording still comes up (surfaced via the status warning).
@@ -291,10 +299,12 @@ class RealSenseService:
                     # A failed start can leave an SDK pipeline unusable; retry
                     # with a fresh instance for the color-only fallback.
                     pipeline = rs.pipeline()
-                    profile = pipeline.start(_build_config(False))
+                    started_config = _build_config(False)
+                    profile = pipeline.start(started_config)
                     depth_started = False
             else:
-                profile = pipeline.start(_build_config(False))
+                started_config = _build_config(False)
+                profile = pipeline.start(started_config)
             runtime.pipeline = pipeline
             runtime.started = True
             runtime.depth_started = depth_started
@@ -323,10 +333,11 @@ class RealSenseService:
             # read the cached frame instead of polling the pipeline themselves,
             # which previously made two readers contend for frames and made the
             # measured FPS swing wildly whenever recording started.
+            # Pass stop_event/pipeline as args so a restart can't orphan this thread.
             runtime.stop_event = threading.Event()
             runtime.capture_thread = threading.Thread(
                 target=self._acquire_loop,
-                args=(runtime,),
+                args=(runtime, pipeline, runtime.stop_event, started_config),
                 name=f"camera-acquire-{runtime.config.name}",
                 daemon=True,
             )
@@ -349,7 +360,7 @@ class RealSenseService:
         if rs is None:
             return False
 
-        with self._lock:
+        with self._lifecycle_lock, self._lock:
             serials = [device["serial"] for device in self.discover()["devices"]]
             if not serials:
                 return False
@@ -396,27 +407,36 @@ class RealSenseService:
                 "errors": {"import": "pyrealsense2 is not importable"},
             }
 
-        self.ensure_default_assignment()
-        with self._lock:
-            detected_devices = self.discover()["devices"]
-            available_serials = self._available_serials()
-            if not detected_devices:
+        with self._lifecycle_lock:
+            self.ensure_default_assignment()
+            with self._lock:
+                detected_devices = self.discover()["devices"]
+                available_serials = self._available_serials()
+                if not detected_devices:
+                    for name in self._resolve_camera_names(camera_names):
+                        self._errors[name] = "No RealSense camera is available"
+                    return self.status()
                 for name in self._resolve_camera_names(camera_names):
-                    self._errors[name] = "No RealSense camera is available"
-                return self.status()
-            for name in self._resolve_camera_names(camera_names):
-                runtime = self._runtimes[name]
-                if runtime.started:
-                    continue
-                self._start_runtime(runtime, available_serials)
+                    runtime = self._runtimes[name]
+                    if runtime.started:
+                        continue
+                    self._start_runtime(runtime, available_serials)
 
         return self.status()
 
     def stop_streams(self, camera_names: list[str] | None = None) -> dict[str, Any]:
-        with self._lock:
+        with self._lifecycle_lock, self._lock:
             for name in self._resolve_camera_names(camera_names):
                 self._stop_runtime(self._runtimes[name])
         return self.status()
+
+    def _is_streaming(self, runtime: CameraRuntime) -> bool:
+        # Started AND delivered a frame recently (not just an open pipeline).
+        return (
+            runtime.started
+            and runtime.last_frame_time is not None
+            and time.monotonic() - runtime.last_frame_time < 2.0
+        )
 
     def status(self) -> dict[str, Any]:
         return {
@@ -426,6 +446,7 @@ class RealSenseService:
                     "configured_serial": self._runtimes[name].config.device_serial,
                     "actual_serial": self._runtimes[name].actual_serial,
                     "started": self._runtimes[name].started,
+                    "streaming": self._is_streaming(self._runtimes[name]),
                     "fps": self._runtimes[name].fps,
                     "resolution": [
                         self._runtimes[name].config.width,
@@ -446,17 +467,25 @@ class RealSenseService:
             },
         }
 
-    def _acquire_loop(self, runtime: CameraRuntime) -> None:
+    def _acquire_loop(
+        self,
+        runtime: CameraRuntime,
+        pipeline: Any,
+        stop_event: threading.Event,
+        config: Any,
+    ) -> None:
         """Continuously pull frames for a single camera into the cache.
 
         This is the only place the pipeline is read, so frame delivery and the
         measured FPS reflect the camera's true production cadence regardless of
         how many consumers (live preview, recording) are reading concurrently.
         """
-        pipeline = runtime.pipeline
         align = runtime.align
         name = runtime.config.name
-        while not runtime.stop_event.is_set():
+        last_frame = time.monotonic()
+        restarts = 0
+        errored = False
+        while not stop_event.is_set():
             try:
                 raw_frames = pipeline.wait_for_frames(1_000)
                 if not raw_frames:
@@ -530,9 +559,86 @@ class RealSenseService:
                         if depth is not None:
                             payload["depth"] = depth
                     self._last_frames[name] = payload
+                    if errored:
+                        errored = False
+                        self._errors.pop(name, None)
+                last_frame = time.monotonic()
+                restarts = 0
             except Exception as exc:  # pragma: no cover - hardware specific
-                self._errors[name] = describe_exception(exc)
-                runtime.stop_event.wait(timeout=0.05)
+                # Stay silent while a camera is still connecting (never streamed);
+                # only report a timeout once a streaming camera drops out.
+                never_streamed = runtime.last_frame_time is None
+                if (
+                    not never_streamed
+                    and time.monotonic() - last_frame >= SILENT_RESTART_AFTER_S
+                ):
+                    self._errors[name] = describe_exception(exc)
+                    errored = True
+                pipeline, last_frame, restarts = self._restart_if_silent(
+                    runtime, pipeline, stop_event, config, last_frame, restarts
+                )
+                stop_event.wait(timeout=0.05)
+
+    def _restart_if_silent(
+        self,
+        runtime: CameraRuntime,
+        pipeline: Any,
+        stop_event: threading.Event,
+        config: Any,
+        last_frame: float,
+        restarts: int,
+    ) -> tuple[Any, float, int]:
+        # Restart a silent stream, escalating to hardware_reset (D405 on a shared
+        # hub often re-wedges on a plain restart). Never gives up.
+        if (
+            time.monotonic() - last_frame < SILENT_RESTART_AFTER_S
+            or stop_event.is_set()
+        ):
+            return pipeline, last_frame, restarts
+        try:
+            pipeline.stop()
+        except Exception:  # pragma: no cover - hardware specific
+            pass
+        # Every 3rd attempt escalate to a hardware reset.
+        if restarts > 0 and restarts % 3 == 0:
+            self._hardware_reset(runtime, stop_event)
+        pipeline = rs.pipeline()
+        try:
+            pipeline.start(config)
+        except Exception as exc:  # pragma: no cover - hardware specific
+            self._errors[runtime.config.name] = describe_exception(exc)
+            return pipeline, time.monotonic(), restarts + 1
+        with self._lock:
+            if not stop_event.is_set():
+                runtime.pipeline = pipeline
+        return pipeline, time.monotonic(), restarts + 1
+
+    def _hardware_reset(
+        self, runtime: CameraRuntime, stop_event: threading.Event
+    ) -> None:
+        # hardware_reset drops the USB device; wait for it to re-enumerate.
+        serial = runtime.actual_serial or runtime.config.device_serial
+        if not serial:
+            return
+        try:
+            for device in rs.context().devices:
+                if device.get_info(rs.camera_info.serial_number) == serial:
+                    device.hardware_reset()
+                    break
+        except Exception:  # pragma: no cover - hardware specific
+            return
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and not stop_event.is_set():
+            try:
+                detected = [
+                    d.get_info(rs.camera_info.serial_number)
+                    for d in rs.context().devices
+                ]
+            except Exception:  # pragma: no cover - hardware specific
+                detected = []
+            if serial in detected:
+                return
+            stop_event.wait(0.3)
 
     def read_frames(
         self,
