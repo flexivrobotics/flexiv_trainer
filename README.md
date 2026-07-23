@@ -187,6 +187,59 @@ Merged datasets are stored under:
 .local/datasets/
 ```
 
+## Convert TCP Actions To B-Spline Training Targets
+
+The experimental B-spline converter creates a new LeRobot dataset while
+leaving the source dataset unchanged. Observations and videos are copied
+without re-encoding. The copied dataset's discrete TCP `action` is replaced by
+one flattened B-spline parameter segment per frame.
+
+With the default cubic configuration, one arm is represented by XYZ plus
+rotation-6D. The parameter matrix has shape:
+
+```text
+(chunk_size + 2 * degree, 1 knot + 9 Cartesian controls)
+= (16, 10)
+```
+
+Run the converter on a merged dataset:
+
+```bash
+flexivtrainer-convert-bspline \
+  .local/datasets/my_task \
+  .local/datasets/my_task_bspline
+```
+
+TCP pose axes are detected from the action names. To select arms explicitly:
+
+```bash
+flexivtrainer-convert-bspline \
+  .local/datasets/my_task \
+  .local/datasets/my_task_bspline \
+  --side left_arm \
+  --side right_arm
+```
+
+Useful fitting options include:
+
+```text
+--degree 3
+--chunk-size 10
+--stride 1
+--max-error 0.002
+--smoothing 1e-12
+```
+
+The converted dataset stores its representation and per-episode reconstruction
+report in `meta/bspline.json`. With the default settings, every episode must
+contain at least 12 frames.
+
+> [!IMPORTANT]
+> This command prepares trainable spline-parameter targets. A B-spline-aware
+> policy/rollout adapter is still required to reshape, validate, align, and
+> evaluate predicted parameters. Do not send a checkpoint trained on this
+> converted action feature through the existing Cartesian waypoint executor.
+
 ## Start Training
 
 Open `Policy Training` from the navigation bar, then work through the steps.
