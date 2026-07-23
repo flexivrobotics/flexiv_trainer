@@ -58,6 +58,38 @@ def sanitize_job_name(job_name: str | None) -> str:
     return candidate or DEFAULT_JOB_NAME
 
 
+def _normalize_resolution(
+    resolution: tuple[int, int] | list[int] | None,
+) -> tuple[int, int] | None:
+    """(height, width) tuple, or None. Bad values -> None so they never abort a
+    recording; None means native resolution."""
+    if not resolution or len(resolution) != 2:
+        return None
+    try:
+        height, width = int(resolution[0]), int(resolution[1])
+    except (TypeError, ValueError):
+        return None
+    if height <= 0 or width <= 0:
+        return None
+    return height, width
+
+
+def _resize_frame(array: np.ndarray, resolution: tuple[int, int]) -> np.ndarray:
+    """Downsize a frame to (height, width). Depth (metric uint16) uses nearest
+    so a near/far edge is never blended into an invented middle distance."""
+    import cv2
+
+    height, width = resolution
+    if array.shape[0] == height and array.shape[1] == width:
+        return array
+    is_depth = np.issubdtype(array.dtype, np.integer) and array.dtype != np.uint8
+    interpolation = cv2.INTER_NEAREST if is_depth else cv2.INTER_AREA
+    resized = cv2.resize(array, (width, height), interpolation=interpolation)
+    if array.ndim == 3 and resized.ndim == 2:
+        resized = resized[:, :, None]  # cv2 drops the trailing size-1 axis
+    return np.ascontiguousarray(resized)
+
+
 class RecordingService:
     def __init__(
         self,
@@ -82,6 +114,7 @@ class RecordingService:
         # saved under the same ``episodes/<job_name>/`` subfolder.
         self._job_name: str | None = None
         self._recording_entries: list[str] | None = None
+        self._resolution: tuple[int, int] | None = None
         self._recording_sides: list[str] | None = None
         self._staging_path: Path | None = None
         self._dataset: Any = None
@@ -120,6 +153,7 @@ class RecordingService:
         fps: int | None = None,
         recording_entries: list[str] | None = None,
         job_name: str | None = None,
+        resolution: tuple[int, int] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._active:
@@ -136,6 +170,9 @@ class RecordingService:
         requires_robot_values = includes_observation_values or includes_action_values
         target_fps = fps or 30
         resolved_job_name = sanitize_job_name(job_name)
+        # Set before the first grab below: that grab defines the stored frame
+        # shape, so it must see the same downsized frames the loop will write.
+        self._resolution = _normalize_resolution(resolution)
         episode_name, staging_path = self._create_staging_path()
 
         try:
@@ -469,6 +506,9 @@ class RecordingService:
         if not camera_names:
             return {}, {}
 
+        # getattr: callers may reach here without going through start().
+        resolution = getattr(self, "_resolution", None)
+
         last_images: dict[str, np.ndarray] = {}
         last_depths: dict[str, np.ndarray] = {}
         last_errors: list[str] = []
@@ -496,9 +536,10 @@ class RecordingService:
                         errors.append(f"{camera_name}: missing image payload")
                     else:
                         # Cameras capture BGR; LeRobot stores RGB.
-                        images[camera_name] = np.ascontiguousarray(
-                            np.asarray(image)[:, :, ::-1]
-                        )
+                        rgb = np.ascontiguousarray(np.asarray(image)[:, :, ::-1])
+                        if resolution is not None:
+                            rgb = _resize_frame(rgb, resolution)
+                        images[camera_name] = rgb
 
                 if camera_name in depth_names:
                     depth = frame.get("depth") if isinstance(frame, dict) else None
@@ -508,6 +549,8 @@ class RecordingService:
                         array = np.asarray(depth)
                         if array.ndim == 2:
                             array = array[:, :, None]
+                        if resolution is not None:
+                            array = _resize_frame(array, resolution)
                         depths[camera_name] = np.ascontiguousarray(array)
 
             complete = all(name in images for name in image_names) and all(

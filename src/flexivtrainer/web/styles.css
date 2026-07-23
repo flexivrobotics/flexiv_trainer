@@ -1332,6 +1332,14 @@ button:disabled {
     margin-top: 0;
 }
 
+/* Resolution picker: .recording-option cards in a 2x2 grid. */
+.resolution-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.48rem;
+    margin: 0.15rem 0 0.35rem;
+}
+
 .recording-select-all-button {
     /* Sizing/shape comes from .toggle-all-button; just keep the spacing below. */
     margin-bottom: 0.15rem;
@@ -2126,6 +2134,19 @@ button:active {
 
 .teleop-start-warning {
     margin-top: 0.6rem;
+    padding: 0.7rem 0.85rem;
+    border-radius: 14px;
+    border: 1px solid var(--working-line);
+    background: var(--working-soft);
+    color: var(--working);
+    font-size: 0.88rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+/* Merge blocked: selected datasets have mismatched resolutions. */
+.merge-resolution-warning {
+    margin: 0.6rem 0;
     padding: 0.7rem 0.85rem;
     border-radius: 14px;
     border: 1px solid var(--working-line);

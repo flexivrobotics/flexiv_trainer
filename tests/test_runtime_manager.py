@@ -12,14 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import threading
-from collections import OrderedDict
-from pathlib import Path
+import json
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PIL import Image
 
 from flexivtrainer.config import AppSettings, RobotSerialConfig, StorageConfig
 from flexivtrainer.runtime.manager import RuntimeManager
@@ -149,10 +146,6 @@ def _bare_manager(tmp_path) -> RuntimeManager:
     manager.settings = AppSettings(storage=StorageConfig(root=tmp_path))
     manager.settings.ensure_storage()
     manager._dataset_cache = {}
-    manager._depth_jpeg_cache = OrderedDict()
-    manager._depth_frame_lru = OrderedDict()
-    manager._depth_prewarming = set()
-    manager._depth_lock = threading.Lock()
     return manager
 
 
@@ -256,6 +249,40 @@ def test_browse_path_annotates_created_time_for_sorting(tmp_path) -> None:
         assert isinstance(item["created"], float)
 
 
+def test_dataset_resolution_from_info(tmp_path) -> None:
+    from flexivtrainer.runtime.manager import _dataset_resolution_from_info
+
+    # Reads [height, width] from the first video feature's shape in info.json.
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    (meta / "info.json").write_text(
+        json.dumps(
+            {
+                "features": {
+                    "observation.state": {"dtype": "float32", "shape": [7]},
+                    "observation.images.ego": {
+                        "dtype": "video",
+                        "shape": [360, 480, 3],
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _dataset_resolution_from_info(tmp_path) == [360, 480]
+
+    # No camera feature -> None; unreadable dir -> None (never raises).
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "meta").mkdir()
+    (empty / "meta" / "info.json").write_text(
+        json.dumps({"features": {"observation.state": {"dtype": "float32"}}}),
+        encoding="utf-8",
+    )
+    assert _dataset_resolution_from_info(empty) is None
+    assert _dataset_resolution_from_info(tmp_path / "does_not_exist") is None
+
+
 class _PreviewDataset:
     features = {
         "observation.images.ego": {
@@ -307,37 +334,4 @@ def test_preview_dataset_lists_depth_separately(tmp_path, monkeypatch) -> None:
     preview = manager.preview_dataset(manager.settings.storage.merged_root / "rgbd")
 
     assert preview["camera_keys"] == ["observation.images.ego"]
-    assert preview["depth_keys"] == ["observation.images.ego_depth"]
-
-
-def test_dataset_frame_image_colorizes_native_depth(tmp_path, monkeypatch) -> None:
-    import io
-
-    manager = _preview_manager(tmp_path, monkeypatch)
-    # The first depth request serves an on-demand single-frame decode; feed it a
-    # known mm-depth frame so the colorize path (black for invalid, color for
-    # valid) is exercised without a real HEVC file. Prewarm is disabled so the
-    # background thread never touches a nonexistent file.
-    depth_mm = np.array([[0, 500, 1000], [1500, 2000, 2500]], dtype=np.float32)
-    monkeypatch.setattr(
-        manager,
-        "dataset_video_path",
-        lambda *a, **k: Path("/tmp/_preview_depth.mp4"),
-    )
-    monkeypatch.setattr(
-        manager,
-        "_decode_one_depth_frame",
-        lambda video_path, info, file_index: manager._colorize_depth_mm(depth_mm),
-    )
-    monkeypatch.setattr(manager, "_prewarm_depth_clip", lambda *a, **k: None)
-
-    content = manager.dataset_frame_image(
-        manager.settings.storage.merged_root / "rgbd",
-        "observation.images.ego_depth",
-        0,
-    )
-
-    image = np.asarray(Image.open(io.BytesIO(content)))
-    assert image.shape == (2, 3, 3)
-    assert image[0, 0].max() < 40  # invalid zero depth is black (JPEG tolerance)
-    assert image[0, 2].max() > 20  # valid depth is colorized
+    assert preview["resolution"] == [2, 3]  # [height, width] from camera shape

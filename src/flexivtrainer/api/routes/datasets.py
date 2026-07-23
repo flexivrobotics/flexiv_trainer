@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from flexivtrainer.observability import info, ok
@@ -163,33 +163,6 @@ def series(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.get("/frame-image")
-def frame_image(
-    path: str,
-    key: str,
-    index: int = 0,
-    episode_index: int | None = None,
-    runtime: RuntimeManager = Depends(get_runtime_manager),
-) -> Response:
-    """Return a single frame image as JPEG."""
-    try:
-        data = runtime.dataset_frame_image(
-            Path(path), key, index, episode_index=episode_index
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except (RuntimeError, IndexError, KeyError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # A frame's pixels never change for a given (path, key, index), so let the
-    # browser cache aggressively. Playback prefetches frames ahead and relies on
-    # this cache to display them without re-hitting the decoder.
-    return Response(
-        content=data,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=3600, immutable"},
-    )
 
 
 @router.get("/video")

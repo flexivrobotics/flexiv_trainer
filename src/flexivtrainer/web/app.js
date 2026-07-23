@@ -167,6 +167,8 @@ const state = {
     },
     cameraFeeds: {},
     recordingEntries: [],
+    recordResolution: "native", // RESOLUTION_PRESETS id
+
     // Entry ids the checklist has already offered. Used to distinguish "newly
     // offered" entries (auto-selected default-on, e.g. a gripper just enabled)
     // from ones the user explicitly deselected (must stay off). null until the
@@ -464,6 +466,14 @@ const TELEOP_DISENGAGE_MARKUP = `
 // Default training job name prefilled in the Episode Recording panel's Job name
 // box; mirrors the server-side DEFAULT_JOB_NAME used when none is supplied.
 const DEFAULT_JOB_NAME = "job_0";
+// Capture-resolution presets (4:3, native 640x480). shape is [height, width]
+// sent to the backend to downsize; null records native.
+const RESOLUTION_PRESETS = [
+    { id: "native", label: "480P", shape: null },
+    { id: "360p", label: "360P", shape: [360, 480] },
+    { id: "240p", label: "240P", shape: [240, 320] },
+    { id: "180p", label: "180P", shape: [180, 240] },
+];
 // localStorage key the last-used job name is cached under so it persists across
 // reloads; the box falls back to DEFAULT_JOB_NAME when nothing is cached.
 const JOB_NAME_STORAGE_KEY = "flexivtrainer.lastJobName";
@@ -1141,14 +1151,6 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
         </div>
     `;
     }).join("");
-    const depthFeedsHtml = (preview.depth_keys || []).map((depthKey) => `
-        <div class="feed">
-            <div class="feed__header"><span>${depthKey}</span></div>
-            <div class="feed__placeholder" data-render-mode="live">
-                <img class="feed__image dataset-depth-frame" data-camera-key="${depthKey}" alt="${depthKey} depth preview" />
-            </div>
-        </div>
-    `).join("");
 
     // Playback controls
     const playbackHtml = `
@@ -1183,7 +1185,7 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
 
     container.innerHTML = `
         <span class="eyebrow dataset-feed-title">Camera Feeds</span>
-        <div class="feed-row dataset-feed-row">${feedsHtml}${depthFeedsHtml}</div>
+        <div class="feed-row dataset-feed-row">${feedsHtml}</div>
         ${playbackHtml}
         <div class="dataset-plots-grid">${plotsHtml}</div>
     `;
@@ -1241,7 +1243,6 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
 
     // Restore the playhead position on the freshly-mounted videos.
     _seekDatasetVideos(container, preview, currentFrame);
-    _updateDatasetDepthImages(container, preview, currentFrame);
     // Start playback if already playing
     if (isPlaying) {
         _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey);
@@ -1273,50 +1274,6 @@ function _seekDatasetVideos(container, preview, frameIndex) {
             video.addEventListener("loadedmetadata", () => { video.currentTime = t; }, { once: true });
         }
     });
-}
-
-function _depthFrameUrl(preview, cameraKey, frameIndex) {
-    const params = new URLSearchParams({
-        path: preview.path,
-        key: cameraKey,
-        index: String(frameIndex),
-    });
-    if (preview.episode_index !== null && preview.episode_index !== undefined) {
-        params.set("episode_index", String(preview.episode_index));
-    }
-    return `/datasets/frame-image?${params.toString()}`;
-}
-
-// Depth frames decode slower than playback ticks, so gate on load: hold only
-// the latest requested frame and fetch it once the current request settles.
-// Assigning img.src every tick would cancel the in-flight load and freeze.
-function _updateDatasetDepthImages(container, preview, frameIndex) {
-    container.querySelectorAll(".dataset-depth-frame").forEach((image) => {
-        image._pendingFrame = frameIndex;
-        if (image._loading) {
-            return;
-        }
-        _pumpDepthImage(image, preview);
-    });
-}
-
-function _pumpDepthImage(image, preview) {
-    const frame = image._pendingFrame;
-    if (frame === undefined || frame === image._shownFrame) {
-        return;
-    }
-    image._loading = true;
-    const settle = () => {
-        image._loading = false;
-        image._shownFrame = frame;
-        // A newer frame was requested while this one loaded -- chase it.
-        if (image._pendingFrame !== frame) {
-            _pumpDepthImage(image, preview);
-        }
-    };
-    image.onload = settle;
-    image.onerror = settle;
-    image.src = _depthFrameUrl(preview, image.dataset.cameraKey, frame);
 }
 
 function _formatPlaybackTime(seconds) {
@@ -1398,7 +1355,6 @@ function _rebuildDatasetLegends(container, preview, seriesData, frameKey) {
 function _updateDatasetFrames(container, preview, seriesData, frameKey, playingKey) {
     _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
     _seekDatasetVideos(container, preview, state[frameKey]);
-    _updateDatasetDepthImages(container, preview, state[frameKey]);
 }
 
 function _startDatasetPlayback(container, preview, seriesData, frameKey, playingKey) {
@@ -1411,22 +1367,22 @@ function _startDatasetPlayback(container, preview, seriesData, frameKey, playing
 
     const videos = [...container.querySelectorAll(".dataset-frame-video")];
     if (!videos.length) {
-        // A recording may intentionally contain depth only. In that case no
-        // browser-decodable RGB video exists to serve as the playback clock.
+        // A recording may contain no browser-decodable RGB video (e.g. a
+        // numeric-only recording). Drive a wall-clock playback loop that
+        // advances the slider/plots so the trends still animate.
         const startedAt = performance.now();
         const startFrame = state[frameKey] || 0;
-        const tickDepthOnly = (now) => {
+        const tickMetaOnly = (now) => {
             if (!live()) return;
             const elapsedFrames = Math.floor(((now - startedAt) / 1000) * fps);
             const frame = (startFrame + elapsedFrames) % numFrames;
             if (frame !== state[frameKey]) {
                 state[frameKey] = frame;
                 _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
-                _updateDatasetDepthImages(container, preview, frame);
             }
-            _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tickDepthOnly);
+            _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tickMetaOnly);
         };
-        _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tickDepthOnly);
+        _datasetPlaybackTimers[playingKey] = requestAnimationFrame(tickMetaOnly);
         return;
     }
     const master = videos[0];
@@ -1459,7 +1415,6 @@ function _startDatasetPlayback(container, preview, seriesData, frameKey, playing
         if (frame !== state[frameKey]) {
             state[frameKey] = frame;
             _renderDatasetFrameMeta(container, preview, seriesData, frameKey);
-            _updateDatasetDepthImages(container, preview, frame);
             // Correct any drift between feeds without disrupting the master.
             for (let i = 1; i < videos.length; i++) {
                 const offsetDelta = _videoWindowOffset(preview, videos[i].dataset.cameraKey) - masterOffset;
@@ -3294,6 +3249,40 @@ function renderRecordingOptions(recording = {}) {
     });
 }
 
+// Single-select resolution picker. Locked during a recording; renderKey-guarded
+// like renderRecordingOptions so the ~10Hz poll tick doesn't swallow clicks.
+function renderRecordResolutionOptions(recording = {}) {
+    const container = byId("record-resolution-options");
+    if (!container) {
+        return;
+    }
+    const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
+    const selectedId = state.recordResolution;
+    const renderKey = `${locked ? 1 : 0}|${selectedId}`;
+    if (container.dataset.renderKey === renderKey) {
+        return;
+    }
+    container.dataset.renderKey = renderKey;
+    container.innerHTML = "";
+
+    RESOLUTION_PRESETS.forEach((preset) => {
+        const checked = preset.id === selectedId;
+        const label = document.createElement("label");
+        label.className = `recording-option ${locked ? "recording-option--disabled" : ""}`;
+        label.innerHTML = `
+            <input type="radio" name="record-resolution" ${checked ? "checked" : ""} ${locked ? "disabled" : ""} />
+            <span class="recording-option__text">
+                <span class="recording-option__label">${preset.label}</span>
+            </span>
+        `;
+        label.querySelector("input").onchange = () => {
+            state.recordResolution = preset.id;
+            renderRecordResolutionOptions(recording);
+        };
+        container.appendChild(label);
+    });
+}
+
 function hasRecordingPayload(value) {
     if (Array.isArray(value)) {
         return value.some((item) => item !== null && item !== undefined);
@@ -4338,6 +4327,7 @@ function renderTeleop() {
     };
 
     renderRecordingOptions(teleopStatus.recording || {});
+    renderRecordResolutionOptions(teleopStatus.recording || {});
 
     const panels = activeArmPanels();
     const usedSlots = new Set(panels.map((panel) => panel.slot));
@@ -4502,6 +4492,24 @@ function renderProcessingModePicker(container) {
     });
 }
 
+// Message if the selected datasets have differing resolution (LeRobot's
+// merge_datasets rejects mismatched shapes), else "". Blocks the Merge upfront.
+function selectedResolutionMismatch() {
+    const fmt = (res) => (Array.isArray(res) && res.length >= 2 ? `${res[1]}×${res[0]}` : null);
+    const selected = state.episodes.filter((episode) =>
+        state.selectedEpisodes.includes(episode.path)
+    );
+    const labels = new Set();
+    selected.forEach((episode) => {
+        const label = fmt(episode.resolution);
+        if (label) labels.add(label);
+    });
+    if (labels.size <= 1) {
+        return "";
+    }
+    return `Selected datasets have different resolutions (${[...labels].join(", ")}) and cannot be merged. Select datasets recorded at the same resolution.`;
+}
+
 function renderProcessing() {
     const container = byId("processing-content");
     if (!state.processingMode) {
@@ -4594,6 +4602,11 @@ function renderProcessing() {
         if (state.preview && !state.episodes.some((episode) => episode.path === state.preview.path)) {
             state.preview = null;
         }
+        const resolutionMismatch = selectedResolutionMismatch();
+        const mergeDisabled = !state.selectedEpisodes.length || !!resolutionMismatch;
+        const mismatchNote = resolutionMismatch
+            ? `<div class="merge-resolution-warning">${escapeHtml(resolutionMismatch)}</div>`
+            : "";
         container.innerHTML = `
             <div class="training-layout">
                 <aside class="panel">
@@ -4605,9 +4618,10 @@ function renderProcessing() {
                 </aside>
                 <div class="training-main">
                     <div id="episode-preview-block"></div>
+                    ${mismatchNote}
                     <div class="control-bar control-bar--floating-step-nav">
                         <button class="secondary-button" id="training-prev-step" type="button">Back</button>
-                        <button id="training-merge" type="button" ${state.selectedEpisodes.length ? "" : "disabled"}>${mode.mergeLabel}</button>
+                        <button id="training-merge" type="button" ${mergeDisabled ? "disabled" : ""}>${mode.mergeLabel}</button>
                     </div>
                 </div>
             </div>
@@ -6130,6 +6144,7 @@ function openEpisodeBrowser() {
                         name: item.path.split("/").pop(),
                         path: item.path,
                         job: item.job || null,
+                        resolution: item.resolution || null,
                     });
                 }
             });
@@ -6168,6 +6183,7 @@ function openProcessingDatasetBrowser() {
                         name: item.path.split("/").pop(),
                         path: item.path,
                         job: item.job || null,
+                        resolution: item.resolution || null,
                     });
                 }
             });
@@ -7056,6 +7072,13 @@ function bindGlobalEvents() {
             };
             if (task) {
                 startBody.task = task;
+            }
+            // Omit when native so the server records full resolution.
+            const resolutionPreset = RESOLUTION_PRESETS.find(
+                (preset) => preset.id === state.recordResolution
+            );
+            if (resolutionPreset?.shape) {
+                startBody.resolution = resolutionPreset.shape;
             }
             await api("/teleop/recording/start", {
                 method: "POST",
