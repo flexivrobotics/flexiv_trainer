@@ -75,7 +75,7 @@ def start_rollout(
 def rollout_checkpoint_info(
     path: str, runtime: RuntimeManager = Depends(get_runtime_manager)
 ) -> dict:
-    from flexivtrainer.rollout.service import (
+    from flexivtrainer.rollout.checkpoint import (
         _checkpoint_policy_type,
         _checkpoint_requires_task,
         _checkpoint_task,

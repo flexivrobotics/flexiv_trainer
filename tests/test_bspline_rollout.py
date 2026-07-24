@@ -17,7 +17,7 @@ import threading
 import numpy as np
 import pytest
 
-from flexivtrainer.rollout.bspline_executor import (
+from flexivtrainer.rollout.executors.bspline import (
     BSplineExecutor,
     _repair_knots,
     parse_bspline_action_layout,

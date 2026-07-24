@@ -283,7 +283,7 @@ def test_processors_are_standard_diffusion_processors() -> None:
 
 
 def test_default_rollout_loader_restores_plugin_checkpoint(tmp_path) -> None:
-    from flexivtrainer.rollout.service import _default_policy_loader
+    from flexivtrainer.rollout.checkpoint import _default_policy_loader
 
     config = _config()
     policy = BSplineDiffusionPolicy(config)

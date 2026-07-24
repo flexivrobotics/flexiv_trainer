@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from flexivtrainer.rollout.gripper_executor import GripperExecutor
+from flexivtrainer.rollout.executors.gripper import GripperExecutor
 
 
 class FakeRobot:

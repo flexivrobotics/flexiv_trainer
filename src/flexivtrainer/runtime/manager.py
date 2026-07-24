@@ -583,7 +583,7 @@ class RuntimeManager:
                 "created": _entry_created_time(child),
             }
             if annotate_checkpoint_dirs and child.is_dir():
-                from flexivtrainer.rollout.service import (  # noqa: PLC0415
+                from flexivtrainer.rollout.checkpoint import (  # noqa: PLC0415
                     _checkpoint_policy_type,
                 )
 
