@@ -167,6 +167,7 @@ class RuntimeManager:
                 self.teleop,
                 self.get_teleop_robot_pairs,
                 self.get_active_sides,
+                get_end_effector_config=self.get_end_effector_config,
             )
         # Cache of constructed LeRobotDataset objects keyed by resolved path.
         # Building one parses metadata and the parquet index, which is far too

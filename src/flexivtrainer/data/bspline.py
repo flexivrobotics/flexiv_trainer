@@ -19,9 +19,9 @@ The representation follows the B-spline Policy data layout:
 ``[parameter_row, knot + control_channels]``
 
 The knot vector occupies column zero. Remaining columns contain Cartesian
-control points represented as XYZ plus rotation-6D for every selected arm.
-The fixed-size matrix can be flattened into a normal one-dimensional LeRobot
-``action`` feature for training.
+control points represented as XYZ plus rotation-6D and optional gripper width
+for every selected arm. The fixed-size matrix can be flattened into a normal
+one-dimensional LeRobot ``action`` feature for training.
 """
 
 from __future__ import annotations
@@ -44,10 +44,11 @@ _ROTATION_6D_AXES = ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
 
 @dataclass(frozen=True, slots=True)
 class TCPActionLayout:
-    """Indices and output control names for one arm's TCP pose."""
+    """Indices and output control names for one arm's recorded action."""
 
     side: str
     pose_indices: tuple[int, ...]
+    gripper_width_index: int | None = None
 
     @property
     def control_names(self) -> tuple[str, ...]:
@@ -55,7 +56,12 @@ class TCPActionLayout:
         rotation = tuple(
             f"{self.side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_6D_AXES
         )
-        return position + rotation
+        gripper = (
+            (f"{self.side}.gripper.width",)
+            if self.gripper_width_index is not None
+            else ()
+        )
+        return position + rotation + gripper
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +124,7 @@ def detect_tcp_action_layouts(
             TCPActionLayout(
                 side=side,
                 pose_indices=tuple(name_to_index[name] for name in expected),
+                gripper_width_index=name_to_index.get(f"{side}.gripper.width"),
             )
         )
     return layouts
@@ -187,7 +194,7 @@ def extract_cartesian_controls(
     actions: np.ndarray,
     layouts: Sequence[TCPActionLayout],
 ) -> np.ndarray:
-    """Extract XYZ + rotation-6D controls from flat recorded action vectors."""
+    """Extract spline controls from flat recorded action vectors."""
 
     actions = np.asarray(actions, dtype=np.float64)
     if actions.ndim != 2:
@@ -200,7 +207,10 @@ def extract_cartesian_controls(
         pose = actions[:, layout.pose_indices]
         position = pose[:, :3]
         rotation_6d = quaternion_wxyz_to_rotation_6d(pose[:, 3:7])
-        controls.append(np.concatenate([position, rotation_6d], axis=1))
+        arm_controls = [position, rotation_6d]
+        if layout.gripper_width_index is not None:
+            arm_controls.append(actions[:, layout.gripper_width_index, None])
+        controls.append(np.concatenate(arm_controls, axis=1))
     result = np.concatenate(controls, axis=1)
     if np.any(~np.isfinite(result)):
         raise ValueError("Cartesian control trajectory contains non-finite values")
@@ -469,9 +479,42 @@ def parameter_feature_names(
 ) -> list[str]:
     """Names for a row-major flattened spline parameter matrix."""
 
+    if parameter_rows < 1:
+        raise ValueError("parameter_rows must be positive")
     control_names = [name for layout in layouts for name in layout.control_names]
+    if not control_names:
+        raise ValueError("At least one TCP action layout is required")
     names: list[str] = []
     for row in range(parameter_rows):
         names.append(f"bspline.row_{row:02d}.knot")
         names.extend(f"bspline.row_{row:02d}.{name}" for name in control_names)
     return names
+
+
+def parameter_matrix_shape(
+    layouts: Sequence[TCPActionLayout],
+    *,
+    parameter_rows: int,
+) -> tuple[int, int]:
+    """Return the logical row-major spline action shape."""
+
+    names = parameter_feature_names(layouts, parameter_rows=parameter_rows)
+    if len(names) % parameter_rows:
+        raise ValueError("B-spline feature names do not form complete rows")
+    return parameter_rows, len(names) // parameter_rows
+
+
+def validate_parameter_matrix_shape(
+    parameters: np.ndarray,
+    layouts: Sequence[TCPActionLayout],
+    *,
+    parameter_rows: int,
+) -> None:
+    """Validate the logical spline dimensions of one or more targets."""
+
+    actual = np.asarray(parameters).shape
+    expected = parameter_matrix_shape(layouts, parameter_rows=parameter_rows)
+    if len(actual) < 2 or actual[-2:] != expected:
+        raise ValueError(
+            f"B-spline parameters end with shape {actual[-2:]}, expected {expected}"
+        )

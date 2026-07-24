@@ -35,7 +35,9 @@ from flexivtrainer.data.bspline import (
     detect_tcp_action_layouts,
     extract_cartesian_controls,
     parameter_feature_names,
+    parameter_matrix_shape,
     rotation_6d_to_matrix,
+    validate_parameter_matrix_shape,
 )
 
 _INFO_PATH = Path("meta/info.json")
@@ -131,8 +133,8 @@ def _episode_error_report(
 ) -> tuple[float, float]:
     max_translation_error = 0.0
     max_rotation_error = 0.0
-    for arm_index, _layout in enumerate(layouts):
-        start = arm_index * 9
+    start = 0
+    for layout in layouts:
         translation_error = np.linalg.norm(
             reconstructed[:, start : start + 3] - controls[:, start : start + 3],
             axis=1,
@@ -153,6 +155,7 @@ def _episode_error_report(
             max_rotation_error,
             float(np.max(difference.magnitude())),
         )
+        start += len(layout.control_names)
     return max_translation_error, math.degrees(max_rotation_error)
 
 
@@ -188,6 +191,11 @@ def _build_targets(
             max_error=max_error,
             smoothing=smoothing,
             max_knots=max_knots,
+        )
+        validate_parameter_matrix_shape(
+            result.parameters,
+            layouts,
+            parameter_rows=chunk_size + 2 * degree,
         )
 
         sample_times = np.arange(len(controls), dtype=np.float64)
@@ -313,11 +321,12 @@ def _refresh_action_statistics(
     root: Path,
     targets: dict[tuple[int, int], np.ndarray],
     action_feature: dict[str, Any],
+    *,
+    parameter_rows: int,
 ) -> None:
     try:
         import pandas as pd
         from lerobot.datasets.dataset_tools import (
-            aggregate_stats,
             compute_episode_stats,
             write_stats,
         )
@@ -328,20 +337,48 @@ def _refresh_action_statistics(
     for (episode_index, frame_index), target in targets.items():
         by_episode[episode_index].append((frame_index, target))
 
-    episode_stats: dict[int, dict[str, Any]] = {}
-    for episode_index, entries in by_episode.items():
-        ordered = np.stack([value for _, value in sorted(entries)])
-        episode_stats[episode_index] = compute_episode_stats(
+    def tied_stats(ordered: np.ndarray) -> dict[str, Any]:
+        if ordered.shape[1] % parameter_rows:
+            raise ValueError(
+                f"Action width {ordered.shape[1]} is not divisible by "
+                f"{parameter_rows} parameter rows"
+            )
+        channel_count = ordered.shape[1] // parameter_rows
+        row_stats = compute_episode_stats(
             {"action": ordered},
             {"action": action_feature},
         )["action"]
+        tied: dict[str, Any] = {"count": row_stats["count"]}
+        for stat_name, value in row_stats.items():
+            if stat_name == "count":
+                continue
+            values = np.asarray(value).reshape(parameter_rows, channel_count)
+            if stat_name == "min":
+                channel_values = np.min(values, axis=0)
+            elif stat_name == "max":
+                channel_values = np.max(values, axis=0)
+            else:
+                channel_values = np.mean(values, axis=0)
+            tied[stat_name] = np.tile(channel_values, parameter_rows)
+        return tied
+
+    episode_stats: dict[int, dict[str, Any]] = {}
+    for episode_index, entries in by_episode.items():
+        ordered = np.stack([value for _, value in sorted(entries)])
+        episode_stats[episode_index] = tied_stats(ordered)
 
     stats_path = root / "meta" / "stats.json"
     existing_stats = _read_json(stats_path) if stats_path.exists() else {}
-    aggregated = aggregate_stats(
-        [{"action": episode_stats[index]} for index in sorted(episode_stats)]
+    all_targets = np.stack(
+        [
+            target
+            for _key, target in sorted(
+                targets.items(),
+                key=lambda item: item[0],
+            )
+        ]
     )
-    existing_stats["action"] = aggregated["action"]
+    existing_stats["action"] = tied_stats(all_targets)
     write_stats(existing_stats, root)
 
     updated_episodes: set[int] = set()
@@ -457,7 +494,9 @@ def convert_lerobot_tcp_actions_to_bspline(
 
     parameter_rows = chunk_size + 2 * degree
     control_names = [name for layout in layouts for name in layout.control_names]
-    matrix_shape = [parameter_rows, 1 + len(control_names)]
+    matrix_shape = list(
+        parameter_matrix_shape(layouts, parameter_rows=parameter_rows)
+    )
     flattened_action_dim = math.prod(matrix_shape)
     flattened_names = parameter_feature_names(
         layouts,
@@ -477,11 +516,17 @@ def convert_lerobot_tcp_actions_to_bspline(
     )
 
     metadata = {
-        "format_version": 1,
+        "format_version": 2,
         "source_dataset": str(source),
         "source_action_names": action_names,
         "selected_sides": [layout.side for layout in layouts],
         "control_names": control_names,
+        "parameter_channel_names": ["knot", *control_names],
+        "gripper_width_sides": [
+            layout.side
+            for layout in layouts
+            if layout.gripper_width_index is not None
+        ],
         "rotation_representation": "rotation_6d_rows",
         "degree": degree,
         "chunk_size": chunk_size,
@@ -494,6 +539,7 @@ def convert_lerobot_tcp_actions_to_bspline(
         "flatten_order": "row_major",
         "active_control_rows": parameter_rows - (degree + 1),
         "flattened_action_dim": flattened_action_dim,
+        "normalization_mode": "tied_per_semantic_channel",
         "episodes": episode_reports,
     }
 
@@ -508,7 +554,12 @@ def convert_lerobot_tcp_actions_to_bspline(
             encoding="utf-8",
         )
         _replace_action_data(staging, targets, converted_info["features"])
-        _refresh_action_statistics(staging, targets, action_feature)
+        _refresh_action_statistics(
+            staging,
+            targets,
+            action_feature,
+            parameter_rows=parameter_rows,
+        )
         (staging / _BSPLINE_METADATA_PATH).write_text(
             json.dumps(metadata, indent=4) + "\n",
             encoding="utf-8",

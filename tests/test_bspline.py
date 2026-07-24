@@ -6,8 +6,12 @@ from flexivtrainer.data.bspline import (
     build_episode_spline_targets,
     detect_tcp_action_layouts,
     evaluate_parameter_matrix,
+    extract_cartesian_controls,
+    parameter_feature_names,
+    parameter_matrix_shape,
     quaternion_wxyz_to_rotation_6d,
     rotation_6d_to_quaternion_wxyz,
+    validate_parameter_matrix_shape,
 )
 
 
@@ -40,6 +44,61 @@ def test_detect_tcp_action_layouts_uses_named_axes() -> None:
 def test_detect_tcp_action_layouts_rejects_incomplete_pose() -> None:
     with pytest.raises(ValueError, match="Incomplete TCP pose"):
         detect_tcp_action_layouts(["left_arm.tcp_pose.x"], sides=["left_arm"])
+
+
+def test_layout_includes_gripper_width_and_excludes_force() -> None:
+    names = [
+        *_pose_names("left_arm"),
+        "left_arm.gripper.force",
+        "left_arm.gripper.width",
+    ]
+    layouts = detect_tcp_action_layouts(names)
+    actions = np.zeros((2, len(names)), dtype=np.float64)
+    actions[:, 3] = 1.0
+    actions[:, 7] = 20.0
+    actions[:, 8] = [0.01, 0.02]
+
+    controls = extract_cartesian_controls(actions, layouts)
+
+    assert layouts[0].gripper_width_index == 8
+    assert controls.shape == (2, 10)
+    np.testing.assert_array_equal(controls[:, -1], [0.01, 0.02])
+    assert layouts[0].control_names[-1] == "left_arm.gripper.width"
+    assert all("force" not in name for name in layouts[0].control_names)
+
+
+def test_parameter_layout_is_row_major_for_dual_arm() -> None:
+    names = [
+        *_pose_names("left_arm"),
+        "left_arm.gripper.width",
+        *_pose_names("right_arm"),
+        "right_arm.gripper.width",
+    ]
+    layouts = detect_tcp_action_layouts(names)
+
+    shape = parameter_matrix_shape(layouts, parameter_rows=16)
+    feature_names = parameter_feature_names(layouts, parameter_rows=16)
+
+    assert shape == (16, 21)
+    assert len(feature_names) == 336
+    assert feature_names[:3] == [
+        "bspline.row_00.knot",
+        "bspline.row_00.left_arm.tcp_pose.x",
+        "bspline.row_00.left_arm.tcp_pose.y",
+    ]
+    assert feature_names[20] == "bspline.row_00.right_arm.gripper.width"
+    assert feature_names[21] == "bspline.row_01.knot"
+    validate_parameter_matrix_shape(
+        np.zeros((4, 16, 21)),
+        layouts,
+        parameter_rows=16,
+    )
+    with pytest.raises(ValueError, match="expected \\(16, 21\\)"):
+        validate_parameter_matrix_shape(
+            np.zeros((4, 16, 20)),
+            layouts,
+            parameter_rows=16,
+        )
 
 
 def test_rotation_6d_round_trip_preserves_orientation() -> None:
@@ -86,8 +145,15 @@ def test_episode_targets_preserve_fitted_curve_over_each_local_segment() -> None
     )
 
     assert result.parameters.shape == (frame_count, 16, 10)
+    assert np.all(np.isfinite(result.parameters))
     for frame_index, parameters in enumerate(result.parameters):
         assert np.all(np.diff(parameters[:, 0]) >= 0)
+        assert parameters[3, 0] <= 0 <= parameters[-4, 0]
+        np.testing.assert_allclose(
+            evaluate_parameter_matrix(parameters, [0.0], degree=3)[0],
+            result.fit.spline(frame_index),
+            atol=1e-5,
+        )
         start = float(parameters[3, 0])
         end = float(parameters[-4, 0])
         local_times = np.linspace(start, end, 7)

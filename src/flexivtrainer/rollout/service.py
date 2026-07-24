@@ -22,6 +22,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,16 @@ from flexivtrainer.data.lerobot_io import (
 )
 from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.policies import bspline_diffusion as bspline_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
+from flexivtrainer.rollout.bspline_executor import (
+    BSplineActionLayout,
+    BSplineExecutor,
+    BSplineInstallResult,
+    parse_bspline_action_layout,
+)
+from flexivtrainer.rollout.gripper_executor import GripperExecutor
 from flexivtrainer.rollout.waypoint_executor import (
     WaypointExecutor,
     build_action_layout,
@@ -46,6 +55,7 @@ from flexivtrainer.rollout.waypoint_executor import (
 )
 
 _ROLLOUT_OVERRIDES = {
+    "bspline_diffusion": bspline_policy.apply_rollout_overrides,
     "diffusion": diffusion_policy.apply_rollout_overrides,
     "multi_task_dit": dit_policy.apply_rollout_overrides,
 }
@@ -110,6 +120,8 @@ def _default_policy_loader(checkpoint_path: str, device: str) -> Any:
         make_pre_post_processors,
     )
 
+    import flexivtrainer.policies.lerobot_plugins  # noqa: F401, PLC0415
+
     model_dir = _checkpoint_model_dir(checkpoint_path)
     config = PreTrainedConfig.from_pretrained(model_dir)
     policy = get_policy_class(config.type).from_pretrained(model_dir)
@@ -169,7 +181,7 @@ def _checkpoint_target_hz(checkpoint_path: str) -> float | None:
                     return fps
 
     config = _read_json(model_dir / "config.json") or {}
-    for key in ("fps", "dataset_fps", "action_dt_hz"):
+    for key in ("knot_rate_hz", "fps", "dataset_fps", "action_dt_hz"):
         if fps := _positive_float(config.get(key)):
             return fps
     return None
@@ -261,8 +273,12 @@ def _predict_action_chunk(
 ) -> tuple[Any, bool]:
     """Return an action chunk and whether it came from fresh inference."""
     import torch  # noqa: PLC0415
-    from lerobot.common.control_utils import predict_action  # noqa: PLC0415
     from lerobot.utils.constants import ACTION  # noqa: PLC0415
+
+    try:
+        from lerobot.common.control_utils import predict_action  # noqa: PLC0415
+    except ImportError:
+        from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
 
     torch_device = torch.device(device)
     queues = getattr(policy, "_queues", None)
@@ -295,6 +311,27 @@ def _predict_action_chunk(
     return chunk, fresh
 
 
+def _prepare_policy_observation(
+    observation: dict[str, Any],
+    device: str,
+    preprocessor: Any,
+    *,
+    task: str | None = None,
+) -> dict[str, Any]:
+    import torch  # noqa: PLC0415
+    from lerobot.policies.utils import (  # noqa: PLC0415
+        prepare_observation_for_inference,
+    )
+
+    with torch.inference_mode():
+        batch = prepare_observation_for_inference(
+            dict(observation),
+            torch.device(device),
+            task=task,
+        )
+        return preprocessor(batch)
+
+
 def _cuda_sync(device: str) -> None:
     """Synchronize CUDA so inference timing includes queued work."""
     if not str(device).startswith("cuda"):
@@ -319,6 +356,7 @@ class RolloutService:
         get_robot_pairs: Callable[[], list[TeleopRobotPair]],
         get_active_sides: Callable[[], list[str]],
         *,
+        get_end_effector_config: Callable[[], dict[str, Any]] | None = None,
         policy_loader: Callable[[str, str], Any] = _default_policy_loader,
         robot_factory: Callable[[str], Any] = _default_robot_factory,
         resolve_device: Callable[[str], str] | None = None,
@@ -328,6 +366,7 @@ class RolloutService:
         self._teleop = teleop
         self._get_robot_pairs = get_robot_pairs
         self._get_active_sides = get_active_sides
+        self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._policy_loader = policy_loader
         self._robot_factory = robot_factory
         if resolve_device is None:
@@ -347,6 +386,8 @@ class RolloutService:
         self._thread: threading.Thread | None = None
         self._target_hz: float | None = None
         self._waypoint_executor: WaypointExecutor | None = None
+        self._bspline_executor: BSplineExecutor | None = None
+        self._gripper_executor: GripperExecutor | None = None
         self._stop_event = threading.Event()
         self._logs: deque[str] = deque(maxlen=2000)
         self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
@@ -409,13 +450,6 @@ class RolloutService:
         ]
         if not followers:
             raise RuntimeError("No follower robot serial is configured")
-        target_hz = _checkpoint_target_hz(checkpoint_path)
-        if target_hz is None:
-            target_hz = float(self._settings.rollout.action_dt_hz)
-            warn(
-                "Checkpoint FPS metadata not found",
-                f"falling back to rollout.action_dt_hz={target_hz:.1f}",
-            )
 
         try:
             policy, preprocessor, postprocessor = self._policy_loader(
@@ -428,23 +462,82 @@ class RolloutService:
         policy_type = getattr(
             getattr(policy, "config", None), "type", None
         ) or getattr(policy, "name", "")
+        is_bspline = policy_type == "bspline_diffusion"
+        target_hz = self._resolve_target_hz(
+            checkpoint_path, policy, require_metadata=is_bspline
+        )
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
         override_fn = _ROLLOUT_OVERRIDES.get(policy_type)
         scheduler_overridden = (
             override_fn(policy, rollout_cfg) if override_fn is not None else False
         )
-        self._apply_n_action_steps(policy, rollout_cfg)
+        bspline_layout: BSplineActionLayout | None = None
+        end_effector_config: dict[str, Any] = {}
+        if is_bspline:
+            bspline_layout = self._preflight_bspline(
+                policy, sides, followers, target_hz
+            )
+            end_effector_config = dict(self._get_end_effector_config() or {})
+            self._preflight_bspline_grippers(
+                bspline_layout, end_effector_config
+            )
+        else:
+            self._apply_n_action_steps(policy, rollout_cfg)
+
+        self._stop_event.clear()
         robots: list[Any] = []
+        bspline_executor: BSplineExecutor | None = None
+        gripper_executor: GripperExecutor | None = None
         try:
             for serial in followers:
-                robots.append(self._connect_robot(serial))
+                robots.append(
+                    self._connect_robot(serial, prepare_motion=not is_bspline)
+                )
+            if bspline_layout is not None:
+                config = policy.config
+                app_rollout = self._settings.rollout
+                bspline_executor = BSplineExecutor(
+                    robots,
+                    config.action_feature_names,
+                    self._stop_event,
+                    (
+                        app_rollout.max_linear_vel,
+                        app_rollout.max_angular_vel,
+                        app_rollout.max_linear_acc,
+                        app_rollout.max_angular_acc,
+                    ),
+                    checkpoint_fps=target_hz,
+                    degree=config.spline_degree,
+                    control_hz=rollout_cfg.control_hz,
+                    speed_scale=rollout_cfg.speed_scale,
+                    predict_before_end_s=rollout_cfg.predict_before_end_s,
+                    time_align_error_threshold=(
+                        rollout_cfg.time_align_error_threshold
+                    ),
+                    time_align_max_fraction=rollout_cfg.time_align_max_fraction,
+                )
+                if bspline_layout.gripper_sides:
+                    gripper_executor = GripperExecutor(
+                        robots,
+                        sides,
+                        end_effector_config,
+                        bspline_layout.gripper_sides,
+                        target_source=lambda: (
+                            bspline_executor.last_gripper_widths
+                        ),
+                        failure_event=self._stop_event,
+                    )
+                    gripper_executor.initialize()
+                for serial, robot in zip(followers, robots, strict=True):
+                    self._prepare_robot_motion(robot, serial)
         except Exception as exc:
+            if gripper_executor is not None:
+                gripper_executor.stop()
             self._stop_robots(robots)
             raise RuntimeError(
                 f"Failed to connect to robot: {describe_exception(exc)}"
             ) from exc
 
-        self._stop_event.clear()
         with self._lock:
             self._checkpoint_path = checkpoint_path
             self._task = task
@@ -453,6 +546,8 @@ class RolloutService:
             self._robots = robots
             self._device = device
             self._target_hz = target_hz
+            self._bspline_executor = bspline_executor
+            self._gripper_executor = gripper_executor
             self._running = True
             self._logs.clear()
             self._metrics.clear()
@@ -475,12 +570,21 @@ class RolloutService:
                         f"inference_steps={rollout_cfg.num_denoise_steps}",
                     )
                 )
-        thread = threading.Thread(
-            target=self._policy_planner_loop,
-            args=(
+        if bspline_executor is None:
+            target = self._policy_planner_loop
+            args = (
                 policy, preprocessor, postprocessor, robots, sides,
                 rollout_cfg, target_hz, task,
-            ),
+            )
+        else:
+            target = self._bspline_planner_loop
+            args = (
+                policy, preprocessor, postprocessor, robots, sides,
+                rollout_cfg, target_hz, bspline_executor, gripper_executor, task,
+            )
+        thread = threading.Thread(
+            target=target,
+            args=args,
             daemon=True,
             name="rollout-policy-planner",
         )
@@ -490,16 +594,37 @@ class RolloutService:
 
     def stop(self) -> dict[str, Any]:
         self._stop_event.set()
+        cleanup_errors: list[str] = []
         # Stop robot commands before releasing their connections.
         executor = self._waypoint_executor
         if executor is not None:
             executor.join()
+        bspline_executor = self._bspline_executor
+        if bspline_executor is not None and not bspline_executor.join():
+            self._stop_robots(list(self._robots))
+            if not bspline_executor.join(timeout=0.5):
+                cleanup_errors.append(
+                    "B-spline Cartesian executor did not stop cleanly"
+                )
+        gripper_executor = self._gripper_executor
+        if gripper_executor is not None:
+            try:
+                gripper_executor.stop()
+            except Exception as exc:
+                self._stop_robots(list(self._robots))
+                cleanup_errors.append(describe_exception(exc))
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+            if thread.is_alive():
+                cleanup_errors.append("Rollout planner did not stop cleanly")
         self._thread = None
+        self._bspline_executor = None
+        self._gripper_executor = None
         self._release_robots()
         with self._lock:
+            if cleanup_errors and self._error is None:
+                self._error = "; ".join(cleanup_errors)
             # Only attribute the stop to the operator when the run did not
             # already end on its own (max_steps reached or a fault recorded).
             if self._stop_reason is None and self._error is None:
@@ -516,6 +641,106 @@ class RolloutService:
     def _teleop_initialized(self) -> bool:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
+
+    def _resolve_target_hz(
+        self,
+        checkpoint_path: str,
+        policy: Any,
+        *,
+        require_metadata: bool,
+    ) -> float:
+        config_rate = _positive_float(
+            getattr(getattr(policy, "config", None), "knot_rate_hz", None)
+        )
+        target_hz = config_rate or _checkpoint_target_hz(checkpoint_path)
+        if target_hz is not None:
+            return target_hz
+        if require_metadata:
+            raise RuntimeError(
+                "B-spline checkpoint has no knot_rate_hz or recoverable "
+                "training dataset FPS"
+            )
+        target_hz = float(self._settings.rollout.action_dt_hz)
+        warn(
+            "Checkpoint FPS metadata not found",
+            f"falling back to rollout.action_dt_hz={target_hz:.1f}",
+        )
+        return target_hz
+
+    @staticmethod
+    def _preflight_bspline(
+        policy: Any,
+        sides: list[str],
+        followers: list[str],
+        target_hz: float,
+    ) -> BSplineActionLayout:
+        config = getattr(policy, "config", None)
+        if config is None:
+            raise RuntimeError("B-spline policy has no checkpoint configuration")
+        names = getattr(config, "action_feature_names", None)
+        if not isinstance(names, list | tuple):
+            raise RuntimeError(
+                "B-spline checkpoint has no action feature names"
+            )
+        try:
+            layout = parse_bspline_action_layout(names)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if layout.rows != getattr(config, "horizon", None):
+            raise RuntimeError(
+                "B-spline action rows do not match the checkpoint horizon"
+            )
+        if tuple(layout.sides) != tuple(sides):
+            raise RuntimeError(
+                "B-spline checkpoint arm layout does not match active sides: "
+                f"checkpoint={list(layout.sides)} active={sides}"
+            )
+        if len(followers) != len(sides):
+            raise RuntimeError(
+                "Every active B-spline arm must have a follower robot serial"
+            )
+        if not _positive_float(target_hz):
+            raise RuntimeError("B-spline checkpoint knot rate must be positive")
+        degree = getattr(config, "spline_degree", 3)
+        if (
+            isinstance(degree, bool)
+            or not isinstance(degree, int)
+            or degree < 1
+            or layout.rows <= degree + 1
+        ):
+            raise RuntimeError(
+                "B-spline checkpoint has an invalid spline degree"
+            )
+        for method in ("enqueue_observation", "predict_action_chunk"):
+            if not callable(getattr(policy, method, None)):
+                raise RuntimeError(
+                    f"B-spline policy does not implement {method}()"
+                )
+        return layout
+
+    @staticmethod
+    def _config_value(config: Any, name: str) -> Any:
+        if isinstance(config, dict):
+            return config.get(name)
+        return getattr(config, name, None)
+
+    @classmethod
+    def _preflight_bspline_grippers(
+        cls,
+        layout: BSplineActionLayout,
+        configs: dict[str, Any],
+    ) -> None:
+        for side in layout.gripper_sides:
+            config = configs.get(side)
+            if (
+                config is None
+                or cls._config_value(config, "follower") != "gripper"
+                or not cls._config_value(config, "gripper_model")
+            ):
+                raise RuntimeError(
+                    "B-spline checkpoint predicts gripper width but no follower "
+                    f"gripper is configured for {side}"
+                )
 
     def _apply_n_action_steps(self, policy: Any, rollout_cfg: Any) -> None:
         # reset() rebuilds the policy action queue from this configured length.
@@ -552,7 +777,7 @@ class RolloutService:
                 )
             )
 
-    def _connect_robot(self, serial: str) -> Any:
+    def _connect_robot(self, serial: str, *, prepare_motion: bool = True) -> Any:
         robot = self._robot_factory(serial)
         if robot.fault():
             robot.ClearFault()
@@ -560,11 +785,15 @@ class RolloutService:
         while not robot.operational():
             if self._stop_event.wait(0.1):
                 break
+        if prepare_motion:
+            self._prepare_robot_motion(robot, serial)
+        return robot
+
+    def _prepare_robot_motion(self, robot: Any, serial: str) -> None:
         if _zero_ft_sensor(robot, self._stop_event):
             self._append_log("INFO", "ROLLOUT", "F/T sensor zeroed", serial)
         mode = _rdk_mode()
         robot.SwitchMode(mode.NRT_CARTESIAN_MOTION_FORCE)
-        return robot
 
     def _release_robots(self) -> None:
         with self._lock:
@@ -581,7 +810,12 @@ class RolloutService:
             except Exception:  # pragma: no cover - hardware specific
                 pass
 
-    def _read_robot_snapshot(self, robots: list[Any]) -> dict[str, Any]:
+    def _read_robot_snapshot(
+        self,
+        robots: list[Any],
+        gripper_states: dict[str, dict[str, float]] | None = None,
+        sides: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Build the robot snapshot shape consumed by the LeRobot I/O helpers."""
         robots_payload: dict[str, Any] = {}
         for index, robot in enumerate(robots):
@@ -589,7 +823,7 @@ class RolloutService:
             tcp_pose = [float(v) for v in states.tcp_pose]
             tcp_vel = [float(v) for v in states.tcp_vel]
             wrench = [float(v) for v in states.ext_wrench_in_world]
-            robots_payload[f"robot_{index}"] = {
+            payload = {
                 "connected": True,
                 "states": {
                     "tcp_pose": tcp_pose,
@@ -603,10 +837,232 @@ class RolloutService:
                     "ext_wrench_d": wrench,
                 },
             }
+            if (
+                gripper_states is not None
+                and sides is not None
+                and index < len(sides)
+                and sides[index] in gripper_states
+            ):
+                payload["gripper"] = dict(gripper_states[sides[index]])
+            robots_payload[f"robot_{index}"] = payload
         return {"robots": robots_payload, "errors": {}}
 
     def _planner_hz(self) -> float:
         return float(self._target_hz or self._settings.rollout.planner_hz)
+
+    @staticmethod
+    def _bspline_action_vector(actions: Any) -> np.ndarray:
+        detached = getattr(actions, "detach", None)
+        if callable(detached):
+            actions = actions.detach().cpu().numpy()
+        array = np.asarray(actions, dtype=np.float64)
+        if array.ndim == 3 and array.shape[:2] == (1, 1):
+            return array[0, 0]
+        if array.ndim == 2 and array.shape[0] == 1:
+            return array[0]
+        if array.ndim == 1:
+            return array
+        raise ValueError(
+            "B-spline policy must return one flat action, got "
+            f"shape={array.shape}"
+        )
+
+    def _infer_bspline_plan(
+        self,
+        policy: Any,
+        postprocessor: Any,
+        executor: BSplineExecutor,
+    ) -> tuple[float, BSplineInstallResult | None]:
+        infer_started = time.monotonic()
+        actions = policy.predict_action_chunk()
+        _cuda_sync(self._device)
+        actions = postprocessor(actions)
+        _cuda_sync(self._device)
+        inference_latency = time.monotonic() - infer_started
+        if self._stop_event.is_set():
+            return inference_latency, None
+        result = executor.install(
+            self._bspline_action_vector(actions),
+            inference_latency_s=inference_latency,
+        )
+        return inference_latency, result
+
+    def _bspline_planner_loop(
+        self,
+        policy: Any,
+        preprocessor: Any,
+        postprocessor: Any,
+        robots: list[Any],
+        sides: list[str],
+        rollout_cfg: Any,
+        target_hz: float,
+        executor: BSplineExecutor,
+        gripper: GripperExecutor | None,
+        task: str | None = None,
+    ) -> None:
+        policy.reset()
+        period = 1.0 / target_hz
+        next_observation = time.monotonic()
+        camera_names = resolve_recording_image_names(None, sides)
+        max_steps = self._settings.rollout.max_steps
+        inference_latency = 0.0
+        alignment_error = 0.0
+        step = 0
+        inference_future: (
+            Future[tuple[float, BSplineInstallResult | None]] | None
+        ) = None
+        inference_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="rollout-bspline-inference"
+        )
+        try:
+            executor.start()
+            if gripper is not None:
+                gripper.start()
+            while True:
+                if gripper is not None and gripper.error is not None:
+                    raise RuntimeError(
+                        f"B-spline gripper failed: {describe_exception(gripper.error)}"
+                    )
+                if self._stop_event.is_set():
+                    if executor.error is not None:
+                        raise RuntimeError(executor.error)
+                    break
+                for robot in robots:
+                    if robot.fault():
+                        raise RuntimeError("Fault occurred on a follower robot")
+
+                installed = False
+                if inference_future is not None and inference_future.done():
+                    inference_latency, result = inference_future.result()
+                    inference_future = None
+                    if result is not None:
+                        alignment_error = result.alignment_error
+                        installed = True
+                        if result.warning is not None:
+                            warn("B-spline handoff warning", result.warning)
+                            self._append_log(
+                                "WARNING",
+                                "ROLLOUT",
+                                "B-spline handoff warning",
+                                result.warning,
+                            )
+
+                now = time.monotonic()
+                observed = now >= next_observation
+                snapshot: dict[str, Any] | None = None
+                if observed:
+                    gripper_states = (
+                        gripper.measured_states() if gripper is not None else None
+                    )
+                    images = self._grab_images(camera_names)
+                    snapshot = self._read_robot_snapshot(
+                        robots, gripper_states, sides
+                    )
+                    observation = self._build_observation(
+                        snapshot, images, sides
+                    )
+                    prepared = _prepare_policy_observation(
+                        observation,
+                        self._device,
+                        preprocessor,
+                        task=task,
+                    )
+                    policy.enqueue_observation(prepared)
+                    step += 1
+                    missed = max(
+                        0, int((time.monotonic() - next_observation) // period)
+                    )
+                    next_observation += (missed + 1) * period
+
+                if inference_future is None and executor.replan_needed():
+                    inference_future = inference_pool.submit(
+                        self._infer_bspline_plan,
+                        policy,
+                        postprocessor,
+                        executor,
+                    )
+
+                executor_status = executor.status()
+                self._metrics.append(
+                    {
+                        "t": round(time.monotonic(), 3),
+                        "step": step,
+                        "send_hz": round(
+                            executor_status.achieved_send_hz, 2
+                        ),
+                        "missed_deadlines": executor_status.missed_deadlines,
+                        "spline_remaining_s": (
+                            None
+                            if executor_status.remaining_s is None
+                            else round(executor_status.remaining_s, 4)
+                        ),
+                        "infer_ms": round(inference_latency * 1000.0, 1),
+                        "alignment_error": round(alignment_error, 6),
+                        "handoff_warnings": executor_status.handoff_warnings,
+                        "fresh": installed,
+                    }
+                )
+                if max_steps and step >= max_steps:
+                    with self._lock:
+                        self._stop_reason = "timeout"
+                    break
+
+                now = time.monotonic()
+                wake_at = next_observation
+                if inference_future is not None:
+                    wake_at = min(wake_at, now + 0.01)
+                else:
+                    remaining = executor.remaining_s(now)
+                    until_replan = max(
+                        0.0,
+                        (remaining or 0.0)
+                        - rollout_cfg.predict_before_end_s,
+                    )
+                    wake_at = min(wake_at, now + until_replan)
+                self._stop_event.wait(max(0.0, wake_at - now))
+        except Exception as exc:
+            detail = describe_exception(exc)
+            with self._lock:
+                self._error = detail
+                self._running = False
+                self._logs.append(
+                    _encode_ui_log("ERROR", "ROLLOUT", "Rollout stopped", detail)
+                )
+            warn("Rollout stopped", detail)
+        finally:
+            self._stop_event.set()
+            inference_pool.shutdown(wait=True, cancel_futures=True)
+            if not executor.join():
+                self._stop_robots(robots)
+                if not executor.join(timeout=0.5):
+                    with self._lock:
+                        self._error = (
+                            self._error
+                            or "B-spline Cartesian executor did not stop cleanly"
+                        )
+            if gripper is not None:
+                try:
+                    gripper.stop()
+                except Exception as exc:
+                    self._stop_robots(robots)
+                    warn("B-spline gripper shutdown failed", describe_exception(exc))
+                    with self._lock:
+                        self._error = self._error or describe_exception(exc)
+            self._bspline_executor = None
+            self._gripper_executor = None
+            self._release_robots()
+            with self._lock:
+                self._running = False
+                reason = self._stop_reason or "stopped"
+                if self._error is None:
+                    self._logs.append(
+                        _encode_ui_log(
+                            "INFO",
+                            "ROLLOUT",
+                            "Rollout ended",
+                            f"reason={reason} steps={step}",
+                        )
+                    )
 
     def _policy_planner_loop(
         self,
