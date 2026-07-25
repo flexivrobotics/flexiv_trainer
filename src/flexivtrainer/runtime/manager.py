@@ -167,6 +167,7 @@ class RuntimeManager:
                 self.teleop,
                 self.get_teleop_robot_pairs,
                 self.get_active_sides,
+                get_end_effector_config=self.get_end_effector_config,
             )
         # Cache of constructed LeRobotDataset objects keyed by resolved path.
         # Building one parses metadata and the parquet index, which is far too
@@ -582,7 +583,7 @@ class RuntimeManager:
                 "created": _entry_created_time(child),
             }
             if annotate_checkpoint_dirs and child.is_dir():
-                from flexivtrainer.rollout.service import (  # noqa: PLC0415
+                from flexivtrainer.rollout.checkpoint import (  # noqa: PLC0415
                     _checkpoint_policy_type,
                 )
 

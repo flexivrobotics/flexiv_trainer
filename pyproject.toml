@@ -15,7 +15,7 @@ dependencies = [
   "pydantic-settings>=2.14,<3.0",
   "typer>=0.25,<1.0",
   "numpy>=1.26",
-  "scipy>=1.11",
+  "scipy>=1.15",
   "flexivrdk==1.9.2",
   "flexivtdk==1.6.2",
   "lerobot[training,multi-task-dit,diffusion,smolvla,pi]==0.6.0",
@@ -31,6 +31,7 @@ dev = [
 [project.scripts]
 flexiv-trainer-server = "flexivtrainer.api.app:run"
 flexivtrainer-server = "flexivtrainer.api.app:run"
+flexivtrainer-convert-bspline = "flexivtrainer.cli.convert_bspline_dataset:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flexivtrainer"]

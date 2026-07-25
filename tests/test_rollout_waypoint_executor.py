@@ -16,7 +16,7 @@ import threading
 
 import pytest
 
-from flexivtrainer.rollout.waypoint_executor import (
+from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     build_action_layout,
 )

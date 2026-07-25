@@ -23,14 +23,17 @@ import pytest
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
-from flexivtrainer.rollout.service import (
-    RolloutService,
+from flexivtrainer.rollout import hardware, observations
+from flexivtrainer.rollout.checkpoint import (
     _checkpoint_policy_type,
     _checkpoint_requires_task,
     _checkpoint_target_hz,
-    _zero_ft_sensor,
 )
-from flexivtrainer.rollout.waypoint_executor import WaypointExecutor
+from flexivtrainer.rollout.executors.waypoint import WaypointExecutor
+from flexivtrainer.rollout.hardware import _zero_ft_sensor
+from flexivtrainer.rollout.runners.bspline import BSplineRunner
+from flexivtrainer.rollout.runners.waypoint import WaypointRunner
+from flexivtrainer.rollout.service import RolloutService
 
 
 class _FakeRobotStates:
@@ -203,14 +206,19 @@ def _make_service(tmp_path, *, policy, robot):
 
 def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(
             NRT_PRIMITIVE_EXECUTION="prim",
             NRT_CARTESIAN_MOTION_FORCE="cmf",
         ),
     )
     service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
-    robot = service._connect_robot("F1")
+    robot = hardware.connect_robot(
+        service._robot_factory,
+        "F1",
+        service._stop_event,
+        prepare_motion=service._prepare_motion,
+    )
 
     assert robot.primitives == [("ZeroFTSensor", {})]
     assert robot.mode_history == ["prim", "cmf"]
@@ -218,7 +226,7 @@ def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) 
 
 def test_connect_robot_without_primitive_support(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(
             NRT_PRIMITIVE_EXECUTION="prim",
             NRT_CARTESIAN_MOTION_FORCE="cmf",
@@ -229,14 +237,19 @@ def test_connect_robot_without_primitive_support(tmp_path, monkeypatch) -> None:
 
     robot = _NoPrimitiveRobot("F1")
     service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
-    connected = service._connect_robot("F1")
+    connected = hardware.connect_robot(
+        service._robot_factory,
+        "F1",
+        service._stop_event,
+        prepare_motion=service._prepare_motion,
+    )
 
     assert connected.mode_history == ["cmf"]
 
 
 def test_zero_ft_sensor_returns_false_without_primitive(monkeypatch) -> None:
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_PRIMITIVE_EXECUTION="prim"),
     )
 
@@ -284,11 +297,11 @@ def test_start_refuses_without_follower_serial(tmp_path) -> None:
 
 def test_actions_to_lists_handles_chunk_and_single() -> None:
     # Bare 1-D action -> single-element outer list.
-    assert RolloutService._actions_to_lists(
+    assert WaypointRunner._actions_to_lists(
         np.array([1.0, 2.0, 3.0])
     ) == [[1.0, 2.0, 3.0]]
     # 2-D chunk -> one inner list per step.
-    assert RolloutService._actions_to_lists(
+    assert WaypointRunner._actions_to_lists(
         np.array([[1.0, 2.0], [3.0, 4.0]])
     ) == [[1.0, 2.0], [3.0, 4.0]]
 
@@ -305,7 +318,7 @@ def test_actions_to_lists_handles_chunk_and_single() -> None:
         def numpy(self):
             return self._data
 
-    assert RolloutService._actions_to_lists(_TorchLike([[4.0, 5.0]])) == [[4.0, 5.0]]
+    assert WaypointRunner._actions_to_lists(_TorchLike([[4.0, 5.0]])) == [[4.0, 5.0]]
 
 
 def test_diffusion_scheduler_override_swaps_to_ddim(tmp_path) -> None:
@@ -424,12 +437,280 @@ def test_checkpoint_policy_type_and_requires_task(tmp_path) -> None:
     assert _checkpoint_requires_task(str(bare)) is True
 
 
+def _bspline_action_names(
+    rows: int = 16,
+    side: str = "single_arm",
+    *,
+    gripper: bool = False,
+) -> list[str]:
+    channels = [
+        "knot",
+        *(f"{side}.tcp_pose.{axis}" for axis in ("x", "y", "z")),
+        *(
+            f"{side}.tcp_rotation_6d.{axis}"
+            for axis in ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
+        ),
+    ]
+    if gripper:
+        channels.append(f"{side}.gripper.width")
+    return [
+        f"bspline.row_{row:02d}.{channel}"
+        for row in range(rows)
+        for channel in channels
+    ]
+
+
+class _FakeBSplinePolicy:
+    def __init__(self, action: np.ndarray, *, knot_rate_hz: float | None) -> None:
+        self.config = SimpleNamespace(
+            type="bspline_diffusion",
+            action_feature_names=_bspline_action_names(),
+            horizon=16,
+            spline_degree=3,
+            knot_rate_hz=knot_rate_hz,
+        )
+        self.action = action.reshape(1, 1, -1)
+        self.observations: list[dict] = []
+
+    def reset(self) -> None:
+        self.observations.clear()
+
+    def enqueue_observation(self, batch: dict) -> None:
+        self.observations.append(batch)
+
+    def predict_action_chunk(self) -> np.ndarray:
+        return self.action.copy()
+
+
+def _constant_bspline_action(*, end_time: float = 9.0) -> np.ndarray:
+    matrix = np.zeros((16, 10), dtype=np.float64)
+    matrix[:, 0] = np.concatenate(
+        [
+            np.zeros(4),
+            np.linspace(end_time / 9, end_time * 8 / 9, 8),
+            np.full(4, end_time),
+        ]
+    )
+    matrix[:, 1:4] = [0.4, -0.1, 0.3]
+    matrix[:, 4:10] = [1, 0, 0, 0, 1, 0]
+    return matrix.reshape(-1)
+
+
+def test_bspline_missing_timing_fails_before_robot_initialization(tmp_path) -> None:
+    checkpoint = _checkpoint_of_type(tmp_path, "bspline_diffusion")
+    initialized = []
+    policy = _FakeBSplinePolicy(
+        _constant_bspline_action(), knot_rate_hz=None
+    )
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        _single_arm_pairs,
+        lambda: ["single_arm"],
+        policy_loader=lambda path, device: (
+            initialized.append("policy")
+            or (policy, _identity_processor, _identity_processor)
+        ),
+        robot_factory=lambda serial: initialized.append("robot"),
+        resolve_device=lambda configured: "cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="no knot_rate_hz"):
+        service.start(checkpoint)
+
+    assert initialized == ["policy"]
+
+
+def test_bspline_malformed_layout_fails_before_robot_initialization(
+    tmp_path,
+) -> None:
+    checkpoint = _checkpoint_of_type(tmp_path, "bspline_diffusion")
+    initialized = []
+    policy = _FakeBSplinePolicy(_constant_bspline_action(), knot_rate_hz=10)
+    policy.config.action_feature_names[0] = "action.0"
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        _single_arm_pairs,
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: initialized.append("robot"),
+        resolve_device=lambda configured: "cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="Malformed B-spline"):
+        service.start(checkpoint)
+
+    assert initialized == []
+
+
+def test_bspline_gripper_contract_fails_before_robot_initialization(
+    tmp_path,
+) -> None:
+    checkpoint = _checkpoint_of_type(tmp_path, "bspline_diffusion")
+    initialized = []
+    policy = _FakeBSplinePolicy(_constant_bspline_action(), knot_rate_hz=10)
+    policy.config.action_feature_names = _bspline_action_names(gripper=True)
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        _single_arm_pairs,
+        lambda: ["single_arm"],
+        get_end_effector_config=lambda: {
+            "single_arm": {"follower": "none"}
+        },
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: initialized.append("robot"),
+        resolve_device=lambda configured: "cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="no follower gripper"):
+        service.start(checkpoint)
+
+    assert initialized == []
+
+
+def test_robot_snapshot_includes_measured_gripper_telemetry(tmp_path) -> None:
+    _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
+
+    snapshot = observations.read_robot_snapshot(
+        [_FakeRobot("F1")],
+        {"single_arm": {"width": 0.04, "force": -2.0}},
+        ["single_arm"],
+    )
+
+    assert snapshot["robots"]["robot_0"]["gripper"] == {
+        "width": 0.04,
+        "force": -2.0,
+    }
+
+
+def test_stop_releases_robot_when_gripper_shutdown_fails(tmp_path) -> None:
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
+
+    class FailingStop:
+        def stop(self) -> None:
+            raise RuntimeError("worker stuck")
+
+    runner = object.__new__(BSplineRunner)
+    runner._robots = [robot]
+    runner._thread = None
+    runner._bspline_executor = None
+    runner._gripper_executor = FailingStop()
+    runner._stop_robots = hardware.stop_robots
+
+    service._running = True
+    service._robots = [robot]
+    service._runner = runner
+
+    status = service.stop()
+
+    assert service._robots == []
+    assert status["status"] == "failed"
+    assert "worker stuck" in status["error"]
+
+
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:
     """Start the loop and stop it after at least one command is sent."""
     service.start(checkpoint)
     deadline = time.monotonic() + 2.0
     while not robot.commands and time.monotonic() < deadline:
         time.sleep(0.01)
+    service.stop()
+
+
+def test_bspline_rollout_decodes_before_cartesian_dispatch(
+    tmp_path, monkeypatch
+) -> None:
+    policy = _FakeBSplinePolicy(_constant_bspline_action(), knot_rate_hz=10)
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._prepare_policy_observation",
+        lambda observation, device, preprocessor, **kwargs: observation,
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+
+    _run_one_tick(
+        service,
+        robot,
+        _checkpoint_of_type(tmp_path, "bspline_diffusion"),
+    )
+
+    assert policy.observations
+    assert robot.commands
+    pose, wrench, velocity = robot.commands[0]
+    assert pose == pytest.approx([0.4, -0.1, 0.3, 1, 0, 0, 0])
+    assert wrench == [0.0] * 6
+    assert velocity == [0.0] * 6
+    assert len(pose) == 7
+    metrics = service.status()["metrics"]
+    assert metrics
+    assert set(metrics[-1]) >= {
+        "send_hz",
+        "missed_deadlines",
+        "spline_remaining_s",
+        "infer_ms",
+        "alignment_error",
+        "handoff_warnings",
+    }
+
+
+def test_bspline_observations_continue_during_slow_inference(
+    tmp_path, monkeypatch
+) -> None:
+    inference_started = threading.Event()
+    inference_release = threading.Event()
+
+    class SlowPolicy(_FakeBSplinePolicy):
+        def __init__(self) -> None:
+            super().__init__(
+                _constant_bspline_action(end_time=2.0),
+                knot_rate_hz=10,
+            )
+            self.inference_count = 0
+
+        def predict_action_chunk(self) -> np.ndarray:
+            self.inference_count += 1
+            if self.inference_count == 2:
+                inference_started.set()
+                assert inference_release.wait(timeout=2.0)
+            return super().predict_action_chunk()
+
+    policy = SlowPolicy()
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._prepare_policy_observation",
+        lambda observation, device, preprocessor, **kwargs: observation,
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+
+    service.start(_checkpoint_of_type(tmp_path, "bspline_diffusion"))
+    assert inference_started.wait(timeout=2.0)
+    observations_before = len(policy.observations)
+    commands_before = len(robot.commands)
+    time.sleep(0.22)
+
+    assert len(policy.observations) >= observations_before + 2
+    assert len(robot.commands) > commands_before
+    inference_release.set()
     service.stop()
 
 
@@ -454,7 +735,7 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
     # Inference runs through lerobot's predict_action (needs torch/lerobot); patch
     # the wrapper to call the fake policy directly so the test stays hermetic.
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action_chunk",
+        "flexivtrainer.rollout.observations._predict_action_chunk",
         lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
             True,
@@ -462,7 +743,7 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
     )
     # Patch the RDK mode lookup so no real flexivrdk import is needed.
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
@@ -506,10 +787,10 @@ def test_start_threads_task_into_prediction(tmp_path, monkeypatch) -> None:
         return np.tile(pol.select_action(obs), (8, 1)), True
 
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+        "flexivtrainer.rollout.observations._predict_action_chunk", _fake_predict
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
@@ -535,10 +816,10 @@ def test_start_normalizes_blank_task_to_none(tmp_path, monkeypatch) -> None:
         return np.tile(pol.select_action(obs), (8, 1)), True
 
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+        "flexivtrainer.rollout.observations._predict_action_chunk", _fake_predict
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
@@ -567,14 +848,14 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
         resolve_device=lambda configured: "cpu",
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action_chunk",
+        "flexivtrainer.rollout.observations._predict_action_chunk",
         lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
             True,
         ),
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
@@ -613,14 +894,14 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
         resolve_device=lambda configured: "cpu",
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action_chunk",
+        "flexivtrainer.rollout.observations._predict_action_chunk",
         lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
             True,
         ),
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
@@ -669,10 +950,10 @@ def test_overlapped_replan_forces_and_extends_committed_path(
         return np.tile(pol.select_action(obs), (8, 1)), force
 
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action_chunk", _fake_predict
+        "flexivtrainer.rollout.observations._predict_action_chunk", _fake_predict
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
@@ -742,14 +1023,14 @@ def test_rollout_for_selects_per_policy_config_and_loop_runs_for_act(
     robot = _FakeRobot("F1")
     service = _make_service(tmp_path, policy=policy, robot=robot)
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._predict_action_chunk",
+        "flexivtrainer.rollout.observations._predict_action_chunk",
         lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
             True,
         ),
     )
     monkeypatch.setattr(
-        "flexivtrainer.rollout.service._rdk_mode",
+        "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
@@ -764,3 +1045,43 @@ def test_env_var_plumbs_into_rollout_config(monkeypatch) -> None:
     )
     settings = AppSettings()
     assert settings.policies.diffusion.rollout.replan_steps == 4
+
+
+def test_max_steps_reports_timeout_stop_reason(tmp_path, monkeypatch) -> None:
+    # The runner ends the run itself at max_steps; the service must publish that
+    # reason instead of attributing the stop to the operator.
+    policy = _FakePolicy([float(i) for i in range(19)])
+    robot = _FakeRobot("F1")
+    settings = _settings(tmp_path)
+    settings.rollout.max_steps = 2
+    service = RolloutService(
+        settings,
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: [TeleopRobotPair(leader_serial="L1", follower_serial="F1")],
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cpu",
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path))
+    deadline = time.monotonic() + 3.0
+    while service.status()["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    status = service.stop()
+
+    assert status["stop_reason"] == "timeout"
+    assert status["error"] is None
+    assert any("reason=timeout steps=2" in line for line in status["logs"])

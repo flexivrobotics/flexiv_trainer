@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -41,6 +42,12 @@ from flexivtrainer.observability import (
 from flexivtrainer.policies import training_field_schema
 
 POLICY_CATALOG = {
+    "bspline_diffusion": {
+        "label": "B-Spline Diffusion",
+        "description": (
+            "Diffusion policy that predicts smooth B-spline trajectory parameters."
+        ),
+    },
     "diffusion": {
         "label": "Diffusion",
         "description": "Default policy for this project. Good general-purpose multimodal action modeling.",
@@ -609,6 +616,97 @@ class TrainingService:
             result[key] = {"type": feature_type, "shape": shape}
         return result
 
+    def _bspline_dataset_contract(self, dataset_root: Path) -> dict[str, Any]:
+        info = self._read_json(dataset_root / "meta" / "info.json")
+        metadata_path = dataset_root / "meta" / "bspline.json"
+        if not metadata_path.is_file():
+            raise ValueError(
+                "B-spline Diffusion requires format-v2 meta/bspline.json"
+            )
+        metadata = self._read_json(metadata_path)
+        if metadata.get("format_version") != 2:
+            raise ValueError("B-spline dataset format_version must be 2")
+
+        degree = metadata.get("degree")
+        if isinstance(degree, bool) or not isinstance(degree, int) or degree < 1:
+            raise ValueError("B-spline dataset degree must be a positive integer")
+        fps = info.get("fps")
+        if (
+            isinstance(fps, bool)
+            or not isinstance(fps, int | float)
+            or not math.isfinite(fps)
+            or fps <= 0
+        ):
+            raise ValueError("B-spline dataset fps must be positive")
+
+        shape = metadata.get("parameter_matrix_shape")
+        if (
+            not isinstance(shape, list)
+            or len(shape) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+                for value in shape
+            )
+        ):
+            raise ValueError(
+                "B-spline parameter_matrix_shape must contain two positive integers"
+            )
+        horizon, channels = shape
+        chunk_size = metadata.get("chunk_size")
+        if (
+            isinstance(chunk_size, bool)
+            or not isinstance(chunk_size, int)
+            or chunk_size < 1
+            or horizon != chunk_size + 2 * degree
+        ):
+            raise ValueError(
+                "B-spline horizon must equal chunk_size + 2 * degree"
+            )
+        if metadata.get("active_control_rows") != horizon - degree - 1:
+            raise ValueError("B-spline active_control_rows is inconsistent")
+        if metadata.get("knot_units") != "source_frames":
+            raise ValueError("B-spline knot_units must be source_frames")
+        if metadata.get("flatten_order") != "row_major":
+            raise ValueError("B-spline flatten_order must be row_major")
+
+        features = info.get("features")
+        action = features.get("action") if isinstance(features, dict) else None
+        action_shape = action.get("shape") if isinstance(action, dict) else None
+        action_names = action.get("names") if isinstance(action, dict) else None
+        channel_names = metadata.get("parameter_channel_names")
+        if (
+            action_shape != [horizon * channels]
+            or metadata.get("flattened_action_dim") != horizon * channels
+        ):
+            raise ValueError(
+                "B-spline flattened action width does not match its logical shape"
+            )
+        if (
+            not isinstance(channel_names, list)
+            or len(channel_names) != channels
+            or not all(isinstance(name, str) for name in channel_names)
+        ):
+            raise ValueError(
+                "B-spline parameter_channel_names does not match its logical shape"
+            )
+        expected_names = [
+            f"bspline.row_{row:02d}.{channel}"
+            for row in range(horizon)
+            for channel in channel_names
+        ]
+        if action_names != expected_names:
+            raise ValueError(
+                "B-spline action names must match the row-major logical shape"
+            )
+        return {
+            "degree": degree,
+            "knot_rate_hz": float(fps),
+            "horizon": horizon,
+            "action_feature_names": action_names,
+        }
+
     @staticmethod
     def _dataset_depth_keys(info: dict[str, Any]) -> set[str]:
         features = info.get("features")
@@ -648,6 +746,47 @@ class TrainingService:
         dataset_info = self._read_json(dataset_root / "meta" / "info.json")
         actual = self._dataset_policy_features(dataset_info)
         policy_config = checkpoint_info["policy_config"]
+        if checkpoint_info["policy_type"] == "bspline_diffusion":
+            contract = self._bspline_dataset_contract(dataset_root)
+            checkpoint_degree = policy_config.get("spline_degree", 3)
+            if checkpoint_degree != contract["degree"]:
+                raise ValueError(
+                    "Dataset is incompatible with checkpoint spline_degree: "
+                    f"checkpoint={checkpoint_degree}, "
+                    f"dataset={contract['degree']}"
+                )
+            if policy_config.get("horizon") != contract["horizon"]:
+                raise ValueError(
+                    "Dataset is incompatible with checkpoint horizon: "
+                    f"checkpoint={policy_config.get('horizon')}, "
+                    f"dataset={contract['horizon']}"
+                )
+            checkpoint_rate = policy_config.get("knot_rate_hz")
+            if checkpoint_rate is not None and (
+                isinstance(checkpoint_rate, bool)
+                or not isinstance(checkpoint_rate, int | float)
+                or not math.isfinite(checkpoint_rate)
+                or checkpoint_rate <= 0
+                or not math.isclose(
+                    checkpoint_rate,
+                    contract["knot_rate_hz"],
+                    rel_tol=1e-9,
+                    abs_tol=0,
+                )
+            ):
+                raise ValueError(
+                    "Dataset is incompatible with checkpoint knot_rate_hz: "
+                    f"checkpoint={checkpoint_rate}, "
+                    f"dataset={contract['knot_rate_hz']}"
+                )
+            checkpoint_names = policy_config.get("action_feature_names")
+            if (
+                checkpoint_names is not None
+                and checkpoint_names != contract["action_feature_names"]
+            ):
+                raise ValueError(
+                    "Dataset is incompatible with checkpoint action_feature_names"
+                )
         expected: dict[str, Any] = {}
         for group in ("input_features", "output_features"):
             value = policy_config.get(group)
@@ -720,12 +859,15 @@ class TrainingService:
             repo_id, resolved_root = self._resolve_dataset(dataset_root)
             output_dir = self._resolve_output_dir(output_dir)
             checkpoint_info: dict[str, Any] | None = None
+            bspline_contract: dict[str, Any] | None = None
             if training_mode == "fine_tune":
                 if checkpoint_path is None:
                     raise ValueError("checkpoint_path is required for fine-tuning")
                 checkpoint_info = self.inspect_checkpoint(checkpoint_path)
                 policy_type = checkpoint_info["policy_type"]
                 self._validate_checkpoint_dataset(checkpoint_info, resolved_root)
+            elif policy_type == "bspline_diffusion":
+                bspline_contract = self._bspline_dataset_contract(resolved_root)
             # lerobot-train creates output_dir itself and refuses to run if it
             # already exists (resume is False), so only ensure the parent here.
             output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -754,12 +896,19 @@ class TrainingService:
             else:
                 command = [executable]
 
+            # LeRobot treats policy-scoped discovery as a --policy.path override.
             command.extend(
                 [
                     "--dataset.repo_id",
                     repo_id,
                     "--dataset.root",
                     str(resolved_root),
+                    (
+                        "--discover_packages_path="
+                        if checkpoint_info is not None
+                        else "--policy.discover_packages_path="
+                    )
+                    + "flexivtrainer.policies.lerobot_plugins",
                 ]
             )
             device = resolve_training_device(self._settings.training.default_device)
@@ -809,6 +958,22 @@ class TrainingService:
                             extra_args, checkpoint_info["fields"]
                         )
                     )
+            if bspline_contract is not None:
+                command.extend(
+                    [
+                        f"--policy.horizon={bspline_contract['horizon']}",
+                        f"--policy.spline_degree={bspline_contract['degree']}",
+                        (
+                            "--policy.knot_rate_hz="
+                            f"{bspline_contract['knot_rate_hz']:g}"
+                        ),
+                        "--policy.action_feature_names="
+                        + json.dumps(
+                            bspline_contract["action_feature_names"],
+                            separators=(",", ":"),
+                        ),
+                    ]
+                )
 
             print_command("Training command", command)
 

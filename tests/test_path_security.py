@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from flexivtrainer.config import AppSettings, RobotSerialConfig, StorageConfig
-from flexivtrainer.rollout.service import resolve_checkpoint_path
+from flexivtrainer.rollout.checkpoint import resolve_checkpoint_path
 from flexivtrainer.runtime.manager import RuntimeManager
 
 

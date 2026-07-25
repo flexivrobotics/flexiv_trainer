@@ -330,12 +330,12 @@ class _PoseLogger:
 def _connect_robot(serial: str, stop_event: threading.Event) -> Any:
     """Connect/enable a Flexiv robot and switch to NRT Cartesian motion-force.
 
-    Mirrors ``RolloutService._connect_robot``: clear fault, enable, wait until
+    Mirrors ``rollout.hardware.connect_robot``: clear fault, enable, wait until
     operational, zero the F/T sensor, then ``SwitchMode(NRT_CARTESIAN_MOTION_FORCE)``.
     """
     import flexivrdk  # noqa: PLC0415
 
-    from flexivtrainer.rollout.service import _zero_ft_sensor  # noqa: PLC0415
+    from flexivtrainer.rollout.hardware import _zero_ft_sensor  # noqa: PLC0415
 
     robot = flexivrdk.Robot(serial)
     if robot.fault():

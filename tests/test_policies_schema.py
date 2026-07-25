@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from flexivtrainer.policies import training_field_schema
+from flexivtrainer.policies import PolicyConfig, training_field_schema
 
 
 def test_act_field_schema_order_and_flags() -> None:
@@ -69,6 +69,30 @@ def test_multi_task_dit_field_schema() -> None:
     assert by_name["horizon"]["flag"] == "--policy.horizon"
     assert by_name["horizon"]["default"] == 10
     assert by_name["vision_encoder_name"]["type"] == "str"
+
+
+def test_bspline_diffusion_field_schema_has_fixed_outer_action_step() -> None:
+    schema = training_field_schema("bspline_diffusion")
+    by_name = {field["name"]: field for field in schema}
+
+    assert by_name["horizon"]["default"] == 16
+    assert by_name["horizon"]["hint"] == "spline parameter rows"
+    assert by_name["n_obs_steps"]["default"] == 2
+    assert "n_action_steps" not in by_name
+
+
+def test_bspline_diffusion_rollout_family_defaults() -> None:
+    config = PolicyConfig()
+    rollout = config.bspline_diffusion.rollout
+
+    assert config.rollout_for("bspline_diffusion") is rollout
+    assert rollout.control_hz == 200
+    assert rollout.speed_scale == 1.0
+    assert rollout.predict_before_end_s == 0.06
+    assert rollout.time_align_error_threshold == 0.1
+    assert rollout.time_align_max_fraction == 0.2
+    assert rollout.noise_scheduler_type == "DDIM"
+    assert rollout.num_denoise_steps == 16
 
 
 def test_temporal_ensemble_coeff_is_float_not_optional_string() -> None:

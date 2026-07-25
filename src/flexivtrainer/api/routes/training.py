@@ -131,6 +131,7 @@ def start_training(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     if result.get("status") == "running":
         ok("Training job started", f"job_id={result.get('job_id', 'unknown')}")
     else:

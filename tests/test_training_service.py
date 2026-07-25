@@ -44,9 +44,15 @@ def make_job(tmp_path: Path) -> TrainingJob:
     )
 
 
-def make_dataset(tmp_path: Path, *, state_size: int = 7) -> Path:
+def make_dataset(
+    tmp_path: Path,
+    *,
+    state_size: int = 7,
+    action_size: int | None = None,
+) -> Path:
     root = tmp_path / "datasets" / "fine_tune_data"
     (root / "meta").mkdir(parents=True)
+    action_size = state_size if action_size is None else action_size
     info = {
         "features": {
             "observation.images.ego": {
@@ -61,8 +67,8 @@ def make_dataset(tmp_path: Path, *, state_size: int = 7) -> Path:
             },
             "action": {
                 "dtype": "float32",
-                "shape": [state_size],
-                "names": [f"joint_{i}" for i in range(state_size)],
+                "shape": [action_size],
+                "names": [f"action_{i}" for i in range(action_size)],
             },
         }
     }
@@ -70,7 +76,50 @@ def make_dataset(tmp_path: Path, *, state_size: int = 7) -> Path:
     return root
 
 
-def make_checkpoint(tmp_path: Path, *, policy_type: str = "diffusion") -> Path:
+def make_bspline_dataset(
+    tmp_path: Path,
+    *,
+    degree: int = 3,
+    fps: int | float = 10,
+    horizon: int = 16,
+    channels: int = 10,
+) -> Path:
+    root = make_dataset(tmp_path, action_size=horizon * channels)
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    channel_names = ["knot", *(f"control_{index}" for index in range(channels - 1))]
+    action_names = [
+        f"bspline.row_{row:02d}.{channel}"
+        for row in range(horizon)
+        for channel in channel_names
+    ]
+    info["fps"] = fps
+    info["features"]["action"]["names"] = action_names
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    metadata = {
+        "format_version": 2,
+        "degree": degree,
+        "chunk_size": horizon - 2 * degree,
+        "knot_units": "source_frames",
+        "parameter_matrix_shape": [horizon, channels],
+        "parameter_channel_names": channel_names,
+        "flatten_order": "row_major",
+        "active_control_rows": horizon - degree - 1,
+        "flattened_action_dim": horizon * channels,
+    }
+    (root / "meta" / "bspline.json").write_text(
+        json.dumps(metadata),
+        encoding="utf-8",
+    )
+    return root
+
+
+def make_checkpoint(
+    tmp_path: Path,
+    *,
+    policy_type: str = "diffusion",
+    action_size: int = 7,
+) -> Path:
     step = tmp_path / "training" / "source_run" / "checkpoints" / "005000"
     model = step / "pretrained_model"
     model.mkdir(parents=True)
@@ -80,11 +129,13 @@ def make_checkpoint(tmp_path: Path, *, policy_type: str = "diffusion") -> Path:
             "observation.images.ego": {"type": "VISUAL", "shape": [3, 480, 640]},
             "observation.state": {"type": "STATE", "shape": [7]},
         },
-        "output_features": {"action": {"type": "ACTION", "shape": [7]}},
+        "output_features": {"action": {"type": "ACTION", "shape": [action_size]}},
         "optimizer_lr": 3e-5,
         "vision_encoder_lr_multiplier": 0.2,
         "freeze_vision_encoder": True,
     }
+    if policy_type == "bspline_diffusion":
+        config["horizon"] = 16
     (model / "config.json").write_text(json.dumps(config), encoding="utf-8")
     (model / "model.safetensors").write_bytes(b"weights")
     return step
@@ -245,6 +296,7 @@ def test_inspect_checkpoint_accepts_step_and_model_dirs(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("policy_type", "policy_fields"),
     [
+        ("bspline_diffusion", {"optimizer_lr"}),
         ("diffusion", {"optimizer_lr"}),
         ("act", {"optimizer_lr"}),
         ("smolvla", {"optimizer_lr", "freeze_vision_encoder"}),
@@ -359,6 +411,60 @@ def test_fine_tune_dataset_feature_validation(tmp_path: Path) -> None:
         service._validate_checkpoint_dataset(checkpoint, missing_action)
 
 
+def test_bspline_fine_tune_rejects_incompatible_flat_action_width(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    checkpoint = service.inspect_checkpoint(
+        make_checkpoint(
+            tmp_path,
+            policy_type="bspline_diffusion",
+            action_size=160,
+        )
+    )
+
+    service._validate_checkpoint_dataset(
+        checkpoint,
+        make_bspline_dataset(tmp_path),
+    )
+    with pytest.raises(ValueError, match="action"):
+        service._validate_checkpoint_dataset(
+            checkpoint,
+            make_bspline_dataset(tmp_path / "incompatible", channels=11),
+        )
+
+
+def test_bspline_fine_tune_validates_checkpoint_spline_metadata(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    step = make_checkpoint(
+        tmp_path,
+        policy_type="bspline_diffusion",
+        action_size=160,
+    )
+    config_path = step / "pretrained_model" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.update({"spline_degree": 3, "knot_rate_hz": 10.0})
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    checkpoint = service.inspect_checkpoint(step)
+
+    service._validate_checkpoint_dataset(
+        checkpoint,
+        make_bspline_dataset(tmp_path),
+    )
+    with pytest.raises(ValueError, match="spline_degree"):
+        service._validate_checkpoint_dataset(
+            checkpoint,
+            make_bspline_dataset(tmp_path / "degree", degree=2),
+        )
+    with pytest.raises(ValueError, match="knot_rate_hz"):
+        service._validate_checkpoint_dataset(
+            checkpoint,
+            make_bspline_dataset(tmp_path / "fps", fps=20),
+        )
+
+
 def test_fine_tune_extra_args_are_whitelisted_and_normalized(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     checkpoint = service.inspect_checkpoint(make_checkpoint(tmp_path))
@@ -405,6 +511,10 @@ def test_start_fine_tune_builds_new_pretrained_run_command(
     assert "--policy.device=cpu" in command
     assert "--policy.push_to_hub=false" in command
     assert "--policy.optimizer_lr=1e-5" in command
+    assert (
+        "--discover_packages_path=flexivtrainer.policies.lerobot_plugins"
+        in command
+    )
     assert "--policy.type" not in command
     assert "--resume" not in command
     assert command[command.index("--dataset.root") + 1] == str(dataset.resolve())
@@ -437,7 +547,82 @@ def test_start_new_policy_keeps_existing_policy_arguments(
     assert snapshot["checkpoint_path"] is None
     assert command[command.index("--policy.type") + 1] == "act"
     assert command[command.index("--policy.device") + 1] == "cpu"
+    assert (
+        "--policy.discover_packages_path=flexivtrainer.policies.lerobot_plugins"
+        in command
+    )
     assert "--policy.path" not in " ".join(command)
+
+
+def test_start_bspline_training_injects_authoritative_dataset_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = make_service(tmp_path)
+    dataset = make_bspline_dataset(tmp_path)
+    output = tmp_path / "training" / "bspline_run"
+    monkeypatch.setattr(train_policy.shutil, "which", lambda _: "/bin/lerobot-train")
+    monkeypatch.setattr(
+        train_policy.subprocess, "Popen", lambda *a, **kw: _FakeProcess()
+    )
+    monkeypatch.setattr(train_policy.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(train_policy, "Pulse", _FakePulse)
+    monkeypatch.setattr(train_policy, "resolve_training_device", lambda _: "cpu")
+
+    snapshot = service.start(
+        dataset,
+        output,
+        "bspline_diffusion",
+        extra_args=["--policy.horizon", "12"],
+    )
+
+    command = snapshot["command"]
+    assert command[-4:] == [
+        "--policy.horizon=16",
+        "--policy.spline_degree=3",
+        "--policy.knot_rate_hz=10",
+        (
+            "--policy.action_feature_names="
+            + json.dumps(
+                json.loads(
+                    (dataset / "meta" / "info.json").read_text(encoding="utf-8")
+                )["features"]["action"]["names"],
+                separators=(",", ":"),
+            )
+        ),
+    ]
+
+
+def test_start_bspline_training_rejects_invalid_format_before_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = make_service(tmp_path)
+    dataset = make_bspline_dataset(tmp_path)
+    metadata_path = dataset / "meta" / "bspline.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["parameter_matrix_shape"] = [15, 10]
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    called = False
+
+    def popen(*args, **kwargs):
+        nonlocal called
+        called = True
+        return _FakeProcess()
+
+    monkeypatch.setattr(train_policy.subprocess, "Popen", popen)
+
+    with pytest.raises(ValueError, match="horizon"):
+        service.start(
+            dataset,
+            tmp_path / "training" / "invalid_bspline_run",
+            "bspline_diffusion",
+        )
+    assert called is False
+
+
+def test_bspline_diffusion_is_listed_in_policy_catalog() -> None:
+    entry = train_policy.POLICY_CATALOG["bspline_diffusion"]
+
+    assert entry["label"] == "B-Spline Diffusion"
 
 
 def test_start_new_policy_explicitly_excludes_dataset_depth_inputs(
