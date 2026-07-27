@@ -28,6 +28,7 @@ from flexivtrainer.rollout.checkpoint import (
     _checkpoint_policy_type,
     _checkpoint_requires_task,
     _checkpoint_target_hz,
+    checkpoint_image_resolutions,
 )
 from flexivtrainer.rollout.executors.waypoint import WaypointExecutor
 from flexivtrainer.rollout.hardware import _zero_ft_sensor
@@ -435,6 +436,81 @@ def test_checkpoint_policy_type_and_requires_task(tmp_path) -> None:
     bare = tmp_path / "c"
     bare.mkdir()
     assert _checkpoint_requires_task(str(bare)) is True
+
+
+def _checkpoint_with_image_shapes(tmp_path, shapes: dict[str, list[int]]) -> str:
+    model = tmp_path / "ckpt" / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "type": "act",
+                "input_features": {
+                    f"observation.images.{name}": {"type": "VISUAL", "shape": shape}
+                    for name, shape in shapes.items()
+                }
+                | {"observation.state": {"type": "STATE", "shape": [38]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(tmp_path / "ckpt")
+
+
+def test_checkpoint_image_resolutions_reads_channels_first_shapes(tmp_path) -> None:
+    checkpoint = _checkpoint_with_image_shapes(
+        tmp_path, {"ego": [3, 240, 320], "left_wrist": [3, 480, 640]}
+    )
+
+    assert checkpoint_image_resolutions(checkpoint) == {
+        "ego": (240, 320),
+        "left_wrist": (480, 640),
+    }
+
+
+def test_checkpoint_image_resolutions_skips_channels_last_shapes(tmp_path) -> None:
+    # (height, width, channels) must not be misread as (240, 320) here.
+    checkpoint = _checkpoint_with_image_shapes(tmp_path, {"ego": [240, 320, 3]})
+
+    assert checkpoint_image_resolutions(checkpoint) == {}
+
+
+def _cameras_returning(images: dict[str, np.ndarray]):
+    return SimpleNamespace(
+        capture_frame=lambda name, **kwargs: {"image": images.get(name)}
+    )
+
+
+def test_grab_images_downscales_to_checkpoint_resolution() -> None:
+    # BGR red so the resize is checked alongside the RGB flip.
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[:, :, 2] = 255
+
+    images = observations.grab_images(
+        _cameras_returning({"ego": frame}), ["ego"], {"ego": (240, 320)}
+    )
+
+    assert images["ego"].shape == (240, 320, 3)
+    assert images["ego"][0, 0].tolist() == [255, 0, 0]
+
+
+def test_grab_images_passes_matching_frames_through() -> None:
+    frame = np.arange(240 * 320 * 3, dtype=np.uint8).reshape(240, 320, 3)
+
+    images = observations.grab_images(
+        _cameras_returning({"ego": frame}), ["ego"], {"ego": (240, 320)}
+    )
+
+    assert np.array_equal(images["ego"], frame[:, :, ::-1])
+
+
+def test_grab_images_rejects_aspect_ratio_mismatch() -> None:
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    with pytest.raises(RuntimeError, match="aspect ratio"):
+        observations.grab_images(
+            _cameras_returning({"ego": frame}), ["ego"], {"ego": (240, 240)}
+        )
 
 
 def _bspline_action_names(

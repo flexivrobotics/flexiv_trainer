@@ -63,6 +63,7 @@ class WaypointRunner:
         on_error: Callable[[str], None],
         on_finished: Callable[[str | None, int], None],
         release_robots: Callable[[], None],
+        image_resolutions: dict[str, tuple[int, int]] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -70,6 +71,7 @@ class WaypointRunner:
         self._robots = robots
         self._sides = sides
         self._cameras = cameras
+        self._image_resolutions = image_resolutions
         self._rollout_cfg = rollout_cfg
         self._target_hz = target_hz
         self._device = device
@@ -170,7 +172,9 @@ class WaypointRunner:
                 stage_times["fault_check"].append(now - mark)
                 mark = now
 
-                images = observations.grab_images(self._cameras, camera_names)
+                images = observations.grab_images(
+                    self._cameras, camera_names, self._image_resolutions
+                )
                 now = time.monotonic()
                 stage_times["grab_images"].append(now - mark)
                 mark = now

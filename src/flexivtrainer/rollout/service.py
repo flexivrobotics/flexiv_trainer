@@ -32,6 +32,7 @@ from flexivtrainer.rollout.checkpoint import (
     _checkpoint_target_hz,
     _default_policy_loader,
     _positive_float,
+    checkpoint_image_resolutions,
     resolve_checkpoint_path,
 )
 from flexivtrainer.rollout.executors.bspline import (
@@ -167,6 +168,7 @@ class RolloutService:
         target_hz = self._resolve_target_hz(
             checkpoint_path, policy, require_metadata=is_bspline
         )
+        image_resolutions = checkpoint_image_resolutions(checkpoint_path)
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
         override_fn = _ROLLOUT_OVERRIDES.get(policy_type)
         scheduler_overridden = (
@@ -222,6 +224,7 @@ class RolloutService:
                 sides=sides,
                 followers=followers,
                 cameras=self._cameras,
+                image_resolutions=image_resolutions,
                 rollout_cfg=rollout_cfg,
                 target_hz=target_hz,
                 device=device,
@@ -248,6 +251,7 @@ class RolloutService:
                 robots=robots,
                 sides=sides,
                 cameras=self._cameras,
+                image_resolutions=image_resolutions,
                 rollout_cfg=rollout_cfg,
                 target_hz=target_hz,
                 device=device,

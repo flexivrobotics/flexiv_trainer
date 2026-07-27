@@ -24,9 +24,13 @@ from flexivtrainer.data.lerobot_io import (
     extract_recording_frame_values,
     extract_recording_images,
 )
-from flexivtrainer.observability import warn
+from flexivtrainer.observability import info, warn
 
 _FORCE_REFRESH_WARNED = False
+_RESOLUTION_UNKNOWN_WARNED = False
+_RESIZE_LOGGED: set[str] = set()
+# Aspect ratios closer than this are treated as the same framing.
+_ASPECT_TOLERANCE = 0.02
 
 
 def _predict_action_chunk(
@@ -150,15 +154,56 @@ def read_robot_snapshot(
     return {"robots": robots_payload, "errors": {}}
 
 
-def grab_images(cameras: Any, camera_names: list[str]) -> dict[str, np.ndarray]:
+def _resize_to_trained_resolution(
+    name: str, image: np.ndarray, resolution: tuple[int, int]
+) -> np.ndarray:
+    """Match the checkpoint's image size, reusing the recording-time resize."""
+    from flexivtrainer.data.recording_service import _resize_frame  # noqa: PLC0415
+
+    height, width = int(image.shape[0]), int(image.shape[1])
+    target_height, target_width = resolution
+    target_aspect = target_width / target_height
+    if abs(width / height - target_aspect) > _ASPECT_TOLERANCE * target_aspect:
+        raise RuntimeError(
+            f"Camera '{name}' captures {width}x{height} but the checkpoint was "
+            f"trained on {target_width}x{target_height} (different aspect ratio); "
+            "set the camera width/height to match the checkpoint"
+        )
+    if (height, width) != (target_height, target_width) and name not in _RESIZE_LOGGED:
+        _RESIZE_LOGGED.add(name)
+        info(
+            "Resizing rollout frames to the trained resolution",
+            f"{name} {height}x{width} -> {target_height}x{target_width}",
+        )
+    return _resize_frame(image, resolution)
+
+
+def grab_images(
+    cameras: Any,
+    camera_names: list[str],
+    resolutions: dict[str, tuple[int, int]] | None = None,
+) -> dict[str, np.ndarray]:
+    if not resolutions:
+        global _RESOLUTION_UNKNOWN_WARNED
+        if not _RESOLUTION_UNKNOWN_WARNED:
+            _RESOLUTION_UNKNOWN_WARNED = True
+            warn(
+                "Checkpoint image resolution unknown",
+                "feeding raw camera frames to the policy without resizing",
+            )
     images: dict[str, np.ndarray] = {}
     for name in camera_names:
         frame = cameras.capture_frame(name, block=False, allow_cached=True)
         image = frame.get("image") if isinstance(frame, dict) else None
         if image is None:
             continue
+        image = np.asarray(image)
+        resolution = resolutions.get(name) if resolutions else None
+        if resolution is not None:
+            # Resize before the flip so the contiguous copy below is cheaper.
+            image = _resize_to_trained_resolution(name, image, resolution)
         # Cameras capture BGR; LeRobot policies were trained on RGB frames.
-        images[name] = np.ascontiguousarray(np.asarray(image)[:, :, ::-1])
+        images[name] = np.ascontiguousarray(image[:, :, ::-1])
     return images
 
 

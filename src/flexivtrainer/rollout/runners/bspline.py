@@ -65,6 +65,7 @@ class BSplineRunner:
         release_robots: Callable[[], None],
         stop_robots: Callable[[list[Any]], None],
         prepare_motion: Callable[[Any, str], None],
+        image_resolutions: dict[str, tuple[int, int]] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -73,6 +74,7 @@ class BSplineRunner:
         self._sides = sides
         self._followers = followers
         self._cameras = cameras
+        self._image_resolutions = image_resolutions
         self._rollout_cfg = rollout_cfg
         self._target_hz = target_hz
         self._device = device
@@ -285,7 +287,9 @@ class BSplineRunner:
                     gripper_states = (
                         gripper.measured_states() if gripper is not None else None
                     )
-                    images = observations.grab_images(self._cameras, camera_names)
+                    images = observations.grab_images(
+                        self._cameras, camera_names, self._image_resolutions
+                    )
                     snapshot = observations.read_robot_snapshot(
                         robots, gripper_states, sides
                     )
