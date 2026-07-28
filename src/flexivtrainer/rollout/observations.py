@@ -82,11 +82,19 @@ def _predict_action_chunk(
 
     fresh = action_queue is None or len(action_queue) == 0
 
+    # predict_action calls policy.select_action internally. If a cached action
+    # queue has entries, it pops the next one; otherwise it runs inference to
+    # produce/refill a chunk and returns its first action.
     first = predict_action(
         observation, policy, torch_device, preprocessor, postprocessor,
         use_amp=False, task=task,
     )
-    tail = list(action_queue) if action_queue is not None else []
+    # Only a fresh inference needs the rest of its chunk for waypoint scheduling.
+    # Cached-action ticks reuse the schedule already installed by that inference.
+    if not fresh or action_queue is None:
+        return first.reshape(1, -1), fresh
+
+    tail = list(action_queue)
     if not tail:
         return first.reshape(1, -1), fresh
     with torch.inference_mode():
@@ -231,6 +239,8 @@ def grab_images(
     camera_names: list[str],
     resolutions: dict[str, tuple[int, int]] | None = None,
 ) -> dict[str, np.ndarray]:
+    import cv2  # noqa: PLC0415
+
     if not resolutions:
         global _RESOLUTION_UNKNOWN_WARNED
         if not _RESOLUTION_UNKNOWN_WARNED:
@@ -248,10 +258,10 @@ def grab_images(
         image = np.asarray(image)
         resolution = resolutions.get(name) if resolutions else None
         if resolution is not None:
-            # Resize before the flip so the contiguous copy below is cheaper.
+            # Resize before color conversion so it processes fewer pixels.
             image = _resize_to_trained_resolution(name, image, resolution)
         # Cameras capture BGR; LeRobot policies were trained on RGB frames.
-        images[name] = np.ascontiguousarray(image[:, :, ::-1])
+        images[name] = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     return images
 
 
