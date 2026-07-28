@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -31,6 +32,18 @@ _RESOLUTION_UNKNOWN_WARNED = False
 _RESIZE_LOGGED: set[str] = set()
 # Aspect ratios closer than this are treated as the same framing.
 _ASPECT_TOLERANCE = 0.02
+
+
+def _policy_action_queue(policy: Any, action_key: str) -> Any:
+    """The policy's cached action chunk, or None when it holds no chunk.
+
+    Most LeRobot families key a ``_queues`` dict by feature; ACT instead keeps a
+    single ``_action_queue`` (and only when temporal ensembling is disabled).
+    """
+    queues = getattr(policy, "_queues", None)
+    if isinstance(queues, dict):
+        return queues.get(action_key)
+    return getattr(policy, "_action_queue", None)
 
 
 def _predict_action_chunk(
@@ -53,8 +66,7 @@ def _predict_action_chunk(
         from lerobot.utils.control_utils import predict_action  # noqa: PLC0415
 
     torch_device = torch.device(device)
-    queues = getattr(policy, "_queues", None)
-    action_queue = queues.get(ACTION) if isinstance(queues, dict) else None
+    action_queue = _policy_action_queue(policy, ACTION)
 
     if force_refresh:
         if action_queue is not None:
@@ -115,6 +127,42 @@ def _cuda_sync(device: str) -> None:
             torch.cuda.synchronize()
     except Exception:  # pragma: no cover - torch optional
         pass
+
+
+# Matches the teleop telemetry rate; the planner ticks ~3x faster than this.
+WRENCH_SAMPLE_PERIOD_S = 0.1
+
+
+def sample_wrench(
+    append: Callable[[dict[str, Any]], None] | None,
+    snapshot: dict[str, Any] | None,
+    sides: list[str],
+    now: float,
+    last_sample_t: float,
+) -> float:
+    """Append a ``{t, <side>: [fx,fy,fz,mx,my,mz]}`` sample; return its timestamp.
+
+    ``read_robot_snapshot`` inserts ``robot_0..robot_N`` in ``sides`` order, so
+    payloads zip onto side names positionally. ``snapshot`` is None on ticks that
+    skipped observation.
+    """
+    if append is None or not snapshot:
+        return last_sample_t
+    # Without the tolerance a 30 Hz tick lands at 0.0999... and halves the rate.
+    if now - last_sample_t < WRENCH_SAMPLE_PERIOD_S - 1e-3:
+        return last_sample_t
+
+    sample: dict[str, Any] = {"t": round(now, 3)}
+    payloads = snapshot.get("robots") or {}
+    for side, payload in zip(sides, payloads.values()):
+        states = payload.get("states") if isinstance(payload, dict) else None
+        wrench = (
+            states.get("ext_wrench_in_world") if isinstance(states, dict) else None
+        )
+        if isinstance(wrench, list) and len(wrench) >= 6:
+            sample[side] = [round(float(v), 4) for v in wrench[:6]]
+    append(sample)
+    return now
 
 
 def read_robot_snapshot(

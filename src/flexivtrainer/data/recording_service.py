@@ -114,6 +114,7 @@ class RecordingService:
         # saved under the same ``episodes/<job_name>/`` subfolder.
         self._job_name: str | None = None
         self._recording_entries: list[str] | None = None
+        self._aligned_cameras: list[str] = []
         self._resolution: tuple[int, int] | None = None
         self._recording_sides: list[str] | None = None
         self._staging_path: Path | None = None
@@ -179,6 +180,9 @@ class RecordingService:
             image_names = resolve_recording_image_names(entries, sides)
             depth_names = resolve_recording_depth_names(entries, sides)
             camera_names = list(dict.fromkeys([*image_names, *depth_names]))
+            # Alignment must be running before the preflight and the first grab
+            # below, which define the stored depth shape.
+            self._acquire_depth_alignment(depth_names)
             self._ensure_camera_streams(camera_names, depth_names=depth_names)
             images, depths = self._grab_camera_data(
                 image_names,
@@ -228,6 +232,7 @@ class RecordingService:
             )
         except Exception as exc:
             shutil.rmtree(staging_path, ignore_errors=True)
+            self._release_depth_alignment()
             if isinstance(exc, RuntimeError):
                 raise
             raise RuntimeError(f"Failed to create dataset: {exc}") from exc
@@ -267,6 +272,7 @@ class RecordingService:
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=5.0)
             self._capture_thread = None
+        self._release_depth_alignment()
 
         with self._lock:
             self._active = False
@@ -423,6 +429,17 @@ class RecordingService:
 
         raise RuntimeError("Unable to allocate a unique staging directory")
 
+    def _acquire_depth_alignment(self, depth_names: list[str]) -> None:
+        if not depth_names:
+            return
+        self._cameras.acquire_depth_alignment(depth_names)
+        self._aligned_cameras = list(depth_names)
+
+    def _release_depth_alignment(self) -> None:
+        held, self._aligned_cameras = self._aligned_cameras, []
+        if held:
+            self._cameras.release_depth_alignment(held)
+
     def _ensure_camera_streams(
         self, camera_names: list[str], *, depth_names: list[str] | None = None
     ) -> None:
@@ -542,6 +559,14 @@ class RecordingService:
                         images[camera_name] = rgb
 
                 if camera_name in depth_names:
+                    # Depth is only cached while alignment runs, so an unaligned
+                    # camera means the acquire/release pairing broke. Fail rather
+                    # than record depth that does not match its color frame.
+                    if not self._cameras.depth_alignment_active(camera_name):
+                        raise RuntimeError(
+                            f"{camera_name}: depth alignment is not active; "
+                            "refusing to record unaligned depth"
+                        )
                     depth = frame.get("depth") if isinstance(frame, dict) else None
                     if depth is None:
                         errors.append(f"{camera_name}: missing depth payload")

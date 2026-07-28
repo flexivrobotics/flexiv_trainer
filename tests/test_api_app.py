@@ -14,6 +14,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from flexivtrainer.api.app import create_app
@@ -66,17 +68,81 @@ def test_camera_frame_route_returns_png() -> None:
 
 def test_camera_frame_route_colorizes_depth() -> None:
     class FakeCameras:
+        def __init__(self) -> None:
+            self.leases: list[str] = []
+
         def capture_frame(self, camera_name: str):
             return {
                 "image": [[[0, 0, 0]]],
                 "depth": [[0, 500, 1000]],
             }
 
+        def renew_depth_alignment_lease(self, camera_name: str) -> None:
+            self.leases.append(camera_name)
+
     class FakeRuntime:
         cameras = FakeCameras()
         settings = SimpleNamespace(depth_max_m=2.0)
 
-    response = camera_frame("ego", "depth", FakeRuntime())
+    runtime = FakeRuntime()
+    response = camera_frame("ego", "depth", runtime)
 
     assert response.media_type == "image/png"
     assert response.body.startswith(b"\x89PNG\r\n\x1a\n")
+    # Viewing depth must keep alignment alive, or the next frame has no depth.
+    assert runtime.cameras.leases == ["ego"]
+
+
+def test_camera_frame_depth_blames_the_rollout_when_one_is_running() -> None:
+    # Alignment is refused during a rollout, so depth is absent. Say why rather
+    # than reporting a missing depth stream the operator cannot act on.
+    class FakeCameras:
+        def capture_frame(self, camera_name: str):
+            return {"image": [[[0, 0, 0]]]}
+
+        def renew_depth_alignment_lease(self, camera_name: str) -> None:
+            return None
+
+    def _runtime(status: str):
+        return SimpleNamespace(
+            cameras=FakeCameras(),
+            settings=SimpleNamespace(depth_max_m=2.0),
+            rollout=SimpleNamespace(status=lambda: {"status": status}),
+        )
+
+    with pytest.raises(HTTPException) as running:
+        camera_frame("ego", "depth", _runtime("running"))
+    assert running.value.status_code == 409
+    assert "rollout is running" in running.value.detail
+
+    with pytest.raises(HTTPException) as idle:
+        camera_frame("ego", "depth", _runtime("idle"))
+    assert idle.value.status_code == 409
+    assert "Depth stream is unavailable" in idle.value.detail
+
+
+def test_runtime_manager_blocks_alignment_and_fails_closed(tmp_path) -> None:
+    from flexivtrainer.config import AppSettings, StorageConfig
+    from flexivtrainer.runtime.manager import RuntimeManager
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    manager = RuntimeManager(settings)
+
+    assert manager._rollout_is_running() is False
+    manager.cameras.renew_depth_alignment_lease("ego")
+    assert manager.cameras.depth_alignment_active("ego") is True
+
+    # A running rollout must refuse viewer-driven alignment server-side, not
+    # merely hide the checkbox.
+    manager.cameras.clear_depth_alignment_leases()
+    manager.rollout.status = lambda: {"status": "running"}
+    manager.cameras.renew_depth_alignment_lease("ego")
+    assert manager.cameras.depth_alignment_active("ego") is False
+
+    # An unreadable rollout state must block, never permit.
+    def boom():
+        raise RuntimeError("status unavailable")
+
+    manager.rollout.status = boom
+    assert manager._rollout_is_running() is True

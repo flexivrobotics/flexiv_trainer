@@ -120,6 +120,13 @@ def training_field_schema(policy_type: str) -> list[dict[str, Any]]:
     return schema
 
 
+class ACTConfig(BaseModel):
+    """Training knobs (baked into checkpoint) + rollout knobs (applied at load)."""
+
+    training: act.TrainingConfig = Field(default_factory=act.TrainingConfig)
+    rollout: act.RolloutConfig = Field(default_factory=act.RolloutConfig)
+
+
 class DiffusionConfig(BaseModel):
     """Training knobs (baked into checkpoint) + rollout knobs (applied at load)."""
 
@@ -139,6 +146,7 @@ class DiTConfig(BaseModel):
 class PolicyConfig(BaseModel):
     """Per-policy-family knobs; one sub-model per family."""
 
+    act: ACTConfig = Field(default_factory=ACTConfig)
     diffusion: DiffusionConfig = Field(default_factory=DiffusionConfig)
     bspline_diffusion: bspline_policy.PolicyFamilyConfig = Field(
         default_factory=bspline_policy.PolicyFamilyConfig

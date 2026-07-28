@@ -64,6 +64,7 @@ class WaypointRunner:
         on_finished: Callable[[str | None, int], None],
         release_robots: Callable[[], None],
         image_resolutions: dict[str, tuple[int, int]] | None = None,
+        append_wrench: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -83,6 +84,8 @@ class WaypointRunner:
         self._stop_event = stop_event
         self._append_log = append_log
         self._append_metric = append_metric
+        self._append_wrench = append_wrench
+        self._last_wrench_t = 0.0
         self._on_error = on_error
         self._on_finished = on_finished
         self._release_robots = release_robots
@@ -260,6 +263,13 @@ class WaypointRunner:
                     "infer_ms": round(infer_seconds * 1000.0, 1),
                     "fresh": bool(fresh),
                 })
+                self._last_wrench_t = observations.sample_wrench(
+                    self._append_wrench,
+                    snapshot,
+                    sides,
+                    loop_start,
+                    self._last_wrench_t,
+                )
                 if step % log_every == 0:
                     self._log_timing(
                         step,

@@ -66,6 +66,7 @@ class BSplineRunner:
         stop_robots: Callable[[list[Any]], None],
         prepare_motion: Callable[[Any, str], None],
         image_resolutions: dict[str, tuple[int, int]] | None = None,
+        append_wrench: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -86,6 +87,8 @@ class BSplineRunner:
         self._stop_event = stop_event
         self._append_log = append_log
         self._append_metric = append_metric
+        self._append_wrench = append_wrench
+        self._last_wrench_t = 0.0
         self._on_error = on_error
         self._on_cleanup_error = on_cleanup_error
         self._on_finished = on_finished
@@ -336,6 +339,13 @@ class BSplineRunner:
                         "handoff_warnings": executor_status.handoff_warnings,
                         "fresh": installed,
                     }
+                )
+                self._last_wrench_t = observations.sample_wrench(
+                    self._append_wrench,
+                    snapshot,
+                    sides,
+                    time.monotonic(),
+                    self._last_wrench_t,
                 )
                 if max_steps and step >= max_steps:
                     self._stop_reason = "timeout"
