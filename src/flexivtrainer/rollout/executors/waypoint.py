@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from flexivtrainer.observability import describe_exception
+from flexivtrainer.observability import describe_exception, warn
 
 _POSE_DIM = 7
 _TWIST_DIM = 6
@@ -106,6 +106,7 @@ class WaypointExecutor:
         self._waypoints: list[_TimedWaypoint] = []
         self._error: str | None = None
         self._scheduled_count = 0
+        self._starved_replans = 0
         self._thread: threading.Thread | None = None
 
     def replace_waypoints(
@@ -144,6 +145,17 @@ class WaypointExecutor:
                     )
                 )
             waypoints.append(_TimedWaypoint(float(target_time), commands))
+        if actions and not waypoints:
+            # Every waypoint was already in the past, so the arm keeps holding its
+            # last pose. Silent before, which hid the same bug twice.
+            self._starved_replans += 1
+            if self._starved_replans in (1, 10, 100, 1000):
+                warn(
+                    "Rollout replan scheduled no waypoints",
+                    f"all {len(actions)} were already stale "
+                    f"(count={self._starved_replans}); raise "
+                    "action_anchor_offset_steps or speed up inference",
+                )
         with self._condition:
             self._waypoints = waypoints
             self._scheduled_count = len(waypoints)

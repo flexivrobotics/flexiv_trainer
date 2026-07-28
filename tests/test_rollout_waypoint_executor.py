@@ -119,3 +119,41 @@ def test_executor_thread_stops_after_stop_event() -> None:
         thread.name == "rollout-waypoint-executor" and thread.is_alive()
         for thread in threading.enumerate()
     )
+
+
+def test_replan_that_schedules_nothing_is_reported(monkeypatch) -> None:
+    # A silent drop froze the arm at its last pose twice before; the count is the
+    # only signal that inference latency has outrun the anchor lead.
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.executors.waypoint.warn",
+        lambda message, detail="": warnings.append((message, detail)),
+    )
+    executor = _executor()
+    dt = 1.0 / 60.0
+    loop_start = 100.0
+    actions = [_unit_pose(0.0)]
+
+    # Single-waypoint chunk (temporal ensembling) with a 22ms tick at 60Hz: the
+    # only waypoint is already in the past.
+    executor.replace_waypoints(actions, [loop_start + dt], now=loop_start + 0.022)
+
+    assert executor.scheduled_count == 0
+    assert len(warnings) == 1
+    assert "scheduled no waypoints" in warnings[0][0]
+
+
+def test_single_waypoint_chunk_survives_only_when_inference_beats_dt() -> None:
+    # Replan wipes pending waypoints every tick, so a single-waypoint chunk fires
+    # only while inference is faster than dt. This is why 60Hz needs a faster
+    # forward pass rather than a larger anchor.
+    dt = 1.0 / 60.0
+    loop_start = 100.0
+    actions = [_unit_pose(0.0)]
+
+    for latency, expected in ((0.012, 1), (0.022, 0)):
+        executor = _executor()
+        executor.replace_waypoints(
+            actions, [loop_start + dt], now=loop_start + latency
+        )
+        assert executor.scheduled_count == expected

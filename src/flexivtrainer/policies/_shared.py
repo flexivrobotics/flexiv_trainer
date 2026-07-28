@@ -62,3 +62,7 @@ class SharedRolloutConfig(BaseModel):
     # Waypoint k targets loop_start + (k + offset) * dt; offset >= 1 keeps
     # waypoint 0 ahead of the past-filter (inference latency would drop it).
     action_anchor_offset_steps: int = Field(default=1, ge=0, le=8)
+    # Replay the trained trajectory faster than the dataset rate. 2.0 halves
+    # waypoint spacing, so the path is traversed in half the time at twice the
+    # commanded velocity, and the planner must tick twice as often.
+    playback_speed: float = Field(default=2.0, gt=0.0, le=4.0)

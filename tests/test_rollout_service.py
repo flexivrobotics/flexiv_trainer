@@ -1262,8 +1262,10 @@ def test_describe_rollout_overrides_reports_each_family_shape() -> None:
     assert "temporal ensembling disabled" in detail
     assert str(act_cfg.n_action_steps) in detail
 
-    # With the opt-out set, no ACT knob applies, so the generic detail is used.
-    opted_out = act_policy.RolloutConfig(disable_temporal_ensemble=False)
+    # With every ACT knob off, the generic detail is used.
+    opted_out = act_policy.RolloutConfig(
+        disable_temporal_ensemble=False, compile_model=False
+    )
     assert _describe_rollout_overrides(opted_out) == "applied"
 
     # A family with neither knob must still produce a string, not raise.
@@ -1345,3 +1347,67 @@ def test_rollout_start_clears_depth_alignment_leases(tmp_path, monkeypatch) -> N
     _run_one_tick(service, robot, _checkpoint(tmp_path))
 
     assert cleared == [True]
+
+
+def test_act_compile_override_replaces_only_the_model(monkeypatch) -> None:
+    # Compile the tensor core, not ACTPolicy: select_action mutates a Python
+    # deque and is not a pure graph.
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        "torch.compile",
+        lambda model, **kwargs: calls.append((model, kwargs)) or "COMPILED",
+    )
+    sentinel = object()
+    policy = SimpleNamespace(config=SimpleNamespace(type="act"), model=sentinel)
+    rollout_cfg = act_policy.RolloutConfig(compile_model=True)
+
+    assert act_policy.apply_rollout_overrides(policy, rollout_cfg) is True
+    assert policy.model == "COMPILED"
+    assert calls[0][0] is sentinel
+    assert calls[0][1] == {"mode": "reduce-overhead"}
+
+
+def test_act_compile_failure_falls_back_to_eager(monkeypatch) -> None:
+    def boom(model, **kwargs):
+        raise RuntimeError("inductor unavailable")
+
+    monkeypatch.setattr("torch.compile", boom)
+    sentinel = object()
+    policy = SimpleNamespace(config=SimpleNamespace(type="act"), model=sentinel)
+
+    applied = act_policy.apply_rollout_overrides(
+        policy, act_policy.RolloutConfig(compile_model=True)
+    )
+
+    # A missing accelerator must not abort the rollout.
+    assert applied is False
+    assert policy.model is sentinel
+
+
+def test_describe_rollout_overrides_mentions_compilation() -> None:
+    detail = _describe_rollout_overrides(act_policy.RolloutConfig(compile_model=True))
+    assert "compiled" in detail
+
+    both = _describe_rollout_overrides(
+        act_policy.RolloutConfig(compile_model=True, disable_temporal_ensemble=True)
+    )
+    assert "compiled" in both and "ensembling disabled" in both
+
+
+def test_playback_speed_scales_the_action_rate(tmp_path) -> None:
+    service = RolloutService.__new__(RolloutService)
+    service._lock = threading.Lock()
+    service._logs = deque(maxlen=50)
+
+    assert service._apply_playback_speed(
+        30.0, SimpleNamespace(playback_speed=1.0)
+    ) == 30.0
+    assert not service._logs  # unscaled replay is not worth a warning
+
+    assert service._apply_playback_speed(
+        30.0, SimpleNamespace(playback_speed=2.0)
+    ) == 60.0
+    assert any("playback_speed=2" in str(entry) for entry in service._logs)
+
+    # A family without the knob must fall through unscaled.
+    assert service._apply_playback_speed(30.0, SimpleNamespace()) == 30.0

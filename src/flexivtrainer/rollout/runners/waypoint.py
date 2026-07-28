@@ -245,6 +245,10 @@ class WaypointRunner:
                                 f"replan_steps={replan_steps} chunk={effective}",
                             )
                             replan_steps = effective
+                    # Anchored on loop_start, not on inference completion: replan
+                    # wipes pending waypoints every tick, so waypoint 0 only fires
+                    # while inference is faster than dt. Anchoring later (or raising
+                    # anchor) pushes it past the next replan and it never fires.
                     target_times = [
                         loop_start + (k + anchor) * dt
                         for k in range(len(action_lists))

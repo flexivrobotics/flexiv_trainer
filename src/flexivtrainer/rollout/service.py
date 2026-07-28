@@ -54,16 +54,20 @@ _ROLLOUT_OVERRIDES = {
 
 def _describe_rollout_overrides(rollout_cfg: Any) -> str:
     """Summarize an applied override; families expose different knobs."""
+    parts: list[str] = []
     scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
     if scheduler:
         steps = getattr(rollout_cfg, "num_denoise_steps", 0)
-        return f"scheduler={scheduler} inference_steps={steps}"
+        parts.append(f"scheduler={scheduler} inference_steps={steps}")
     if getattr(rollout_cfg, "disable_temporal_ensemble", False):
-        return (
+        parts.append(
             "temporal ensembling disabled; executing "
             f"n_action_steps={rollout_cfg.n_action_steps} per chunk"
         )
-    return "applied"
+    if getattr(rollout_cfg, "compile_model", False):
+        # Compilation is lazy, so the cost lands on the first inference step.
+        parts.append("model compiled; first inference includes compilation")
+    return "; ".join(parts) or "applied"
 
 
 class RolloutService:
@@ -186,11 +190,12 @@ class RolloutService:
             getattr(policy, "config", None), "type", None
         ) or getattr(policy, "name", "")
         is_bspline = policy_type == "bspline_diffusion"
-        target_hz = self._resolve_target_hz(
-            checkpoint_path, policy, require_metadata=is_bspline
-        )
         image_resolutions = checkpoint_image_resolutions(checkpoint_path)
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
+        dataset_hz = self._resolve_target_hz(
+            checkpoint_path, policy, require_metadata=is_bspline
+        )
+        target_hz = self._apply_playback_speed(dataset_hz, rollout_cfg)
         override_fn = _ROLLOUT_OVERRIDES.get(policy_type)
         overrides_applied = (
             override_fn(policy, rollout_cfg) if override_fn is not None else False
@@ -387,6 +392,25 @@ class RolloutService:
     def _teleop_initialized(self) -> bool:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
+
+    def _apply_playback_speed(self, dataset_hz: float, rollout_cfg: Any) -> float:
+        """Scale the action rate away from the rate the policy trained at."""
+        speed = _positive_float(getattr(rollout_cfg, "playback_speed", None)) or 1.0
+        if speed == 1.0:
+            return dataset_hz
+        target_hz = dataset_hz * speed
+        with self._lock:
+            self._logs.append(
+                _encode_ui_log(
+                    "WARN",
+                    "ROLLOUT",
+                    "Replaying off the trained rate",
+                    f"playback_speed={speed:g} dataset={dataset_hz:.1f}Hz "
+                    f"target={target_hz:.1f}Hz; commanded velocity scales with it "
+                    "and motion limits are not rescaled",
+                )
+            )
+        return target_hz
 
     def _resolve_target_hz(
         self,
