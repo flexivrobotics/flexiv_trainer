@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from numpy import true_divide
 from pydantic import Field
 
 from flexivtrainer.observability import describe_exception, warn
