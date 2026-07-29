@@ -19,6 +19,13 @@ import torch
 
 from flexivtrainer.rollout.observations import _predict_action_chunk
 
+# Mirror the resolution order in observations.py so the patch target tracks the
+# installed LeRobot; 0.6.0 has only the `common` module.
+try:
+    import lerobot.common.control_utils as control_utils
+except ImportError:  # pragma: no cover - depends on the installed LeRobot
+    import lerobot.utils.control_utils as control_utils
+
 
 def test_fresh_inference_returns_and_postprocesses_the_complete_chunk(
     monkeypatch,
@@ -38,9 +45,7 @@ def test_fresh_inference_returns_and_postprocesses_the_complete_chunk(
         ])
         return torch.tensor([[10.0, 11.0]])
 
-    monkeypatch.setattr(
-        "lerobot.utils.control_utils.predict_action", predict_action
-    )
+    monkeypatch.setattr(control_utils, "predict_action", predict_action)
 
     chunk, fresh = _predict_action_chunk(
         {}, policy, "cpu", lambda value: value, postprocessor
@@ -73,9 +78,7 @@ def test_cached_action_skips_reprocessing_the_pending_tail(monkeypatch) -> None:
     def predict_action(*args, **kwargs):
         return postprocessor(queue.popleft())
 
-    monkeypatch.setattr(
-        "lerobot.utils.control_utils.predict_action", predict_action
-    )
+    monkeypatch.setattr(control_utils, "predict_action", predict_action)
 
     chunk, fresh = _predict_action_chunk(
         {}, policy, "cpu", lambda value: value, postprocessor
