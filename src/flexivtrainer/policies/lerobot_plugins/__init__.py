@@ -15,13 +15,20 @@
 """Internal LeRobot policy plugins."""
 
 from .configuration_bspline_diffusion import BSplineDiffusionConfig
+from .dataset_patches import LOAD_DEPTH_ENV, apply_patches
 from .modeling_bspline_diffusion import BSplineDiffusionPolicy
 from .processor_bspline_diffusion import (
     make_bspline_diffusion_pre_post_processors,
 )
 
+# LeRobot imports this package before it builds the dataset, the only window in
+# which these patches can take effect on the training subprocess.
+apply_patches()
+
 __all__ = [
+    "LOAD_DEPTH_ENV",
     "BSplineDiffusionConfig",
     "BSplineDiffusionPolicy",
+    "apply_patches",
     "make_bspline_diffusion_pre_post_processors",
 ]

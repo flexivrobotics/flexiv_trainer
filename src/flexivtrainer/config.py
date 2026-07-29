@@ -103,6 +103,12 @@ class StorageConfig(BaseModel):
         self.cache_root.mkdir(parents=True, exist_ok=True)
 
 
+# Read by the dataset patches in flexivtrainer.policies.lerobot_plugins. Only
+# TrainingService sets it; unset means "leave the dataset alone", since the app
+# imports those patches too and still needs depth for previews.
+TRAIN_LOAD_DEPTH_ENV = "FLEXIVTRAINER_TRAIN_LOAD_DEPTH"
+
+
 class TrainingDefaultsConfig(BaseModel):
     default_policy: str = "diffusion"
     # Device passed to lerobot via --policy.device. "auto" (default) resolves to
@@ -110,6 +116,10 @@ class TrainingDefaultsConfig(BaseModel):
     # so the trainer stays portable across platforms; set an explicit "cuda" /
     # "mps" / "cpu" to force one.
     default_device: str = "auto"
+    # LeRobot's reader decodes every video feature a dataset declares, not just
+    # the ones the policy asked for, and lossless 12-bit HEVC depth dominates that
+    # cost. Turn on once a policy consumes depth.
+    load_depth: bool = False
 
 
 class RolloutLoopConfig(BaseModel):
