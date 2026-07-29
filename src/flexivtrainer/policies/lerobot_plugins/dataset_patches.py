@@ -14,12 +14,15 @@
 
 """Runtime patches for LeRobot's dataset read path, installed before make_dataset.
 
-Robust seek: merged datasets pack episodes into one mp4, and a segment boundary
-landing beside an existing keyframe leaves two in a row both claiming
-picture-order-count zero. LeRobot seeks one tick before its target, which lands
-on the previous segment and forces a read across that boundary -- where the HEVC
-decoder drops the second IDR instead of emitting it. The frame is in the file; only
-random access to it fails. Seeking onto the target's own keyframe avoids the cross.
+Robust seek: depth is 12-bit monochrome, so it must be HEVC, whose keyframes here
+are CRA pictures with an associated RASL (Random Access Skipped Leading) picture --
+one every other frame. A RASL references pictures preceding its CRA, so the spec
+requires discarding it when decoding *starts* at that CRA, which is what a seek
+does. LeRobot seeks one tick before its target; land that way on the target's own
+CRA and the target is dropped as an undecodable leading picture. The frame is in
+the file and decodes linearly; only that random access fails. Seeking onto the
+target's keyframe instead avoids the discard. RGB is h264 with all-IDR keyframes,
+which reset the reference buffer outright and have no such discardable class.
 
 Depth filter: the reader decodes every video feature a dataset declares, whatever
 the policy asked for. Opt-in via TRAIN_LOAD_DEPTH_ENV, which only the training
@@ -175,7 +178,7 @@ def robust_decode_video_frames_pyav(
     if used != "upstream":
         logger.warning(
             "Recovered %s via the %r seek after the default seek missed it "
-            "(likely an episode boundary with adjacent keyframes).",
+            "(likely a leading picture discarded by seeking to its own keyframe).",
             f"{video_path}@{first_ts:.4f}s",
             used,
         )
