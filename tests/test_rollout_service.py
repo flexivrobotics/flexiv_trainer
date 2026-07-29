@@ -1135,7 +1135,7 @@ def test_wrench_sample_decimates_to_the_trend_chart_rate() -> None:
     # The boundary must survive float error (0.1 - 0.0 == 0.09999... in practice).
     last = observations.sample_wrench(out.append, snapshot, sides, 100.05, last)
     assert len(out) == 1
-    last = observations.sample_wrench(out.append, snapshot, sides, 100.10, last)
+    observations.sample_wrench(out.append, snapshot, sides, 100.10, last)
     assert len(out) == 2
 
     out.clear()
