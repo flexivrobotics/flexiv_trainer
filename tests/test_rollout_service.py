@@ -941,9 +941,13 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
 
     status = service.status()
     logs = status["logs"]
+    expected_hz = (
+        12.0 * service._settings.policies.diffusion.rollout.playback_speed
+    )
     # An obs row is logged on step 0 (0 % log_every == 0) carrying the checkpoint
-    # target frequency and a measured actual frequency, e.g. "freq=9.8/12.0Hz".
-    assert any("/12.0Hz" in line for line in logs)
+    # frequency after playback-speed scaling and a measured actual frequency,
+    # e.g. "freq=19.8/24.0Hz" for a 12 Hz dataset replayed at 2x.
+    assert any(f"/{expected_hz:.1f}Hz" in line for line in logs)
     assert any(
         "cmd_twist=[7.000, 8.000, 9.000, 10.000, 11.000, 12.000]" in line
         for line in logs
@@ -954,7 +958,7 @@ def test_log_step_reports_expected_and_actual_frequency(tmp_path, monkeypatch) -
         assert set(sample) >= {"t", "step", "hz", "infer_ms", "fresh"}
         assert "sched" not in sample
     assert any(sample["fresh"] is True for sample in metrics)
-    assert status["target_hz"] == 12.0
+    assert status["target_hz"] == expected_hz
 
 
 def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
@@ -1047,7 +1051,9 @@ def test_overlapped_replan_forces_and_extends_committed_path(
     assert 4 in forced_ticks and 8 in forced_ticks
     # A fresh chunk was spliced on more than one forced tick.
     assert len(schedules) >= 2
-    dt = 1.0 / float(settings.rollout.action_dt_hz)
+    target_hz = service.status()["target_hz"]
+    assert target_hz is not None
+    dt = 1.0 / float(target_hz)
     # Each schedule leaves a committed horizon covering at least the replan gap.
     assert all(extent >= 4 * dt - 1e-6 for extent in schedules)
 

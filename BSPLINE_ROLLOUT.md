@@ -382,7 +382,7 @@ plus the inherited diffusion knobs:
 | `handoff_max_accel` | 2.0 | m/s² ceiling used to stretch `handoff_blend_s` when the gap is large | lower for a gentler correction on big mismatches; it only ever lengthens the window, never shortens it |
 | `time_align_error_threshold` | 0.1 | mismatch above which a handoff **warning** is logged | mostly a reporting knob. Note it *also* drives how hard `_align` searches, so tightening it makes alignment widen its window chasing a better match and skip further into the plan — with blending a small residual is harmless, so leaving it alone is deliberate |
 | `time_align_max_fraction` | 0.2 | max fraction of the new curve alignment may skip | raise cautiously if latency is high and alignment keeps saturating the cap |
-| `playback_speed` | 1.0 | scales `target_hz` **before** it becomes `checkpoint_fps` | logs a warning; overlaps with `speed_scale`, prefer one |
+| `playback_speed` | 2.0 | scales `target_hz` **before** it becomes `checkpoint_fps` | logs a warning; overlaps with `speed_scale`, prefer one |
 | `num_denoise_steps` | 16 | DDIM steps actually used at rollout; `apply_rollout_overrides` assigns it onto the model, overriding the checkpoint's stored 8 (§12.3) | the main lever on `infer_ms` |
 
 `playback_speed` and `speed_scale` multiply into the same `source_rate` from
