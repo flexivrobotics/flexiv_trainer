@@ -172,6 +172,22 @@ class _FakePulse:
         pass
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('  "max_translation_error_m": 0.001982460286132769,', "INFO"),
+        ('  "max_rotation_error_deg": 0.16161622827698138', "INFO"),
+        ("RuntimeError: CUDA out of memory", "ERROR"),
+        ("Dataset conversion failed", "ERROR"),
+    ],
+)
+def test_stream_level_treats_bspline_error_metrics_as_info(
+    line: str,
+    expected: str,
+) -> None:
+    assert train_policy._stream_level(line) == expected
+
+
 def test_parse_compact_number_supports_suffixes_and_floats(tmp_path: Path) -> None:
     service = make_service(tmp_path)
 

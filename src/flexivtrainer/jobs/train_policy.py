@@ -109,6 +109,9 @@ EFFECTIVE_BATCH_SIZE_PATTERN = re.compile(
 CHECKPOINT_STEP_PATTERN = re.compile(r"Checkpoint policy after step (?P<step>\d+)")
 EVAL_STEP_PATTERN = re.compile(r"Eval policy at step (?P<step>\d+)")
 UI_LOG_PREFIX = "@@TRAIN_LOG@@"
+BSPLINE_QUALITY_METRIC_PATTERN = re.compile(
+    r'^\s*"(?:max_translation_error_m|max_rotation_error_deg)"\s*:'
+)
 
 TrainingMode = Literal["new", "fine_tune"]
 
@@ -127,6 +130,10 @@ _FINE_TUNE_POLICY_FIELDS = {
 
 
 def _stream_level(text: str) -> str:
+    # These converter summary fields report reconstruction quality; the word
+    # "error" is part of the metric name and does not indicate a failed step.
+    if BSPLINE_QUALITY_METRIC_PATTERN.match(text):
+        return "INFO"
     lowered = text.lower()
     if any(
         token in lowered
