@@ -169,6 +169,10 @@ class RuntimeManager:
                 self.get_active_sides,
                 get_end_effector_config=self.get_end_effector_config,
             )
+        # Depth->color alignment starves the policy loop of the GIL, and the
+        # rollout reads no depth, so forbid viewer-driven alignment while one
+        # runs rather than relying on the operator clearing a checkbox.
+        self.cameras.set_alignment_blocked_check(self._rollout_is_running)
         # Cache of constructed LeRobotDataset objects keyed by resolved path.
         # Building one parses metadata and the parquet index, which is far too
         # costly to repeat for every frame request during preview playback.
@@ -198,6 +202,13 @@ class RuntimeManager:
 
     def get_end_effector_config(self) -> dict[str, Any]:
         return self._robot_config.end_effector_config
+
+    def _rollout_is_running(self) -> bool:
+        try:
+            return self.rollout.status().get("status") == "running"
+        except Exception:
+            # Never let a status failure enable alignment during a rollout.
+            return True
 
     def _load_camera_config(self) -> None:
         path = self.settings.storage.camera_config_path

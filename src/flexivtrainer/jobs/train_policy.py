@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from flexivtrainer.config import AppSettings
+from flexivtrainer.config import TRAIN_LOAD_DEPTH_ENV, AppSettings
 from flexivtrainer.observability import (
     Pulse,
     error,
@@ -720,6 +721,19 @@ class TrainingService:
             and raw["info"].get("is_depth_map") is True
         }
 
+    def _training_env(self) -> dict[str, str]:
+        """Environment for the lerobot-train subprocess.
+
+        The depth toggle travels as an env var because the patches that read it
+        run inside that process, and LeRobot's parser rejects unknown CLI flags.
+        """
+
+        env = dict(os.environ)
+        env[TRAIN_LOAD_DEPTH_ENV] = (
+            "1" if self._settings.training.load_depth else "0"
+        )
+        return env
+
     def _rgb_only_policy_input_features(
         self, dataset_root: Path
     ) -> dict[str, dict[str, Any]] | None:
@@ -924,12 +938,15 @@ class TrainingService:
                         "false",
                     ]
                 )
-                rgb_only_inputs = self._rgb_only_policy_input_features(resolved_root)
-                if rgb_only_inputs is not None:
-                    command.append(
-                        "--policy.input_features="
-                        + json.dumps(rgb_only_inputs, separators=(",", ":"))
+                if not self._settings.training.load_depth:
+                    rgb_only_inputs = self._rgb_only_policy_input_features(
+                        resolved_root
                     )
+                    if rgb_only_inputs is not None:
+                        command.append(
+                            "--policy.input_features="
+                            + json.dumps(rgb_only_inputs, separators=(",", ":"))
+                        )
             else:
                 command.extend(
                     [
@@ -997,6 +1014,7 @@ class TrainingService:
                 stderr=subprocess.STDOUT,
                 text=True,
                 cwd=str(output_dir.parent),
+                env=self._training_env(),
             )
             job.pulse = Pulse(
                 "Training job running",

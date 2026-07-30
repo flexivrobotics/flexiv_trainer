@@ -24,6 +24,8 @@ from typing import Any
 from flexivtrainer.data.lerobot_io import first_dataset_task
 
 _LANGUAGE_POLICY_TYPES = {"multi_task_dit", "smolvla", "pi0", "pi05"}
+_IMAGE_FEATURE_PREFIX = "observation.images."
+_CHANNEL_COUNTS = {1, 3, 4}  # 1: gray, 3: RGB, 4: RGBD
 
 
 def _checkpoint_model_dir(checkpoint_path: str) -> Path:
@@ -162,6 +164,28 @@ def _checkpoint_task(checkpoint_path: str) -> str | None:
         if (candidate / "meta").exists():
             return first_dataset_task(candidate)
     return None
+
+
+def checkpoint_image_resolutions(checkpoint_path: str) -> dict[str, tuple[int, int]]:
+    """Read {camera: (height, width)} of the images a checkpoint was trained on."""
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    features = (_read_json(model_dir / "config.json") or {}).get("input_features")
+    if not isinstance(features, dict):
+        return {}
+
+    resolutions: dict[str, tuple[int, int]] = {}
+    for key, feature in features.items():
+        if not key.startswith(_IMAGE_FEATURE_PREFIX) or not isinstance(feature, dict):
+            continue
+        name = key[len(_IMAGE_FEATURE_PREFIX) :]
+        shape = feature.get("shape")
+        if not name or not isinstance(shape, list) or len(shape) != 3:
+            continue
+        # LeRobot stores VISUAL shapes channels-first; refuse anything else
+        # rather than read a channels-last shape as (height, width).
+        if shape[0] in _CHANNEL_COUNTS and shape[2] not in _CHANNEL_COUNTS:
+            resolutions[name] = (int(shape[1]), int(shape[2]))
+    return resolutions
 
 
 def _checkpoint_policy_type(checkpoint_path: str) -> str | None:

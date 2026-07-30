@@ -3161,12 +3161,18 @@ function renderDepthVisualizationControl(cameras, cameraNames) {
         const camera = cameras?.[name];
         return !!camera?.started && !!camera?.depth?.started;
     });
-    input.disabled = !depthReady;
-    input.title = depthReady
-        ? "Add aligned, colorized depth preview windows below the RGB feeds"
-        : "Depth visualization becomes available when a camera has a depth stream";
+    // Depth alignment competes with the policy for CPU, so the server refuses it
+    // during a rollout; mirror that here instead of polling for 409s.
+    const rolloutRunning = state.rolloutStatus?.status === "running";
+    const available = depthReady && !rolloutRunning;
+    input.disabled = !available;
+    input.title = rolloutRunning
+        ? "Depth visualization is unavailable while a policy rollout is running"
+        : depthReady
+          ? "Add aligned, colorized depth preview windows below the RGB feeds"
+          : "Depth visualization becomes available when a camera has a depth stream";
 
-    if (!depthReady && state.ui.visualizeDepth) {
+    if (!available && state.ui.visualizeDepth) {
         state.ui.visualizeDepth = false;
         cameraNames.forEach((name) => stopCameraFeed(name, "depth"));
     }
@@ -6554,6 +6560,7 @@ function renderRollout() {
         renderRolloutCameras();
         renderRolloutTerminal();
         renderRolloutMetrics();
+        renderRolloutWrench();
         return;
     }
     container.dataset.renderKey = renderKey;
@@ -6614,6 +6621,10 @@ function renderRollout() {
                     <div class="trend-chart rollout-hz-chart" id="rollout-hz-chart"></div>
                 </section>
                 <section class="panel panel--soft">
+                    <div class="panel-header"><h3>Cartesian Wrench</h3></div>
+                    <div id="rollout-wrench" class="rollout-wrench"></div>
+                </section>
+                <section class="panel panel--soft">
                     <div class="panel-header"><h3>Rollout Log</h3></div>
                     <div class="log-pane" id="rollout-terminal-pane"></div>
                 </section>
@@ -6624,6 +6635,7 @@ function renderRollout() {
     renderRolloutCameras();
     renderRolloutTerminal();
     renderRolloutMetrics();
+    renderRolloutWrench();
 
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {
@@ -6715,6 +6727,53 @@ function renderRolloutCameras() {
     const cameras = state.teleopStatus?.cameras?.cameras || {};
     cameraNames.forEach((name) => {
         renderCameraFps(`rollout-${name}-fps`, name, cameras[name]);
+    });
+}
+
+// Measured wrench per active arm, reusing the teleop bar gauges. Samples are
+// buffered server-side, so the newest drives the bars and the rest only steady
+// the gauges' auto-range.
+function renderRolloutWrench() {
+    const container = byId("rollout-wrench");
+    if (!container) {
+        return;
+    }
+    const status = state.rolloutStatus || {};
+    // The running rollout's own binding; getActiveSides() covers the first poll.
+    const sides = (Array.isArray(status.sides) && status.sides.length)
+        ? status.sides
+        : getActiveSides();
+
+    // Rebuild only when the arm set changes; renderForcePanel updates in place.
+    const renderKey = sides.join(",");
+    if (container.dataset.renderKey !== renderKey) {
+        container.dataset.renderKey = renderKey;
+        container.innerHTML = sides.map((side) => `
+            <section class="telemetry-card telemetry-card--vector"
+                id="rollout-${escapeHtml(side)}-force-panel"></section>
+        `).join("");
+    }
+    container.classList.toggle("rollout-wrench--single", sides.length === 1);
+
+    const samples = Array.isArray(status.wrench) ? status.wrench : [];
+    sides.forEach((side) => {
+        const history = samples.map((sample) => {
+            const wrench = sample[side];
+            const valid = Array.isArray(wrench) && wrench.length >= 6;
+            return {
+                timestamp: (sample.t || 0) * 1000,
+                force: valid ? wrench.slice(0, 3) : null,
+                moment: valid ? wrench.slice(3, 6) : null,
+            };
+        });
+        const latest = history.length ? history[history.length - 1] : null;
+        renderForcePanel(
+            `rollout-${side}`,
+            {},
+            { force: latest?.force || null, moment: latest?.moment || null },
+            history,
+            ARM_SIDE_LABELS[side]?.wrench || side.toUpperCase(),
+        );
     });
 }
 

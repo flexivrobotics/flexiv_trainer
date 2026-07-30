@@ -872,6 +872,18 @@ button:disabled {
     min-width: 0;
 }
 
+/* One wrench gauge card per active arm, side by side. */
+.rollout-wrench {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.rollout-wrench--single {
+    grid-template-columns: minmax(0, 1fr);
+}
+
 .feed {
     --feed-media-aspect-ratio: 16 / 9;
     --teleop-card-gap: 0.58rem;

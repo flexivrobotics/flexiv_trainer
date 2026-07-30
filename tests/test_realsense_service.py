@@ -237,3 +237,140 @@ def test_set_active_locations_releases_now_inactive_cameras(tmp_path) -> None:
 
     assert service._runtimes["wrist"].started is False
     assert service._runtimes["wrist"].pipeline is None
+
+
+def _alignment_service(tmp_path) -> RealSenseService:
+    return RealSenseService(
+        AppSettings(
+            storage=StorageConfig(root=tmp_path),
+            cameras=[CameraConfig(name="ego"), CameraConfig(name="left_wrist")],
+        )
+    )
+
+
+def test_depth_alignment_is_reference_counted(tmp_path) -> None:
+    service = _alignment_service(tmp_path)
+    assert service.depth_alignment_active("ego") is False
+
+    # Recording and the depth preview can overlap, so the second release is
+    # what must turn alignment off -- not the first.
+    service.acquire_depth_alignment(["ego"])
+    service.acquire_depth_alignment(["ego"])
+    service.release_depth_alignment(["ego"])
+    assert service.depth_alignment_active("ego") is True
+
+    service.release_depth_alignment(["ego"])
+    assert service.depth_alignment_active("ego") is False
+
+
+def test_release_depth_alignment_never_goes_negative(tmp_path) -> None:
+    service = _alignment_service(tmp_path)
+    service.release_depth_alignment(["ego"])
+    service.acquire_depth_alignment(["ego"])
+
+    assert service.depth_alignment_active("ego") is True
+
+
+def test_depth_alignment_only_affects_named_cameras(tmp_path) -> None:
+    service = _alignment_service(tmp_path)
+    service.acquire_depth_alignment(["ego"])
+
+    assert service.depth_alignment_active("left_wrist") is False
+
+
+def test_depth_alignment_survives_a_camera_restart(tmp_path) -> None:
+    # The silent-camera watchdog can restart a pipeline mid-recording; losing
+    # the reference there would silently record unaligned depth.
+    service = _alignment_service(tmp_path)
+    service.acquire_depth_alignment(["ego"])
+    runtime = service._runtimes["ego"]
+    runtime.started = True
+    runtime.pipeline = SimpleNamespace(stop=lambda: None)
+
+    with service._lock:
+        service._stop_runtime(runtime)
+
+    assert service.depth_alignment_active("ego") is True
+
+
+def test_depth_alignment_lease_expires_with_no_further_calls(
+    tmp_path, monkeypatch
+) -> None:
+    # Unchecking "Visualize depth" stops all polling, so nothing calls back in.
+    # The lease must lapse on evaluation, not on the next renew.
+    service = _alignment_service(tmp_path)
+    now = [1000.0]
+    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: now[0])
+
+    service.renew_depth_alignment_lease("ego")
+    assert service.depth_alignment_active("ego") is True
+
+    now[0] += realsense_module._ALIGN_LEASE_S + 0.1
+
+    assert service.depth_alignment_active("ego") is False
+
+
+def test_depth_alignment_lease_does_not_consume_a_reference(
+    tmp_path, monkeypatch
+) -> None:
+    service = _alignment_service(tmp_path)
+    now = [1000.0]
+    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: now[0])
+
+    for _ in range(5):
+        now[0] += 0.1
+        service.renew_depth_alignment_lease("ego")
+
+    # The viewer lease is a deadline, so it never touches the refcount that
+    # recording relies on.
+    assert service._runtimes["ego"].align_consumers == 0
+    assert service.depth_alignment_active("ego") is True
+
+
+def test_expiring_lease_does_not_cancel_a_recording_hold(
+    tmp_path, monkeypatch
+) -> None:
+    service = _alignment_service(tmp_path)
+    now = [1000.0]
+    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: now[0])
+
+    service.renew_depth_alignment_lease("ego")
+    service.acquire_depth_alignment(["ego"])
+    now[0] += realsense_module._ALIGN_LEASE_S + 1.0
+
+    # A long recording gets no preview polls; its hold must outlive the lease.
+    assert service.depth_alignment_active("ego") is True
+    service.release_depth_alignment(["ego"])
+    assert service.depth_alignment_active("ego") is False
+
+
+def test_clear_depth_alignment_leases_drops_viewers_but_not_holders(
+    tmp_path, monkeypatch
+) -> None:
+    service = _alignment_service(tmp_path)
+    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: 1000.0)
+
+    service.renew_depth_alignment_lease("ego")
+    service.renew_depth_alignment_lease("left_wrist")
+    service.acquire_depth_alignment(["left_wrist"])
+
+    service.clear_depth_alignment_leases()
+
+    assert service.depth_alignment_active("ego") is False
+    assert service.depth_alignment_active("left_wrist") is True
+
+
+def test_alignment_blocked_check_refuses_viewer_leases(tmp_path) -> None:
+    # A rollout must not be starved by a stale browser tab or a direct curl, so
+    # the refusal lives in the service rather than the frontend.
+    service = _alignment_service(tmp_path)
+    service.set_alignment_blocked_check(lambda: True)
+
+    service.renew_depth_alignment_lease("ego")
+    assert service.depth_alignment_active("ego") is False
+
+    # Recording stays allowed: it cannot overlap a rollout, and failing it
+    # silently would be worse than the preflight error that already exists.
+    service.acquire_depth_alignment(["ego"])
+    assert service.depth_alignment_active("ego") is True
+

@@ -196,6 +196,10 @@ def camera_frame(
 ) -> Response:
     if view not in {"rgb", "depth"}:
         raise HTTPException(status_code=400, detail="view must be 'rgb' or 'depth'")
+    if view == "depth":
+        # Alignment is off until something asks for depth; the first poll after
+        # an idle period turns it on and 409s, the next one has a frame.
+        runtime.cameras.renew_depth_alignment_lease(camera_name)
     try:
         frame_payload = runtime.cameras.capture_frame(camera_name)
     except ValueError as exc:
@@ -207,10 +211,13 @@ def camera_frame(
         if view == "depth":
             depth = frame_payload.get("depth")
             if depth is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Depth stream is unavailable for camera: {camera_name}",
-                )
+                detail = f"Depth stream is unavailable for camera: {camera_name}"
+                if runtime.rollout.status().get("status") == "running":
+                    detail = (
+                        "Depth alignment is disabled while a policy rollout is "
+                        "running; it competes with the policy for CPU"
+                    )
+                raise HTTPException(status_code=409, detail=detail)
             frame = _colorize_depth(depth, runtime.settings.depth_max_m)
         else:
             frame = frame_payload["image"]

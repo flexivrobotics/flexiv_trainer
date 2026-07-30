@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +34,8 @@ except (
 
 # Restart a started-but-silent pipeline after this long without a frame.
 SILENT_RESTART_AFTER_S = 3.0
+# Drop a depth-preview alignment lease this long after its last frame request.
+_ALIGN_LEASE_S = 3.0
 
 
 @dataclass
@@ -51,6 +54,13 @@ class CameraRuntime:
     # pipeline actually came up with a depth stream (it can fall back to color).
     depth_started: bool = False
     align: Any | None = None
+    # Alignment costs a per-pixel remap every frame, so it only runs while
+    # something wants aligned depth. Recording holds a balanced reference;
+    # survives restarts so the silent-camera watchdog cannot unalign it
+    # mid-episode. The preview instead renews a deadline, because a polling
+    # viewer has no close signal to release on.
+    align_consumers: int = 0
+    align_lease_until: float = 0.0
     # RealSense Z16 values are device units. Recording stores uint16
     # millimeters so LeRobot can infer and preserve the depth unit.
     depth_scale_m: float = 0.001
@@ -74,6 +84,9 @@ class RealSenseService:
         self._active_locations: list[str] = list(self._runtimes)
         self._last_frames: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, str] = {}
+        # Set by the runtime manager; depth alignment starves the policy loop of
+        # the GIL, so a rollout forbids it outright rather than trusting the UI.
+        self._alignment_blocked: Callable[[], bool] = lambda: False
         self._lock = threading.Lock()
         # Serializes whole start/stop/restart cycles (_lock is released mid-join).
         self._lifecycle_lock = threading.RLock()
@@ -430,6 +443,51 @@ class RealSenseService:
                 self._stop_runtime(self._runtimes[name])
         return self.status()
 
+    def set_alignment_blocked_check(self, predicate: Callable[[], bool]) -> None:
+        """Install the guard that forbids viewer-driven alignment."""
+        self._alignment_blocked = predicate
+
+    def acquire_depth_alignment(self, camera_names: list[str]) -> None:
+        """Run depth->color alignment on these cameras until released."""
+        with self._lock:
+            for name in self._resolve_camera_names(camera_names):
+                self._runtimes[name].align_consumers += 1
+
+    def release_depth_alignment(self, camera_names: list[str]) -> None:
+        with self._lock:
+            for name in self._resolve_camera_names(camera_names):
+                runtime = self._runtimes[name]
+                runtime.align_consumers = max(0, runtime.align_consumers - 1)
+
+    @staticmethod
+    def _wants_alignment(runtime: CameraRuntime) -> bool:
+        # A held reference or an unexpired viewer lease. Evaluated rather than
+        # swept, so a lease lapses with nothing needing to call in again.
+        return (
+            runtime.align_consumers > 0
+            or runtime.align_lease_until > time.monotonic()
+        )
+
+    def depth_alignment_active(self, camera_name: str) -> bool:
+        with self._lock:
+            runtime = self._runtimes.get(camera_name)
+            return runtime is not None and self._wants_alignment(runtime)
+
+    def renew_depth_alignment_lease(self, camera_name: str) -> None:
+        """Keep alignment on for a poll-driven viewer with no close signal."""
+        if self._alignment_blocked():
+            return
+        with self._lock:
+            runtime = self._runtimes.get(camera_name)
+            if runtime is not None:
+                runtime.align_lease_until = time.monotonic() + _ALIGN_LEASE_S
+
+    def clear_depth_alignment_leases(self) -> None:
+        """Drop viewer leases now instead of waiting for them to lapse."""
+        with self._lock:
+            for runtime in self._runtimes.values():
+                runtime.align_lease_until = 0.0
+
     def _is_streaming(self, runtime: CameraRuntime) -> bool:
         # Started AND delivered a frame recently (not just an open pipeline).
         return (
@@ -455,6 +513,7 @@ class RealSenseService:
                     "depth": {
                         "enabled": bool(self._runtimes[name].config.use_depth),
                         "started": self._runtimes[name].depth_started,
+                        "aligned": self._wants_alignment(self._runtimes[name]),
                     },
                     "error": self._errors.get(name),
                 }
@@ -480,7 +539,6 @@ class RealSenseService:
         measured FPS reflect the camera's true production cadence regardless of
         how many consumers (live preview, recording) are reading concurrently.
         """
-        align = runtime.align
         name = runtime.config.name
         last_frame = time.monotonic()
         restarts = 0
@@ -491,7 +549,9 @@ class RealSenseService:
                 if not raw_frames:
                     continue
                 # Align depth to color so the cached depth map shares the color
-                # frame's pixel grid; align.process replaces the frame set.
+                # frame's pixel grid; align.process replaces the frame set. Read
+                # per frame so consumers can toggle alignment at runtime.
+                align = runtime.align if self._wants_alignment(runtime) else None
                 frames = align.process(raw_frames) if align is not None else raw_frames
                 color_frame = frames.get_color_frame()
                 if color_frame is None:
@@ -499,7 +559,9 @@ class RealSenseService:
 
                 image = np.asanyarray(color_frame.get_data())
                 depth = None
-                if runtime.depth_started:
+                # Unaligned depth is never cached; it would pair the wrong
+                # distance with each color pixel.
+                if runtime.depth_started and align is not None:
                     depth_frame = frames.get_depth_frame()
                     if depth_frame is not None:
                         raw_depth = np.asanyarray(depth_frame.get_data())
@@ -549,7 +611,7 @@ class RealSenseService:
                         "width": image.shape[1],
                         "height": image.shape[0],
                     }
-                    if runtime.depth_started:
+                    if runtime.depth_started and align is not None:
                         # Keep the previous depth map on a missing depth frame so
                         # a momentary drop never loses the tick's color frame.
                         if depth is None:

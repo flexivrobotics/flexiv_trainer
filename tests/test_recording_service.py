@@ -50,7 +50,8 @@ def test_grab_camera_data_keeps_uint16_depth_in_hwc_shape() -> None:
     depth = np.full((2, 3), 1250, dtype=np.uint16)
     service = RecordingService.__new__(RecordingService)
     service._cameras = SimpleNamespace(
-        capture_frame=lambda name, **kwargs: {"image": bgr, "depth": depth}
+        capture_frame=lambda name, **kwargs: {"image": bgr, "depth": depth},
+        depth_alignment_active=lambda name: True,
     )
 
     images, depths = service._grab_camera_data(
@@ -72,7 +73,8 @@ def test_grab_camera_data_downsizes_rgb_and_depth_when_resolution_set() -> None:
     service = RecordingService.__new__(RecordingService)
     service._resolution = (240, 320)
     service._cameras = SimpleNamespace(
-        capture_frame=lambda name, **kwargs: {"image": bgr, "depth": depth}
+        capture_frame=lambda name, **kwargs: {"image": bgr, "depth": depth},
+        depth_alignment_active=lambda name: True,
     )
 
     images, depths = service._grab_camera_data(
@@ -350,3 +352,48 @@ def test_start_sanitizes_and_reports_job_name(tmp_path) -> None:
         assert service.status()["job_name"] == "My_Job"
     finally:
         service.stop()
+
+
+def test_grab_camera_data_refuses_unaligned_depth() -> None:
+    # Depth is only cached while alignment runs, so an unaligned camera means
+    # the acquire/release pairing broke. Recording it would silently pair the
+    # wrong distance with each color pixel.
+    bgr = np.zeros((2, 3, 3), dtype=np.uint8)
+    depth = np.full((2, 3), 1250, dtype=np.uint16)
+    service = RecordingService.__new__(RecordingService)
+    service._resolution = None
+    service._cameras = SimpleNamespace(
+        capture_frame=lambda name, **kwargs: {"image": bgr, "depth": depth},
+        depth_alignment_active=lambda name: False,
+    )
+
+    with pytest.raises(RuntimeError, match="depth alignment is not active"):
+        service._grab_camera_data(["ego"], ["ego"], require_all=True, attempts=1)
+
+
+def test_release_depth_alignment_is_idempotent() -> None:
+    released: list[list[str]] = []
+    service = RecordingService.__new__(RecordingService)
+    service._aligned_cameras = []
+    service._cameras = SimpleNamespace(
+        acquire_depth_alignment=lambda names: None,
+        release_depth_alignment=released.append,
+    )
+
+    service._acquire_depth_alignment(["ego"])
+    service._release_depth_alignment()
+    # stop() after a failed start() must not double-release.
+    service._release_depth_alignment()
+
+    assert released == [["ego"]]
+
+
+def test_acquire_depth_alignment_skips_when_no_depth_entries() -> None:
+    acquired: list[list[str]] = []
+    service = RecordingService.__new__(RecordingService)
+    service._aligned_cameras = []
+    service._cameras = SimpleNamespace(acquire_depth_alignment=acquired.append)
+
+    service._acquire_depth_alignment([])
+
+    assert acquired == []

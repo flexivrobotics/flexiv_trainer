@@ -15,12 +15,14 @@
 import json
 import threading
 import time
+from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
+from flexivtrainer.policies import act as act_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
 from flexivtrainer.rollout import hardware, observations
@@ -28,12 +30,13 @@ from flexivtrainer.rollout.checkpoint import (
     _checkpoint_policy_type,
     _checkpoint_requires_task,
     _checkpoint_target_hz,
+    checkpoint_image_resolutions,
 )
 from flexivtrainer.rollout.executors.waypoint import WaypointExecutor
 from flexivtrainer.rollout.hardware import _zero_ft_sensor
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
-from flexivtrainer.rollout.service import RolloutService
+from flexivtrainer.rollout.service import RolloutService, _describe_rollout_overrides
 
 
 class _FakeRobotStates:
@@ -435,6 +438,81 @@ def test_checkpoint_policy_type_and_requires_task(tmp_path) -> None:
     bare = tmp_path / "c"
     bare.mkdir()
     assert _checkpoint_requires_task(str(bare)) is True
+
+
+def _checkpoint_with_image_shapes(tmp_path, shapes: dict[str, list[int]]) -> str:
+    model = tmp_path / "ckpt" / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "type": "act",
+                "input_features": {
+                    f"observation.images.{name}": {"type": "VISUAL", "shape": shape}
+                    for name, shape in shapes.items()
+                }
+                | {"observation.state": {"type": "STATE", "shape": [38]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(tmp_path / "ckpt")
+
+
+def test_checkpoint_image_resolutions_reads_channels_first_shapes(tmp_path) -> None:
+    checkpoint = _checkpoint_with_image_shapes(
+        tmp_path, {"ego": [3, 240, 320], "left_wrist": [3, 480, 640]}
+    )
+
+    assert checkpoint_image_resolutions(checkpoint) == {
+        "ego": (240, 320),
+        "left_wrist": (480, 640),
+    }
+
+
+def test_checkpoint_image_resolutions_skips_channels_last_shapes(tmp_path) -> None:
+    # (height, width, channels) must not be misread as (240, 320) here.
+    checkpoint = _checkpoint_with_image_shapes(tmp_path, {"ego": [240, 320, 3]})
+
+    assert checkpoint_image_resolutions(checkpoint) == {}
+
+
+def _cameras_returning(images: dict[str, np.ndarray]):
+    return SimpleNamespace(
+        capture_frame=lambda name, **kwargs: {"image": images.get(name)}
+    )
+
+
+def test_grab_images_downscales_to_checkpoint_resolution() -> None:
+    # BGR red so the resize is checked alongside the RGB flip.
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[:, :, 2] = 255
+
+    images = observations.grab_images(
+        _cameras_returning({"ego": frame}), ["ego"], {"ego": (240, 320)}
+    )
+
+    assert images["ego"].shape == (240, 320, 3)
+    assert images["ego"][0, 0].tolist() == [255, 0, 0]
+
+
+def test_grab_images_passes_matching_frames_through() -> None:
+    frame = np.arange(240 * 320 * 3, dtype=np.uint8).reshape(240, 320, 3)
+
+    images = observations.grab_images(
+        _cameras_returning({"ego": frame}), ["ego"], {"ego": (240, 320)}
+    )
+
+    assert np.array_equal(images["ego"], frame[:, :, ::-1])
+
+
+def test_grab_images_rejects_aspect_ratio_mismatch() -> None:
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    with pytest.raises(RuntimeError, match="aspect ratio"):
+        observations.grab_images(
+            _cameras_returning({"ego": frame}), ["ego"], {"ego": (240, 240)}
+        )
 
 
 def _bspline_action_names(
@@ -1001,6 +1079,124 @@ def test_n_action_steps_override_applies_clamps_and_skips(tmp_path) -> None:
     service._apply_n_action_steps(policy, rollout_cfg)
     assert policy.config.n_action_steps == 8
 
+    # ACT has no horizon, so chunk_size is the bound.
+    policy = SimpleNamespace(config=SimpleNamespace(n_action_steps=1, chunk_size=60))
+    rollout_cfg.n_action_steps = 80
+    service._apply_n_action_steps(policy, rollout_cfg)
+    assert policy.config.n_action_steps == 60
+
+
+def test_act_rollout_overrides_disable_temporal_ensembling() -> None:
+    # Set explicitly: the shipped default is an operator preference that flips.
+    rollout_cfg = act_policy.RolloutConfig(disable_temporal_ensemble=True)
+    policy = SimpleNamespace(
+        config=SimpleNamespace(temporal_ensemble_coeff=0.01, n_action_steps=1),
+        temporal_ensembler=object(),
+    )
+
+    assert act_policy.apply_rollout_overrides(policy, rollout_cfg) is True
+    assert policy.config.temporal_ensemble_coeff is None
+    assert policy.temporal_ensembler is None
+
+    # Already-disabled checkpoints report no override, so the log stays honest.
+    assert act_policy.apply_rollout_overrides(policy, rollout_cfg) is False
+
+
+def test_act_rollout_overrides_respect_the_opt_out() -> None:
+    rollout_cfg = act_policy.RolloutConfig(disable_temporal_ensemble=False)
+    ensembler = object()
+    policy = SimpleNamespace(
+        config=SimpleNamespace(temporal_ensemble_coeff=0.01, n_action_steps=1),
+        temporal_ensembler=ensembler,
+    )
+
+    assert act_policy.apply_rollout_overrides(policy, rollout_cfg) is False
+    assert policy.config.temporal_ensemble_coeff == 0.01
+    assert policy.temporal_ensembler is ensembler
+
+
+def test_wrench_sample_decimates_to_the_trend_chart_rate() -> None:
+    snapshot = {
+        "robots": {
+            "robot_0": {"states": {"ext_wrench_in_world": [1, 2, 3, 0.1, 0.2, 0.3]}},
+            "robot_1": {"states": {"ext_wrench_in_world": [4, 5, 6, 0.4, 0.5, 0.6]}},
+        }
+    }
+    sides = ["left_arm", "right_arm"]
+    out: list[dict] = []
+
+    last = observations.sample_wrench(out.append, snapshot, sides, 100.0, 0.0)
+    assert out[-1] == {
+        "t": 100.0,
+        "left_arm": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+        "right_arm": [4.0, 5.0, 6.0, 0.4, 0.5, 0.6],
+    }
+
+    # The boundary must survive float error (0.1 - 0.0 == 0.09999... in practice).
+    last = observations.sample_wrench(out.append, snapshot, sides, 100.05, last)
+    assert len(out) == 1
+    observations.sample_wrench(out.append, snapshot, sides, 100.10, last)
+    assert len(out) == 2
+
+    out.clear()
+    stamp = 0.0
+    for index in range(90):
+        stamp = observations.sample_wrench(
+            out.append, snapshot, sides, 1000.0 + index / 30.0, stamp
+        )
+    deltas = {
+        round(out[i + 1]["t"] - out[i]["t"], 3) for i in range(len(out) - 1)
+    }
+    assert deltas == {0.1}
+
+
+def test_wrench_sample_tolerates_absent_and_malformed_input() -> None:
+    snapshot = {"robots": {"robot_0": {"states": {"ext_wrench_in_world": [1] * 6}}}}
+    out: list[dict] = []
+
+    # snapshot=None is a b-spline tick that skipped observation.
+    assert observations.sample_wrench(None, snapshot, ["single_arm"], 1.0, 0.0) == 0.0
+    assert observations.sample_wrench(out.append, None, ["single_arm"], 1.0, 0.0) == 0.0
+    assert not out
+
+    short = {"robots": {"robot_0": {"states": {"ext_wrench_in_world": [1, 2]}}}}
+    observations.sample_wrench(out.append, short, ["single_arm"], 1.0, 0.0)
+    assert out[-1] == {"t": 1.0}
+
+    out.clear()
+    observations.sample_wrench(out.append, snapshot, ["single_arm"], 2.0, 0.0)
+    assert out[-1]["single_arm"] == [1.0] * 6
+
+
+def test_rollout_status_exposes_wrench_and_sides(tmp_path) -> None:
+    service = _make_service(
+        tmp_path, policy=_FakePolicy([0.0]), robot=_FakeRobot("F1")
+    )
+    status = service.status()
+    assert status["wrench"] == []
+    assert status["sides"] == []
+
+    service._sides = ["left_arm", "right_arm"]
+    service._wrench.append({"t": 1.0, "left_arm": [1.0] * 6})
+    status = service.status()
+    assert status["sides"] == ["left_arm", "right_arm"]
+    assert status["wrench"][-1]["left_arm"] == [1.0] * 6
+    # The gauges read the newest sample; the rest only steady the auto-range.
+    assert service._wrench.maxlen == 30
+
+
+def test_policy_action_queue_handles_both_cache_layouts() -> None:
+    from lerobot.utils.constants import ACTION
+
+    queues = SimpleNamespace(_queues={ACTION: deque([1, 2])})
+    assert list(observations._policy_action_queue(queues, ACTION)) == [1, 2]
+
+    # ACT keeps a single _action_queue instead of a per-feature dict.
+    act_like = SimpleNamespace(_action_queue=deque([3]))
+    assert list(observations._policy_action_queue(act_like, ACTION)) == [3]
+
+    assert observations._policy_action_queue(SimpleNamespace(), ACTION) is None
+
 
 def test_rollout_for_selects_per_policy_config_and_loop_runs_for_act(
     tmp_path, monkeypatch
@@ -1010,18 +1206,28 @@ def test_rollout_for_selects_per_policy_config_and_loop_runs_for_act(
     # A diffusion family exposes its own sampler knob; an unknown family falls
     # back to the shared config, which has none.
     assert hasattr(diffusion_rollout, "noise_scheduler_type")
-    assert settings.policies.rollout_for("act").__class__.__name__ == (
+    # ACT exposes its own ensembling knob but no sampler knob.
+    act_rollout = settings.policies.rollout_for("act")
+    assert hasattr(act_rollout, "disable_temporal_ensemble")
+    assert not hasattr(act_rollout, "noise_scheduler_type")
+    # An unknown family still falls back to the shared config.
+    assert settings.policies.rollout_for("pi0").__class__.__name__ == (
         "SharedRolloutConfig"
     )
-    assert not hasattr(settings.policies.rollout_for("act"), "noise_scheduler_type")
 
-    # An ACT-typed policy (config.type="act") must drive the loop without error
-    # even though no per-family rollout config exists for it.
+    # temporal_ensemble_coeff makes the override fire, exercising the
+    # "overrides applied" log path -- it once assumed diffusion's sampler fields.
     action = [float(i) for i in range(19)]
     policy = _FakePolicy(action)
-    policy.config = SimpleNamespace(type="act")
+    policy.config = SimpleNamespace(
+        type="act", temporal_ensemble_coeff=0.01, n_action_steps=1, chunk_size=60
+    )
+    policy.temporal_ensembler = object()
     robot = _FakeRobot("F1")
     service = _make_service(tmp_path, policy=policy, robot=robot)
+    # This test guards the log path, not the shipped default.
+    service._settings.policies.act.rollout.disable_temporal_ensemble = True
+    act_rollout = service._settings.policies.rollout_for("act")
     monkeypatch.setattr(
         "flexivtrainer.rollout.observations._predict_action_chunk",
         lambda obs, pol, dev, pre, post, **kwargs: (
@@ -1037,6 +1243,33 @@ def test_rollout_for_selects_per_policy_config_and_loop_runs_for_act(
     _run_one_tick(service, robot, _checkpoint(tmp_path))
     assert robot.commands
     assert service.status()["status"] in {"idle", "stopped"}
+    # The override must have been applied and reported, not crashed past.
+    assert policy.config.temporal_ensemble_coeff is None
+    assert policy.config.n_action_steps == act_rollout.n_action_steps
+    assert any(
+        "Rollout overrides applied" in entry for entry in service.status()["logs"]
+    )
+
+
+def test_describe_rollout_overrides_reports_each_family_shape() -> None:
+    scheduler_cfg = SimpleNamespace(
+        noise_scheduler_type="DDIM", num_denoise_steps=16
+    )
+    assert "scheduler=DDIM" in _describe_rollout_overrides(scheduler_cfg)
+
+    act_cfg = act_policy.RolloutConfig(disable_temporal_ensemble=True)
+    detail = _describe_rollout_overrides(act_cfg)
+    assert "temporal ensembling disabled" in detail
+    assert str(act_cfg.n_action_steps) in detail
+
+    # With every ACT knob off, the generic detail is used.
+    opted_out = act_policy.RolloutConfig(
+        disable_temporal_ensemble=False, compile_model=False
+    )
+    assert _describe_rollout_overrides(opted_out) == "applied"
+
+    # A family with neither knob must still produce a string, not raise.
+    assert _describe_rollout_overrides(SimpleNamespace()) == "applied"
 
 
 def test_env_var_plumbs_into_rollout_config(monkeypatch) -> None:
@@ -1085,3 +1318,96 @@ def test_max_steps_reports_timeout_stop_reason(tmp_path, monkeypatch) -> None:
     assert status["stop_reason"] == "timeout"
     assert status["error"] is None
     assert any("reason=timeout steps=2" in line for line in status["logs"])
+
+
+def test_rollout_start_clears_depth_alignment_leases(tmp_path, monkeypatch) -> None:
+    # A depth preview already running would keep stealing the GIL from the
+    # policy loop until its lease lapsed, so starting a rollout drops it.
+    cleared: list[bool] = []
+    policy = _FakePolicy([float(i) for i in range(19)])
+    policy.config = SimpleNamespace(type="act")
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    service._cameras = SimpleNamespace(
+        capture_frame=lambda name, **kwargs: {},
+        clear_depth_alignment_leases=lambda: cleared.append(True),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    _run_one_tick(service, robot, _checkpoint(tmp_path))
+
+    assert cleared == [True]
+
+
+def test_act_compile_override_replaces_only_the_model(monkeypatch) -> None:
+    # Compile the tensor core, not ACTPolicy: select_action mutates a Python
+    # deque and is not a pure graph.
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        "torch.compile",
+        lambda model, **kwargs: calls.append((model, kwargs)) or "COMPILED",
+    )
+    sentinel = object()
+    policy = SimpleNamespace(config=SimpleNamespace(type="act"), model=sentinel)
+    rollout_cfg = act_policy.RolloutConfig(compile_model=True)
+
+    assert act_policy.apply_rollout_overrides(policy, rollout_cfg) is True
+    assert policy.model == "COMPILED"
+    assert calls[0][0] is sentinel
+    assert calls[0][1] == {"mode": "reduce-overhead"}
+
+
+def test_act_compile_failure_falls_back_to_eager(monkeypatch) -> None:
+    def boom(model, **kwargs):
+        raise RuntimeError("inductor unavailable")
+
+    monkeypatch.setattr("torch.compile", boom)
+    sentinel = object()
+    policy = SimpleNamespace(config=SimpleNamespace(type="act"), model=sentinel)
+
+    applied = act_policy.apply_rollout_overrides(
+        policy, act_policy.RolloutConfig(compile_model=True)
+    )
+
+    # A missing accelerator must not abort the rollout.
+    assert applied is False
+    assert policy.model is sentinel
+
+
+def test_describe_rollout_overrides_mentions_compilation() -> None:
+    detail = _describe_rollout_overrides(act_policy.RolloutConfig(compile_model=True))
+    assert "compiled" in detail
+
+    both = _describe_rollout_overrides(
+        act_policy.RolloutConfig(compile_model=True, disable_temporal_ensemble=True)
+    )
+    assert "compiled" in both and "ensembling disabled" in both
+
+
+def test_playback_speed_scales_the_action_rate(tmp_path) -> None:
+    service = RolloutService.__new__(RolloutService)
+    service._lock = threading.Lock()
+    service._logs = deque(maxlen=50)
+
+    assert service._apply_playback_speed(
+        30.0, SimpleNamespace(playback_speed=1.0)
+    ) == 30.0
+    assert not service._logs  # unscaled replay is not worth a warning
+
+    assert service._apply_playback_speed(
+        30.0, SimpleNamespace(playback_speed=2.0)
+    ) == 60.0
+    assert any("playback_speed=2" in str(entry) for entry in service._logs)
+
+    # A family without the knob must fall through unscaled.
+    assert service._apply_playback_speed(30.0, SimpleNamespace()) == 30.0

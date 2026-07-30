@@ -63,6 +63,8 @@ class WaypointRunner:
         on_error: Callable[[str], None],
         on_finished: Callable[[str | None, int], None],
         release_robots: Callable[[], None],
+        image_resolutions: dict[str, tuple[int, int]] | None = None,
+        append_wrench: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -70,6 +72,7 @@ class WaypointRunner:
         self._robots = robots
         self._sides = sides
         self._cameras = cameras
+        self._image_resolutions = image_resolutions
         self._rollout_cfg = rollout_cfg
         self._target_hz = target_hz
         self._device = device
@@ -81,6 +84,8 @@ class WaypointRunner:
         self._stop_event = stop_event
         self._append_log = append_log
         self._append_metric = append_metric
+        self._append_wrench = append_wrench
+        self._last_wrench_t = 0.0
         self._on_error = on_error
         self._on_finished = on_finished
         self._release_robots = release_robots
@@ -170,7 +175,9 @@ class WaypointRunner:
                 stage_times["fault_check"].append(now - mark)
                 mark = now
 
-                images = observations.grab_images(self._cameras, camera_names)
+                images = observations.grab_images(
+                    self._cameras, camera_names, self._image_resolutions
+                )
                 now = time.monotonic()
                 stage_times["grab_images"].append(now - mark)
                 mark = now
@@ -238,6 +245,10 @@ class WaypointRunner:
                                 f"replan_steps={replan_steps} chunk={effective}",
                             )
                             replan_steps = effective
+                    # Anchored on loop_start, not on inference completion: replan
+                    # wipes pending waypoints every tick, so waypoint 0 only fires
+                    # while inference is faster than dt. Anchoring later (or raising
+                    # anchor) pushes it past the next replan and it never fires.
                     target_times = [
                         loop_start + (k + anchor) * dt
                         for k in range(len(action_lists))
@@ -256,6 +267,13 @@ class WaypointRunner:
                     "infer_ms": round(infer_seconds * 1000.0, 1),
                     "fresh": bool(fresh),
                 })
+                self._last_wrench_t = observations.sample_wrench(
+                    self._append_wrench,
+                    snapshot,
+                    sides,
+                    loop_start,
+                    self._last_wrench_t,
+                )
                 if step % log_every == 0:
                     self._log_timing(
                         step,

@@ -24,6 +24,7 @@ from typing import Any
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.policies import act as act_policy
 from flexivtrainer.policies import bspline_diffusion as bspline_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
@@ -32,6 +33,7 @@ from flexivtrainer.rollout.checkpoint import (
     _checkpoint_target_hz,
     _default_policy_loader,
     _positive_float,
+    checkpoint_image_resolutions,
     resolve_checkpoint_path,
 )
 from flexivtrainer.rollout.executors.bspline import (
@@ -43,10 +45,29 @@ from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
 
 _ROLLOUT_OVERRIDES = {
+    "act": act_policy.apply_rollout_overrides,
     "bspline_diffusion": bspline_policy.apply_rollout_overrides,
     "diffusion": diffusion_policy.apply_rollout_overrides,
     "multi_task_dit": dit_policy.apply_rollout_overrides,
 }
+
+
+def _describe_rollout_overrides(rollout_cfg: Any) -> str:
+    """Summarize an applied override; families expose different knobs."""
+    parts: list[str] = []
+    scheduler = getattr(rollout_cfg, "noise_scheduler_type", "")
+    if scheduler:
+        steps = getattr(rollout_cfg, "num_denoise_steps", 0)
+        parts.append(f"scheduler={scheduler} inference_steps={steps}")
+    if getattr(rollout_cfg, "disable_temporal_ensemble", False):
+        parts.append(
+            "temporal ensembling disabled; executing "
+            f"n_action_steps={rollout_cfg.n_action_steps} per chunk"
+        )
+    if getattr(rollout_cfg, "compile_model", False):
+        # Compilation is lazy, so the cost lands on the first inference step.
+        parts.append("model compiled; first inference includes compilation")
+    return "; ".join(parts) or "applied"
 
 
 class RolloutService:
@@ -88,10 +109,13 @@ class RolloutService:
         self._robots: list[Any] = []
         self._device = "cpu"
         self._target_hz: float | None = None
+        self._sides: list[str] = []
         self._runner: WaypointRunner | BSplineRunner | None = None
         self._stop_event = threading.Event()
         self._logs: deque[str] = deque(maxlen=2000)
         self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
+        # ~3 s at the sampled rate; only the newest drives the UI gauges.
+        self._wrench: deque[dict[str, Any]] = deque(maxlen=30)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -110,6 +134,8 @@ class RolloutService:
                 "logs": list(self._logs),
                 "log_lines": len(self._logs),
                 "metrics": list(self._metrics),
+                "wrench": list(self._wrench),
+                "sides": list(self._sides),
                 "target_hz": self._target_hz,
             }
 
@@ -164,12 +190,14 @@ class RolloutService:
             getattr(policy, "config", None), "type", None
         ) or getattr(policy, "name", "")
         is_bspline = policy_type == "bspline_diffusion"
-        target_hz = self._resolve_target_hz(
+        image_resolutions = checkpoint_image_resolutions(checkpoint_path)
+        rollout_cfg = self._settings.policies.rollout_for(policy_type)
+        dataset_hz = self._resolve_target_hz(
             checkpoint_path, policy, require_metadata=is_bspline
         )
-        rollout_cfg = self._settings.policies.rollout_for(policy_type)
+        target_hz = self._apply_playback_speed(dataset_hz, rollout_cfg)
         override_fn = _ROLLOUT_OVERRIDES.get(policy_type)
-        scheduler_overridden = (
+        overrides_applied = (
             override_fn(policy, rollout_cfg) if override_fn is not None else False
         )
         bspline_layout: BSplineActionLayout | None = None
@@ -222,6 +250,7 @@ class RolloutService:
                 sides=sides,
                 followers=followers,
                 cameras=self._cameras,
+                image_resolutions=image_resolutions,
                 rollout_cfg=rollout_cfg,
                 target_hz=target_hz,
                 device=device,
@@ -233,6 +262,7 @@ class RolloutService:
                 stop_event=self._stop_event,
                 append_log=self._append_log,
                 append_metric=self._metrics.append,
+                append_wrench=self._wrench.append,
                 on_error=self._on_runner_error,
                 on_cleanup_error=self._on_runner_cleanup_error,
                 on_finished=self._on_runner_finished,
@@ -248,6 +278,7 @@ class RolloutService:
                 robots=robots,
                 sides=sides,
                 cameras=self._cameras,
+                image_resolutions=image_resolutions,
                 rollout_cfg=rollout_cfg,
                 target_hz=target_hz,
                 device=device,
@@ -259,6 +290,7 @@ class RolloutService:
                 stop_event=self._stop_event,
                 append_log=self._append_log,
                 append_metric=self._metrics.append,
+                append_wrench=self._wrench.append,
                 on_error=self._on_runner_error,
                 on_finished=self._on_runner_finished,
                 release_robots=self._release_robots,
@@ -272,9 +304,18 @@ class RolloutService:
             self._robots = robots
             self._device = device
             self._target_hz = target_hz
+            self._sides = list(sides)
             self._running = True
+            # Drop any depth-preview lease now; alignment would otherwise keep
+            # stealing the GIL from the policy loop until it lapsed on its own.
+            clear_leases = getattr(
+                self._cameras, "clear_depth_alignment_leases", None
+            )
+            if callable(clear_leases):
+                clear_leases()
             self._logs.clear()
             self._metrics.clear()
+            self._wrench.clear()
             self._logs.append(
                 _encode_ui_log(
                     "INFO",
@@ -283,15 +324,13 @@ class RolloutService:
                     f"device={device} sides={'+'.join(sides)}",
                 )
             )
-            if scheduler_overridden:
+            if overrides_applied:
                 self._logs.append(
                     _encode_ui_log(
                         "INFO",
                         "ROLLOUT",
-                        "Scheduler overridden",
-                        "scheduler="
-                        f"{rollout_cfg.noise_scheduler_type} "
-                        f"inference_steps={rollout_cfg.num_denoise_steps}",
+                        "Rollout overrides applied",
+                        _describe_rollout_overrides(rollout_cfg),
                     )
                 )
         self._runner = runner
@@ -353,6 +392,25 @@ class RolloutService:
     def _teleop_initialized(self) -> bool:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
+
+    def _apply_playback_speed(self, dataset_hz: float, rollout_cfg: Any) -> float:
+        """Scale the action rate away from the rate the policy trained at."""
+        speed = _positive_float(getattr(rollout_cfg, "playback_speed", None)) or 1.0
+        if speed == 1.0:
+            return dataset_hz
+        target_hz = dataset_hz * speed
+        with self._lock:
+            self._logs.append(
+                _encode_ui_log(
+                    "WARN",
+                    "ROLLOUT",
+                    "Replaying off the trained rate",
+                    f"playback_speed={speed:g} dataset={dataset_hz:.1f}Hz "
+                    f"target={target_hz:.1f}Hz; commanded velocity scales with it "
+                    "and motion limits are not rescaled",
+                )
+            )
+        return target_hz
 
     def _resolve_target_hz(
         self,
@@ -469,12 +527,15 @@ class RolloutService:
             n_obs_steps = getattr(config, "n_obs_steps", None)
             if horizon is not None and n_obs_steps is not None:
                 upper = horizon - n_obs_steps + 1
-                if value > upper:
-                    warn(
-                        "Clamped rollout n_action_steps to the checkpoint's bound",
-                        f"requested={requested} clamped={upper}",
-                    )
-                    value = upper
+            else:
+                # ACT has no horizon; its bound is the action-chunk length.
+                upper = getattr(config, "chunk_size", None)
+            if upper is not None and value > upper:
+                warn(
+                    "Clamped rollout n_action_steps to the checkpoint's bound",
+                    f"requested={requested} clamped={upper}",
+                )
+                value = upper
             config.n_action_steps = value
         except Exception as exc:
             warn("Failed to override n_action_steps", describe_exception(exc))
