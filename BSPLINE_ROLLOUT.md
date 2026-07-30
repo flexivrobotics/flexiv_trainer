@@ -626,11 +626,20 @@ training-target divergence, and §12.2 originally recorded it as "the same as
 ours" — that was wrong.
 
 **Fix.** Slice `expected_rows` (16) control rows; pad only the shortfall.
-Verified arithmetic: `len(coeffs) == len(knots) - degree - 1`, the first 12 rows
-are always available, and only the **last four windows (~1.4%)** need padding
-(amounts 1, 2, 3, 4). Nothing about decoding changes — every consumer already
-slices `[:-(degree + 1)]`, and the existing reconstruction test still confirms a
-decoded chunk reproduces the global fit.
+`len(coeffs) == len(knots) - degree - 1`, so the first 12 rows are always
+available and only the last four *windows* run short (pad amounts 1, 2, 3, 4).
+Nothing about decoding changes — every consumer already slices
+`[:-(degree + 1)]`, and the existing reconstruction test still confirms a decoded
+chunk reproduces the global fit.
+
+Measured on a real re-convert of `merged_20260728_163313_nodepth`: frames whose
+tail still repeats row 11 fell from **100% to 17.9%**. It is not ~1.4% — that is
+the per-*window* figure. Every trailing frame past the last chunk boundary maps to
+the final window, so a whole tail of each episode shares its padded chunk (81 of
+583 frames in episode 0). That residual is structural: there are no further
+control points to look ahead to, and the reference behaves identically (its
+`while local_idx_in_episode < ep_length ...` loop reuses the last chunk the same
+way).
 
 Side effect to expect: `tied_stats` computes min/max/mean/std over all 16 rows, so
 real tail values shift the tied per-channel statistics. Converted datasets are

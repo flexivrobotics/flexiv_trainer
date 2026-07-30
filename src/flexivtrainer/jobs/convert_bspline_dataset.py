@@ -21,7 +21,7 @@ import math
 import shutil
 import tempfile
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +39,7 @@ from flexivtrainer.data.bspline import (
     rotation_6d_to_matrix,
     validate_parameter_matrix_shape,
 )
+from flexivtrainer.observability import Pulse, section
 
 _INFO_PATH = Path("meta/info.json")
 _BSPLINE_METADATA_PATH = Path("meta/bspline.json")
@@ -169,6 +170,7 @@ def _build_targets(
     max_error: float,
     smoothing: float,
     max_knots: int | None,
+    on_episode: Callable[[], None] | None = None,
 ) -> tuple[dict[tuple[int, int], np.ndarray], list[dict[str, Any]]]:
     grouped: dict[int, list[_RecordedFrame]] = defaultdict(list)
     for frame in frames:
@@ -222,6 +224,8 @@ def _build_targets(
                 "tolerance_reached": result.fit.tolerance_reached,
             }
         )
+        if on_episode is not None:
+            on_episode()
     return targets, reports
 
 
@@ -474,13 +478,29 @@ def convert_lerobot_tcp_actions_to_bspline(
     if output.is_relative_to(source):
         raise ValueError("Output dataset cannot be placed inside the source dataset")
 
+    section("B-spline conversion", f"{source.name} -> {output.name}")
+
     info = _read_json(source / _INFO_PATH)
     action_names = _load_action_names(info)
     layouts = detect_tcp_action_layouts(action_names, sides=sides)
+
+    pulse = Pulse("Reading recorded actions").start()
     frames = _load_recorded_frames(source, len(action_names))
+    pulse.stop("OK", "Read recorded actions", f"{len(frames)} frames")
     if not frames:
         raise ValueError("Source dataset contains no frames")
 
+    episode_count = len({frame.episode_index for frame in frames})
+    fitted = 0
+
+    def note_episode() -> None:
+        nonlocal fitted
+        fitted += 1
+
+    pulse = Pulse(
+        "Fitting B-splines",
+        detail_factory=lambda: f"episode {fitted}/{episode_count}",
+    ).start()
     targets, episode_reports = _build_targets(
         frames,
         layouts,
@@ -490,7 +510,9 @@ def convert_lerobot_tcp_actions_to_bspline(
         max_error=max_error,
         smoothing=smoothing,
         max_knots=max_knots,
+        on_episode=note_episode,
     )
+    pulse.stop("OK", "Fitted B-splines", f"{episode_count} episodes")
 
     parameter_rows = chunk_size + 2 * degree
     control_names = [name for layout in layouts for name in layout.control_names]
@@ -548,23 +570,35 @@ def convert_lerobot_tcp_actions_to_bspline(
         tempfile.mkdtemp(prefix=f".{output.name}.bspline-", dir=output.parent)
     )
     try:
+        # Copies every video stream as well, so this dominates on large datasets.
+        pulse = Pulse("Copying source dataset").start()
         shutil.copytree(source, staging, dirs_exist_ok=True)
+        pulse.stop("OK", "Copied source dataset")
+
         (staging / _INFO_PATH).write_text(
             json.dumps(converted_info, indent=4) + "\n",
             encoding="utf-8",
         )
+        pulse = Pulse("Writing B-spline actions").start()
         _replace_action_data(staging, targets, converted_info["features"])
+        pulse.stop("OK", "Wrote B-spline actions", f"{len(targets)} frames")
+
+        pulse = Pulse("Recomputing action statistics").start()
         _refresh_action_statistics(
             staging,
             targets,
             action_feature,
             parameter_rows=parameter_rows,
         )
+        pulse.stop("OK", "Recomputed action statistics")
+
         (staging / _BSPLINE_METADATA_PATH).write_text(
             json.dumps(metadata, indent=4) + "\n",
             encoding="utf-8",
         )
+        pulse = Pulse("Validating converted dataset").start()
         _validate_output(staging, len(frames), flattened_action_dim)
+        pulse.stop("OK", "Validated converted dataset")
         staging.replace(output)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)

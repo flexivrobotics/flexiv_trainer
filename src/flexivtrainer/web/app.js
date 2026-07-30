@@ -4981,7 +4981,7 @@ function renderTraining() {
             ${isFineTune ? `
                 <div class="output-picker"><div><p class="eyebrow">Source Checkpoint</p><strong>${escapeHtml(state.trainingCheckpointPath || "—")}</strong></div></div>
             ` : `<div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
-                <div class="policy-grid" id="policy-grid"></div>
+                <div class="policy-grid policy-grid--catalog" id="policy-grid"></div>
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
             </div>`}
             <div id="policy-config-panel"></div>
@@ -5071,7 +5071,9 @@ function renderTraining() {
     const stateLabel = isPaused
         ? "Paused"
         : isRunning
-            ? "Running"
+            ? status.phase === "converting"
+                ? "Converting Dataset"
+                : "Training"
             : isStopped
                 ? "Stopped"
                 : _formatTrainingStatusLabel(status.status);
@@ -5592,6 +5594,9 @@ function getTrainingProgressDisplay(status) {
             label: escapeHtml(formatValue(status.error || "Training failed")),
         };
     }
+    if (status.status === "running" && status.phase === "converting") {
+        return { percent: 0, label: "Preparing B-spline dataset…" };
+    }
 
     const latestTrackerLine = _latestTrainingTrackerLine(status);
     const tracker = _parseTrainingTrackerLine(latestTrackerLine);
@@ -5726,7 +5731,10 @@ function renderTrainingTerminalLogs(status) {
         if (metrics.grad_norm !== undefined) parts.push(`grdn=${Number(metrics.grad_norm).toFixed(3)}`);
         if (metrics.lr !== undefined) parts.push(`lr=${Number(metrics.lr).toExponential(2)}`);
         if (status.log_lines !== undefined) parts.push(`lines=${status.log_lines}`);
-        html += _terminalLogRow("INFO", "·", "Training job running", parts.join(" "));
+        const runningMessage = status.phase === "converting"
+            ? "B-spline dataset conversion running"
+            : "Training job running";
+        html += _terminalLogRow("INFO", "·", runningMessage, parts.join(" "));
     }
 
     for (const line of logs) {

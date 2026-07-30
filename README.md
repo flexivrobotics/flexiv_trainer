@@ -194,6 +194,12 @@ leaving the source dataset unchanged. Observations and videos are copied
 without re-encoding. The copied dataset's discrete TCP `action` is replaced by
 one flattened B-spline parameter segment per frame.
 
+When **B-Spline Diffusion** is selected in Policy Training, the Start button
+runs this conversion automatically in the background and launches training
+only after the converted dataset validates successfully. Other policy types
+continue to train directly from the selected dataset. The command below remains
+available when a reusable converted dataset is wanted ahead of time.
+
 With the default cubic configuration, one arm is represented by XYZ plus
 rotation-6D. The parameter matrix has shape:
 
