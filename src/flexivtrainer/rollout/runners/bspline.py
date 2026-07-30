@@ -161,6 +161,8 @@ class BSplineRunner:
                     rollout_cfg.time_align_error_threshold
                 ),
                 time_align_max_fraction=rollout_cfg.time_align_max_fraction,
+                handoff_blend_s=getattr(rollout_cfg, "handoff_blend_s", 0.15),
+                handoff_max_accel=getattr(rollout_cfg, "handoff_max_accel", 2.0),
             )
             if self._bspline_layout.gripper_sides:
                 gripper_executor = GripperExecutor(
@@ -243,6 +245,7 @@ class BSplineRunner:
         max_steps = self._max_steps
         inference_latency = 0.0
         alignment_error = 0.0
+        blend_s = 0.0
         step = 0
         inference_future: (
             Future[tuple[float, BSplineInstallResult | None]] | None
@@ -273,6 +276,7 @@ class BSplineRunner:
                     inference_future = None
                     if result is not None:
                         alignment_error = result.alignment_error
+                        blend_s = result.blend_s
                         installed = True
                         if result.warning is not None:
                             warn("B-spline handoff warning", result.warning)
@@ -336,6 +340,7 @@ class BSplineRunner:
                         ),
                         "infer_ms": round(inference_latency * 1000.0, 1),
                         "alignment_error": round(alignment_error, 6),
+                        "handoff_blend_s": round(blend_s, 4),
                         "handoff_warnings": executor_status.handoff_warnings,
                         "fresh": installed,
                     }

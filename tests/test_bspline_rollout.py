@@ -106,6 +106,8 @@ def _executor(
     stop_event: threading.Event | None = None,
     clock=None,
     threshold: float = 0.1,
+    blend_s: float = 0.15,
+    max_accel: float = 2.0,
 ) -> BSplineExecutor:
     kwargs = {} if clock is None else {"clock": clock}
     return BSplineExecutor(
@@ -115,6 +117,8 @@ def _executor(
         _LIMITS,
         checkpoint_fps=10.0,
         time_align_error_threshold=threshold,
+        handoff_blend_s=blend_s,
+        handoff_max_accel=max_accel,
         **kwargs,
     )
 
@@ -221,15 +225,18 @@ def test_first_plan_clamps_zero_to_valid_domain() -> None:
 def test_replacement_alignment_uses_l1_and_excludes_gripper() -> None:
     executor = _executor(gripper=True, threshold=1e-4)
     executor.install(_action(gripper=True), inference_latency_s=0.0, now=0.0)
-    executor.execute_once(now=0.15)
+    executor.execute_once(now=0.1)
 
+    # Alignment targets where the outgoing plan is at the install instant, so the
+    # expected phase is install_time * source_rate (0.1 * 10), not the phase of
+    # whichever tick happened to run last.
     result = executor.install(
         _action(gripper=True, gripper_offset=100.0),
         inference_latency_s=0.05,
-        now=0.2,
+        now=0.1,
     )
 
-    assert result.start_time == pytest.approx(1.5, abs=1e-3)
+    assert result.start_time == pytest.approx(1.0, abs=1e-3)
     assert result.alignment_error < 1e-4
     assert result.warning is None
 
@@ -241,10 +248,155 @@ def test_alignment_is_capped_to_first_twenty_percent_and_warns() -> None:
 
     result = executor.install(_action(), inference_latency_s=0.01, now=0.5)
 
+    # The outgoing plan is at phase 5.0 by now, beyond the 20% cap of 1.8, so the
+    # residual is whatever the cap leaves unmatched.
     assert result.start_time <= 1.8
-    assert result.alignment_error == pytest.approx(4.0 - result.start_time)
+    assert result.alignment_error == pytest.approx(5.0 - result.start_time)
     assert result.warning is not None
     assert executor.handoff_warnings == 1
+
+
+_Y_CHANNEL = 2  # row layout: knot, tcp_pose.x, tcp_pose.y, tcp_pose.z, rot6d...
+
+
+def _shift_y(action: np.ndarray, delta: float) -> np.ndarray:
+    """Offset the whole curve along y.
+
+    The fixture's only phase-varying channel is x, so a y offset is a residual
+    that time alignment provably cannot absorb by re-phasing: the gap left after
+    `_align` is exactly `delta`. That makes the handoff step exactly measurable.
+    """
+    channels = len(_channels(("arm",)))
+    shifted = action.copy().reshape(-1, channels)
+    shifted[:, _Y_CHANNEL] += delta
+    return shifted.reshape(-1)
+
+
+# Hand off early enough that the sent phase is still reachable within
+# time_align_max_fraction; past the cap the x mismatch would dominate the
+# residual and mask the y gap this fixture is built to measure.
+_HANDOFF_AT = 0.1
+
+
+def _handoff(executor: BSplineExecutor, delta: float):
+    """Run one plan, then replace it with one offset by `delta` in y."""
+    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+    executor.execute_once(now=_HANDOFF_AT)
+    sent_y = float(executor.last_raw_command[_Y_CHANNEL - 1])
+    result = executor.install(
+        _shift_y(_action(), delta),
+        inference_latency_s=0.02,
+        now=_HANDOFF_AT,
+    )
+    return sent_y, result
+
+
+def _commanded_y(executor: BSplineExecutor) -> float:
+    return float(executor.last_raw_command[_Y_CHANNEL - 1])
+
+
+def test_handoff_blend_starts_from_the_pose_that_was_last_sent() -> None:
+    executor = _executor()
+    sent_y, result = _handoff(executor, 0.01)
+    assert result.alignment_error == pytest.approx(0.01, abs=1e-6)
+    assert result.blend_s > 0.0
+
+    executor.execute_once(now=_HANDOFF_AT)
+
+    # The decaying offset cancels the residual exactly on the first tick.
+    assert _commanded_y(executor) == pytest.approx(sent_y, abs=1e-9)
+
+
+def test_handoff_blend_decays_fully_onto_the_new_plan() -> None:
+    executor = _executor()
+    _, result = _handoff(executor, 0.01)
+
+    executor.execute_once(now=_HANDOFF_AT + result.blend_s)
+
+    # Past the window the offset is gone and the new plan's y is commanded.
+    assert _commanded_y(executor) == pytest.approx(0.01, abs=1e-9)
+
+
+def test_handoff_blend_never_steps_the_commanded_pose() -> None:
+    executor = _executor()
+    _, result = _handoff(executor, 0.01)
+
+    commanded = []
+    now = _HANDOFF_AT
+    while now <= _HANDOFF_AT + result.blend_s + 0.05:
+        executor.execute_once(now=now)
+        commanded.append(_commanded_y(executor))
+        now += 0.005
+    steps = np.abs(np.diff(commanded))
+
+    # The full 10 mm correction is spread across the window, never taken at once.
+    assert steps.max() < 0.001
+    assert commanded[-1] == pytest.approx(0.01, abs=1e-6)
+
+
+def test_handoff_blend_disabled_restores_the_step() -> None:
+    executor = _executor(blend_s=0.0)
+    sent_y, result = _handoff(executor, 0.01)
+    assert result.blend_s == 0.0
+
+    executor.execute_once(now=_HANDOFF_AT)
+
+    # Without blending the entire gap lands on one control tick.
+    assert abs(_commanded_y(executor) - sent_y) == pytest.approx(0.01, abs=1e-6)
+
+
+def _scale_x(action: np.ndarray, factor: float) -> np.ndarray:
+    """Scale the x controls so the curve travels at a different rate.
+
+    The fixture's x controls are the Greville abscissae, so the spline reproduces
+    x(t) = t. Scaling them makes x(t) = factor * t, i.e. a genuinely different
+    velocity through the same region -- what alignment cannot match.
+    """
+    channels = len(_channels(("arm",)))
+    scaled = action.copy().reshape(-1, channels)
+    scaled[:, 1] *= factor
+    return scaled.reshape(-1)
+
+
+def test_handoff_preserves_commanded_velocity() -> None:
+    """The handoff must not stall or snap the commanded rate, only fix the pose."""
+    executor = _executor()
+    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+
+    period = 0.005
+    xs = []
+    now = 0.0
+    while now < _HANDOFF_AT - 1e-9:
+        executor.execute_once(now=now)
+        xs.append(float(executor.last_raw_command[0]))
+        now += period
+    before = abs(xs[-1] - xs[-2]) / period
+
+    executor.install(
+        _scale_x(_action(), 1.1), inference_latency_s=0.02, now=_HANDOFF_AT
+    )
+
+    after = []
+    now = _HANDOFF_AT
+    for _ in range(4):
+        executor.execute_once(now=now)
+        after.append(float(executor.last_raw_command[0]))
+        now += period
+    first = abs(after[1] - after[0]) / period
+
+    # No dead stop, and no rate snap: the commanded speed carries across the splice.
+    assert first > 0.0
+    assert first == pytest.approx(before, rel=0.15)
+
+
+def test_blend_window_stretches_with_the_gap() -> None:
+    tight = _handoff(_executor(), 0.002)[1]
+    loose = _handoff(_executor(), 0.05)[1]
+
+    # A small gap uses the configured base; a large one is stretched so the
+    # acceleration the offset adds stays bounded.
+    assert tight.blend_s == pytest.approx(0.15)
+    assert loose.blend_s > tight.blend_s
 
 
 def test_invalid_replacement_does_not_replace_active_plan() -> None:

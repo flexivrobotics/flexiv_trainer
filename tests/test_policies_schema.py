@@ -91,6 +91,8 @@ def test_bspline_diffusion_rollout_family_defaults() -> None:
     assert rollout.predict_before_end_s == 0.06
     assert rollout.time_align_error_threshold == 0.1
     assert rollout.time_align_max_fraction == 0.2
+    assert rollout.handoff_blend_s == 0.15
+    assert rollout.handoff_max_accel == 2.0
     assert rollout.noise_scheduler_type == "DDIM"
     assert rollout.num_denoise_steps == 16
 
