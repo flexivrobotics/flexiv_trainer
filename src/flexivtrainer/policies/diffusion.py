@@ -53,7 +53,15 @@ class TrainingConfig(SharedTrainingConfig):
     resize_shape: tuple[int, int] = Field(
         (240, 320), description="H,W; ~1/2 camera dims"
     )
-    crop_shape: tuple[int, int] = Field((216, 288), description="H,W; ~90% of resize")
+    # LeRobot derives crop_shape from resize_shape * crop_ratio whenever
+    # resize_shape is set, and clears it entirely at ratio 1.0, so crop_shape below
+    # is inert and this is the only knob that turns random-crop augmentation on.
+    crop_ratio: float = Field(
+        0.9, gt=0.0, le=1.0, description="random-crop fraction; 1.0 disables cropping"
+    )
+    crop_shape: tuple[int, int] = Field(
+        (216, 288), description="derived from crop_ratio; not read"
+    )
     down_dims: tuple[int, int, int] = Field(
         (256, 512, 1024), description="U-Net widths; smaller = less overfit"
     )

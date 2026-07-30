@@ -410,7 +410,7 @@ def part_b(
                 tick()
                 now += period
             now = max(now, deadline)
-            result = executor.install(pred_vec, inference_latency_s=latency, now=now)
+            result = executor.install(pred_vec, observation_age_s=latency, now=now)
             plan_index += 1
             installed = True
             plan_events.append(
@@ -420,6 +420,9 @@ def part_b(
                     "infer_ms": round(latency * 1000, 1),
                     "start_time": round(result.start_time, 4),
                     "alignment_error": round(result.alignment_error, 6),
+                    "align_searched": result.align_searched,
+                    "align_capped": result.align_capped,
+                    "align_endpoint_error": round(result.align_endpoint_error, 6),
                     "warning": result.warning,
                 }
             )
@@ -447,9 +450,21 @@ def part_b(
         )
     warned = [e for e in plan_events if e["warning"]]
     print(f"  handoff warnings   : {len(warned)} / {plan_index}")
+    searched = sum(1 for e in plan_events if e["align_searched"])
+    capped = sum(1 for e in plan_events if e["align_capped"])
+    print(f"  align searched     : {searched} / {plan_index}")
+    print(f"  align capped @20%  : {capped} / {plan_index}")
     print(
         f"  alignment_error    : median {np.median([e['alignment_error'] for e in plan_events]):.6f}"
     )
+    # ~0 means the residual is curve disagreement between samples, not phase error.
+    hits = [e for e in plan_events if e["align_searched"]]
+    if hits:
+        gain = [e["align_endpoint_error"] - e["alignment_error"] for e in hits]
+        print(
+            f"  search gain        : median {np.median(gain):.6f}  "
+            f"max {max(gain):.6f}  improved {sum(g > 1e-9 for g in gain)}/{len(hits)}"
+        )
     _smoothness_report(rows_out, len(layouts), period)
     return rows_out, plan_events
 

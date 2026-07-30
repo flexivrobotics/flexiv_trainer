@@ -625,8 +625,10 @@ class TrainingService:
                 "B-spline Diffusion requires format-v2 meta/bspline.json"
             )
         metadata = self._read_json(metadata_path)
-        if metadata.get("format_version") != 2:
-            raise ValueError("B-spline dataset format_version must be 2")
+        # v3 carries real lookahead control points in the tail rows; v2 held a
+        # repeated constant there, so its targets are not comparable.
+        if metadata.get("format_version") != 3:
+            raise ValueError("B-spline dataset format_version must be 3; re-convert")
 
         degree = metadata.get("degree")
         if isinstance(degree, bool) or not isinstance(degree, int) or degree < 1:

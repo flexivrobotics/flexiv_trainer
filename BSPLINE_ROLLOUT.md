@@ -89,10 +89,14 @@ that lets one spline carry both translation and rotation.
 
 ### Reading the matrix as a spline
 
-Only `rows - (degree + 1)` = 16 − 4 = **12 control rows are active**. The
-remaining 4 are padding that repeats the last control point — it exists so the
-policy sees a fixed rectangular tensor without inflating the boundary-knot
-multiplicity ([data/bspline.py:378-388](src/flexivtrainer/data/bspline.py#L378-L388)).
+Only `rows - (degree + 1)` = 16 − 4 = **12 control rows are active** — the decoder
+below ignores rows 12–15. They are not filler, though: they hold the *next four
+real control points* of the episode fit, so the policy gets genuine lookahead
+supervision in them ([data/bspline.py:369-392](src/flexivtrainer/data/bspline.py#L369-L392)).
+Only the last few windows of an episode, which run past the end of the
+coefficient array, fall back to repeating the last available row. They used to
+repeat unconditionally, which held 23.7% of the training target constant — see
+§12.7.
 
 ```python
 knots    = matrix[:, 0]                    # 16 values, nondecreasing
@@ -163,7 +167,7 @@ Two more B-spline-only behaviors:
 ┌────────────────────────────────────────────────────────▼─────────────┐
 │ INFERENCE POOL  "rollout-bspline-inference"   1 worker               │
 │   predict_action_chunk() → postprocess (unnormalize)                 │
-│   → executor.install(flat_304_vector, inference_latency_s)           │
+│   → executor.install(flat_304_vector, observation_age_s)             │
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -195,7 +199,7 @@ about to run out it wakes exactly `predict_before_end_s` before the end.
 ## 4. Sampling the curve: from wall-clock to spline parameter
 
 The entire time base is these three lines
-([`_spline_time`](src/flexivtrainer/rollout/executors/bspline.py#L555-L563)):
+([`_spline_time`](src/flexivtrainer/rollout/executors/bspline.py#L579-L587)):
 
 ```python
 source_rate = checkpoint_fps * speed_scale     # 30.0 * 1.0 = 30.0
@@ -222,7 +226,7 @@ Consequences worth internalizing:
   the trajectory in time.
 
 Each sample becomes, per arm
-([`execute_once`](src/flexivtrainer/rollout/executors/bspline.py#L564-L606)):
+([`execute_once`](src/flexivtrainer/rollout/executors/bspline.py#L588-L629)):
 
 ```python
 raw        = self._sample(plan, now)     # spline(t) + any active handoff blend
@@ -235,7 +239,7 @@ robot.SendCartesianMotionForce(position + quaternion,
                                max_lin_acc, max_ang_acc)
 ```
 
-Everything commanded flows through [`_sample`](src/flexivtrainer/rollout/executors/bspline.py#L380-L396),
+Everything commanded flows through [`_sample`](src/flexivtrainer/rollout/executors/bspline.py#L383-L399),
 which adds the handoff correction described in §5. The blend is keyed on **real**
 seconds, not spline time, so `speed_scale` cannot change how fast a correction is
 retired.
@@ -254,7 +258,7 @@ to wherever the new curve begins. Two reasons they differ: the policy conditione
 on an observation from ~one inference-latency ago, and diffusion sampling is
 stochastic.
 
-`install()` ([executors/bspline.py:477-553](src/flexivtrainer/rollout/executors/bspline.py#L477-L553))
+`install()` ([executors/bspline.py:491-577](src/flexivtrainer/rollout/executors/bspline.py#L491-L577))
 handles it in two cases:
 
 **First plan** — nothing has been commanded yet, so start at
@@ -262,7 +266,7 @@ handles it in two cases:
 Alignment error is 0 by definition, and no blend is needed.
 
 **Every later plan** — call `_align()`
-([executors/bspline.py:428-475](src/flexivtrainer/rollout/executors/bspline.py#L428-L475)),
+([executors/bspline.py:431-489](src/flexivtrainer/rollout/executors/bspline.py#L431-L489)),
 which answers: *at what parameter `t*` on the new curve does the pose most
 closely match where the outgoing plan is at this instant?*
 
@@ -277,23 +281,31 @@ new curve  ─────────────●─────────
 
 Mechanics:
 
-1. Seed the search window from inference latency:
-   `initial_max = min_time + inference_latency_s * source_rate`. Intuition — the
-   policy planned from a stale observation, so the matching phase is roughly
-   *latency × rate* knot-units in. A 50 ms inference at 30 Hz ⇒ ~1.5 knot-units.
+1. Seed the search window from the **age of the observation** the plan was
+   conditioned on: `initial_max = min_time + observation_age_s * source_rate`.
+   Intuition — the policy planned from a stale observation, so the matching phase
+   is roughly *age × rate* knot-units in. The age is measured from when the
+   planner grabbed that observation, so it covers the ≤ 33 ms queueing wait at
+   30 Hz *plus* the ~25 ms of inference compute. It used to be the compute time
+   alone, which made the window roughly 2× too small.
 2. Hard-cap the window at `min_time + (max_time - min_time) * time_align_max_fraction`
    (default 0.2). **This is a safety rail**: it forbids skipping more than 20% of
    the new curve, so a bad match can never fast-forward the robot deep into the
-   plan.
-3. `scipy.optimize.minimize_scalar(..., method="bounded")` on the L1 pose
-   difference over the aligned channels (positions + rotation-6D; gripper is
-   excluded from alignment).
-4. If the resulting max-abs error still exceeds `time_align_error_threshold`
-   (default 0.1), widen the window ×1.5 and retry — up to 20× or until the cap
-   is hit.
+   plan. Hitting it sets `align_capped`.
+3. **Always** run at least one `scipy.optimize.minimize_scalar(..., method="bounded")`
+   pass on the L1 pose difference over the aligned channels (positions +
+   rotation-6D; gripper is excluded from alignment). `min_time` stays a competing
+   candidate and the optimizer's result is taken only if it is strictly better —
+   a bounded search can land worse than an endpoint on a non-unimodal objective.
+   `align_searched` records that the search ran; it is false only when the window
+   collapses to a point (`observation_age_s == 0`).
+4. If the best max-abs error still exceeds `time_align_error_threshold`
+   (default 0.1), widen the window ×1.5 and search again — up to 20× or until the
+   cap is hit. The threshold governs *widening*, never whether to search at all;
+   §12.6 is what happens when it does gate the search.
 5. If it *still* exceeds threshold, install anyway but emit a warning, bump
    `handoff_warnings`, and surface it in the UI log
-   ([runners/bspline.py:277-285](src/flexivtrainer/rollout/runners/bspline.py#L277-L285)).
+   ([runners/bspline.py:322-329](src/flexivtrainer/rollout/runners/bspline.py#L322-L329)).
 
 ### Why alignment alone is not enough
 
@@ -317,7 +329,7 @@ plan. That makes the handoff C¹. It is **not** the old position-fade, which
 blended toward the plan linearly and therefore injected a velocity step at each
 end of the window.
 
-`T` comes from [`_blend_duration`](src/flexivtrainer/rollout/executors/bspline.py#L346-L378):
+`T` comes from [`_blend_duration`](src/flexivtrainer/rollout/executors/bspline.py#L349-L381):
 at least `handoff_blend_s`, stretched to bound the acceleration each term adds
 (`√(5.77·|p| / a_max)` and `6·|v| / a_max`), and never more than half the
 outgoing plan's remaining time so a correction cannot outlive the plan it fixes.
@@ -371,7 +383,7 @@ plus the inherited diffusion knobs:
 | `time_align_error_threshold` | 0.1 | mismatch above which a handoff **warning** is logged | mostly a reporting knob. Note it *also* drives how hard `_align` searches, so tightening it makes alignment widen its window chasing a better match and skip further into the plan — with blending a small residual is harmless, so leaving it alone is deliberate |
 | `time_align_max_fraction` | 0.2 | max fraction of the new curve alignment may skip | raise cautiously if latency is high and alignment keeps saturating the cap |
 | `playback_speed` | 1.0 | scales `target_hz` **before** it becomes `checkpoint_fps` | logs a warning; overlaps with `speed_scale`, prefer one |
-| `num_inference_steps` | 8 (in ckpt) | DDIM steps | the main lever on `infer_ms` |
+| `num_denoise_steps` | 16 | DDIM steps actually used at rollout; `apply_rollout_overrides` assigns it onto the model, overriding the checkpoint's stored 8 (§12.3) | the main lever on `infer_ms` |
 
 `playback_speed` and `speed_scale` multiply into the same `source_rate` from
 different directions (`_apply_playback_speed` scales `target_hz`, which becomes
@@ -381,17 +393,27 @@ different directions (`_apply_playback_speed` scales `target_hz`, which becomes
 
 ## 8. Reading the telemetry
 
+At rollout start the planner logs one INFO line, `B-spline timing contract`
+([runners/bspline.py:232-260](src/flexivtrainer/rollout/runners/bspline.py#L232-L260)),
+recording everything that governs timing: `target_hz`, `control_hz`, effective
+`denoise_steps` (read off the loaded model, so it reflects the override in §12.3),
+`knot_rate_hz`, `playback_speed`, `speed_scale`, the resulting `source_rate`,
+`predict_before_end_s` and `handoff_blend_s`. Read it first — it is there so a
+timing failure is never again diagnosed as a model failure.
+
 Every planner tick appends a metrics row
-([runners/bspline.py:328-350](src/flexivtrainer/rollout/runners/bspline.py#L328-L350)):
+([runners/bspline.py:370-391](src/flexivtrainer/rollout/runners/bspline.py#L370-L391)):
 
 | field | healthy | what it means when it isn't |
 |---|---|---|
 | `send_hz` | ≈ `control_hz` (200) | well below ⇒ RDK calls are blocking or GIL contention. **This is the one thing the offline probe cannot see**, so it is the prime suspect for roughness that survives the C¹ handoff |
 | `missed_deadlines` | grows slowly / not at all | rapid growth ⇒ executor is starved |
 | `spline_remaining_s` | deep sawtooth: full domain (~1.9 s) down to `predict_before_end_s`, repeating | **pinned at 0** ⇒ inference can't keep up; the robot is holding the old curve's end pose. A deep sawtooth is *normal* — plans are seconds long by design (§12.2), not a sign of trouble |
-| `infer_ms` | < `predict_before_end_s × 1000` (60 at the default) | larger ⇒ raise `predict_before_end_s` or cut `num_inference_steps` |
-| `alignment_error` | ~0.008–0.010 typical | this is the gap the blend absorbs, not a fault in itself. Consistently *high* ⇒ plans disagree; suspect OOD observations or stale state |
+| `infer_ms` | < `predict_before_end_s × 1000` (60 at the default) | larger ⇒ raise `predict_before_end_s` or cut `num_denoise_steps`. Inference **compute** only — the age of the observation the plan used is larger, and is what alignment consumes (§5) |
+| `alignment_error` | ~0.008–0.011 | this is the gap the blend absorbs, not a fault in itself, and it is mostly *curve disagreement between consecutive diffusion samples* rather than phase error — §12.6 measured the phase search as buying 0 in the median case. Consistently *high* ⇒ plans disagree badly; suspect OOD observations. Varies run to run by more than most changes you will make, so never A/B on this alone |
 | `handoff_blend_s` | ≈ `handoff_blend_s` config (0.15), longer when the gap is big | **`0` means the blend is not engaging** — check the config wired through, because the handoff is then stepping (§12.4) |
+| `align_searched` | **true on every install except the first** (the first plan has no predecessor to align to, so false is correct there) | false *later* ⇒ the search window collapsed to a point, i.e. `observation_age_s` reached the executor as 0 — suspect the observation-timestamp plumbing. Before §12.6 this was effectively always false and nothing said so |
+| `align_capped` | occasionally true | persistently true ⇒ the outgoing plan is running more than 20% of a curve ahead of where the new one starts, so alignment is clamping. Check `infer_ms` and `send_hz` first; only then consider raising `time_align_max_fraction` |
 | `handoff_warnings` | 0, or rare | 0 is expected and no longer implies anything about smoothness: the threshold (0.1 = 100 mm) is ~12× the residual the blend handles. Judge smoothness from `handoff_blend_s` + `send_hz`, not this |
 | `fresh` | true at each replan | never true ⇒ replan never completing |
 
@@ -506,11 +528,13 @@ Two symptoms, chased in order:
 
 | § | finding | status |
 |---|---|---|
-| 12.1 | random-crop augmentation silently disabled in training | **open** — needs `crop_ratio` exposed + retrain |
+| 12.1 | random-crop augmentation silently disabled in training | fixed (`crop_ratio` 0.9) — **needs retrain** |
 | 12.2 | three suspected bugs that are faithful ports of the reference | not bugs — do not "fix" |
 | 12.3 | secondary config divergences from the reference | open, low confidence |
 | 12.4 | replan handoff stepped commanded pose *and* heading | fixed by 12.5 |
 | 12.5 | C¹ handoff (offset + rate decay) | **landed** |
+| 12.6 | phase alignment never ran — the warning threshold gated the search | landed, but measured impact small |
+| 12.7 | tail control rows held a repeated constant (23.7% of target) | fixed — **needs re-convert + retrain** |
 
 Everything below was checked against the reference implementation at
 `~/pycheng/bspline-policy` (the B-spline Policy repo this feature was ported
@@ -565,9 +589,12 @@ smooth spline, so motion quality is unaffected — while the visual features it
 relies on don't transfer to the live scene. Smooth execution toward the wrong
 target is the signature of visual overfitting, not of an executor fault.
 
-**Fix.** Expose `crop_ratio` in `TrainingConfig` (default ~0.9) and retrain.
-Either drop `crop_shape` from the schema or document it as inert when
-`resize_shape` is set.
+**Fixed.** `crop_ratio` is now exposed in `TrainingConfig` for both
+`bspline_diffusion` and `diffusion`, defaulting to **0.9**, so `crop_shape`
+resolves to `(216, 288)` instead of `None`. `crop_shape` remains in the schema but
+is documented as derived — it is never read when `resize_shape` is set.
+`test_crop_ratio_actually_enables_random_crop` pins the default below 1.0 so this
+cannot silently regress. **Requires a retrain to take effect.**
 
 ### 12.2 Not bugs — verified against the reference, do not "fix" these
 
@@ -582,10 +609,40 @@ normalized std is 0.23–0.48 across all 19 channels, so the network uses its
 output range healthily. The reference's own stack-cube config is structurally
 identical — `chunk_size: 10`, `degree: 3`, `max_error: 0.002`, 16 rows.
 
+### 12.7 Fixed — tail control rows now carry real lookahead
+
+`_chunk_fitted_spline` sliced only 12 control rows and appended four copies of row
+11 unconditionally. Confirmed on the converted dataset: rows 12–15 were exact
+copies of row 11 for **every frame**, i.e. **72 of 304 dims (23.7%) of the
+diffusion target was a constant**. The loss covers all 16 rows
+(`DiffusionModel.compute_loss` reduces over the whole `(B, 16, C)` tensor with no
+row mask), so roughly a quarter of the model's output capacity was spent
+regressing "copy row 11", and the horizon axis the temporal U-Net convolves over
+carried a five-long artificial plateau.
+
+The reference slices control points over the *same window as the knots* and
+repeat-pads only when the coefficient array genuinely ends. This was the largest
+training-target divergence, and §12.2 originally recorded it as "the same as
+ours" — that was wrong.
+
+**Fix.** Slice `expected_rows` (16) control rows; pad only the shortfall.
+Verified arithmetic: `len(coeffs) == len(knots) - degree - 1`, the first 12 rows
+are always available, and only the **last four windows (~1.4%)** need padding
+(amounts 1, 2, 3, 4). Nothing about decoding changes — every consumer already
+slices `[:-(degree + 1)]`, and the existing reconstruction test still confirms a
+decoded chunk reproduces the global fit.
+
+Side effect to expect: `tied_stats` computes min/max/mean/std over all 16 rows, so
+real tail values shift the tied per-channel statistics. Converted datasets are
+therefore **not** numerically comparable across this change, and old checkpoints'
+normalizer stats no longer match newly converted data. `format_version` is bumped
+**2 → 3** for exactly this reason — `train_policy` hard-rejects mismatches, so a
+v2 dataset can no longer be silently trained on.
+
+**Requires a re-convert and a retrain to take effect.**
+
 ### 12.3 Secondary divergences from the reference (lower confidence)
 
-- `num_inference_steps = 8` vs the reference's `16`. Halving DDIM steps on a
-  304-dim action costs sample fidelity. Testable at rollout without retraining.
 - `use_group_norm = False` vs the reference's `obs_encoder_group_norm: True`. The
   usual argument for GroupNorm is that BatchNorm's running stats interact badly
   with EMA — but LeRobot's diffusion implementation has no EMA, so that
@@ -594,6 +651,15 @@ identical — `chunk_size: 10`, `degree: 3`, `max_error: 0.002`, 16 rows.
   successive deltas, `bspline_policy/common/knots.py`) with no equivalent here.
   Their stack-cube config leaves it `false`, so it isn't required — but its
   existence suggests knot conditioning was a real concern for them.
+
+**Correction — `num_inference_steps` was listed here and is not a divergence.**
+At rollout the model already runs **16** steps, the same as the reference.
+`RolloutConfig.num_denoise_steps` defaults to 16
+([policies/diffusion.py:67](src/flexivtrainer/policies/diffusion.py#L67)) and
+`apply_rollout_overrides` assigns it onto `diffusion.num_inference_steps`
+([policies/diffusion.py:79-99](src/flexivtrainer/policies/diffusion.py#L79-L99)),
+so the checkpoint's stored `8` is overridden on load. Read the effective value
+off the model, not the checkpoint — the startup contract log (§8) now prints it.
 
 ### 12.4 Fixed bug — the replan handoff stepped the commanded pose and heading
 
@@ -707,6 +773,80 @@ Note this also makes `predict_before_end_s` safe to raise for reactivity — the
 per-replan disturbance no longer scales with the replan rate. And
 `time_align_error_threshold` was deliberately **not** tightened: it also drives
 how hard `_align` searches, and with blending a small residual is harmless.
+
+### 12.6 Fixed bug — phase alignment never ran
+
+**Mechanism.** `_align` seeded `best_error` with the alignment error *at
+`min_time`* and then entered its search loop only
+`while best_error > self._alignment_threshold`. The threshold defaults to `0.1`,
+which in these units is ≈100 mm. So whenever the naive start was already within
+10 cm of where the outgoing plan had reached, the loop body never executed,
+`minimize_scalar` was never called, and `_align` returned `min_time` unchanged.
+The whole phase search was dead code on the path that matters.
+
+**Evidence.** Across four `scripts/probe_bspline_rollout.py` runs, **88 of 88
+replans** reported `alignment_error` between 0.0000 and 0.0399 — every single one
+below the 0.1 threshold. The optimizer therefore ran **zero times**, and every
+replan started the new curve at its own left boundary. Nothing in the telemetry
+said so, because `alignment_error` is reported whether or not a search produced
+it; `align_searched` exists now so this cannot recur invisibly.
+
+**Why §12.5 masked it, and made it worse to notice.** Before the C¹ blend, a
+mis-phased start showed up as a visible position jump and a heading snap — ugly,
+but legible. With the blend, the arm leaves the outgoing pose at the outgoing
+velocity and *glides smoothly onto the wrong phase* of the new curve. Motion
+quality looks excellent while the trajectory is wrong, which is harder to spot and
+worse for task success than the jitter it replaced. It also reframes §12.4's
+measurements: the 6 mm gap and ≈90° heading change per handoff were recorded with
+alignment effectively disabled, so starting each fresh curve at a boundary
+velocity unrelated to the old plan is a large part of why the heading snapped.
+
+**Fix.** The threshold now governs widening and warning only:
+
+- always run at least one bounded `minimize_scalar` pass;
+- keep `min_time` as a competing candidate, accepting the optimizer's result only
+  when strictly better, so a non-unimodal objective can never make the choice
+  worse than doing nothing;
+- check the `time_align_max_fraction` rail *before* the ×1.5 widening budget. The
+  old ordering (`while … and scale <= 20`) exited one widening step short of the
+  rail at realistic window sizes, so the 20% cap was unreachable; it now binds and
+  reports itself through `align_capped`.
+
+Paired with it, the search window is seeded from **observation age** rather than
+inference compute time (§5, item 1) — the observation the plan used was enqueued
+up to one 30 Hz period before inference even started, so the old window was
+roughly 2× too small even on the rare occasions the search ran.
+
+**Measured impact: small. This did not fix the wrong trajectories.** Re-running the
+probe after the fix (episode 0, 12 s, `predict_before_end_s = 0.3`):
+
+| | before | after |
+|---|---|---|
+| replans that searched | 0 / 88 | **25 / 26** (first install has no predecessor) |
+| `alignment_error` median | 0.0102 / 0.0145 (two runs) | 0.0075 / 0.0109 (two runs) |
+| search gain over `min_time` | — | **median 0.000000**, max 0.0108, improved **10/25** |
+| `align_capped` | — | 0 / 26 |
+| heading change across replan | 1.09° | 1.56–1.98° |
+| at-replan acceleration | 0.44 m/s² | 0.63 m/s² |
+
+Two before-runs differ from each other by more (0.0102 vs 0.0145) than before
+differs from after, because diffusion sampling is stochastic — so the handoff
+metrics above are within run-to-run noise and no improvement can be claimed from
+them. `search gain` is the noise-free measurement, and it says the search buys
+**nothing in the median case** and helps in only 40% of replans.
+
+The reason is the local-time knot convention (§1): each plan's domain starts at
+roughly "now", so `min_time` usually *is* the correct phase. The residual ~7–11 mm
+is not phase error at all — it is disagreement between what two consecutive
+diffusion samples predict for the same trajectory. No amount of phase search
+removes that; the C¹ blend absorbing it is the right treatment.
+
+Keep the fix regardless: it was genuinely dead code, it helps in 40% of handoffs
+by up to 11 mm, and it would matter a great deal under higher inference latency or
+for a checkpoint whose knots drift from the local-time convention. But it means
+**the wrong-trajectory cause is still open**, and the remaining suspects are the
+degenerate lookahead targets and the disabled crop augmentation (§12.1) — both
+training-side, both requiring a re-convert and retrain.
 
 ---
 

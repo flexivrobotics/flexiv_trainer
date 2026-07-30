@@ -172,7 +172,7 @@ def test_knot_repair_matches_companion_rule() -> None:
 def test_sampling_maps_wall_time_and_sends_cartesian_command() -> None:
     robot = _FakeRobot()
     executor = _executor(robots=[robot], gripper=True)
-    result = executor.install(_action(gripper=True), inference_latency_s=0.0, now=10.0)
+    result = executor.install(_action(gripper=True), observation_age_s=0.0, now=10.0)
 
     assert result.start_time == 0.0
     assert executor.execute_once(now=10.5)
@@ -194,7 +194,7 @@ def test_sampling_decodes_dual_arm_layout() -> None:
     )
     executor.install(
         _action(("left", "right"), gripper=True),
-        inference_latency_s=0.0,
+        observation_age_s=0.0,
         now=0.0,
     )
 
@@ -215,7 +215,7 @@ def test_first_plan_clamps_zero_to_valid_domain() -> None:
 
     result = executor.install(
         _action(knots=shifted_knots),
-        inference_latency_s=0.0,
+        observation_age_s=0.0,
         now=0.0,
     )
 
@@ -224,7 +224,7 @@ def test_first_plan_clamps_zero_to_valid_domain() -> None:
 
 def test_replacement_alignment_uses_l1_and_excludes_gripper() -> None:
     executor = _executor(gripper=True, threshold=1e-4)
-    executor.install(_action(gripper=True), inference_latency_s=0.0, now=0.0)
+    executor.install(_action(gripper=True), observation_age_s=0.0, now=0.0)
     executor.execute_once(now=0.1)
 
     # Alignment targets where the outgoing plan is at the install instant, so the
@@ -232,7 +232,7 @@ def test_replacement_alignment_uses_l1_and_excludes_gripper() -> None:
     # whichever tick happened to run last.
     result = executor.install(
         _action(gripper=True, gripper_offset=100.0),
-        inference_latency_s=0.05,
+        observation_age_s=0.05,
         now=0.1,
     )
 
@@ -243,10 +243,10 @@ def test_replacement_alignment_uses_l1_and_excludes_gripper() -> None:
 
 def test_alignment_is_capped_to_first_twenty_percent_and_warns() -> None:
     executor = _executor(threshold=1e-4)
-    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
     executor.execute_once(now=0.4)
 
-    result = executor.install(_action(), inference_latency_s=0.01, now=0.5)
+    result = executor.install(_action(), observation_age_s=0.01, now=0.5)
 
     # The outgoing plan is at phase 5.0 by now, beyond the 20% cap of 1.8, so the
     # residual is whatever the cap leaves unmatched.
@@ -280,12 +280,12 @@ _HANDOFF_AT = 0.1
 
 def _handoff(executor: BSplineExecutor, delta: float):
     """Run one plan, then replace it with one offset by `delta` in y."""
-    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
     executor.execute_once(now=_HANDOFF_AT)
     sent_y = float(executor.last_raw_command[_Y_CHANNEL - 1])
     result = executor.install(
         _shift_y(_action(), delta),
-        inference_latency_s=0.02,
+        observation_age_s=0.02,
         now=_HANDOFF_AT,
     )
     return sent_y, result
@@ -361,7 +361,7 @@ def _scale_x(action: np.ndarray, factor: float) -> np.ndarray:
 def test_handoff_preserves_commanded_velocity() -> None:
     """The handoff must not stall or snap the commanded rate, only fix the pose."""
     executor = _executor()
-    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
 
     period = 0.005
     xs = []
@@ -373,7 +373,7 @@ def test_handoff_preserves_commanded_velocity() -> None:
     before = abs(xs[-1] - xs[-2]) / period
 
     executor.install(
-        _scale_x(_action(), 1.1), inference_latency_s=0.02, now=_HANDOFF_AT
+        _scale_x(_action(), 1.1), observation_age_s=0.02, now=_HANDOFF_AT
     )
 
     after = []
@@ -399,14 +399,78 @@ def test_blend_window_stretches_with_the_gap() -> None:
     assert loose.blend_s > tight.blend_s
 
 
+def test_alignment_searches_even_below_the_warning_threshold() -> None:
+    """The threshold must widen the window, never decide whether to search."""
+    executor = _executor()
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
+    executor.execute_once(now=0.005)
+
+    # The outgoing pose is x = 0.05 and the new curve travels at half rate, so the
+    # matching phase is t = 0.1. Starting at min_time instead costs only 0.05,
+    # inside the 0.1 threshold that used to skip the search outright.
+    result = executor.install(
+        _scale_x(_action(), 0.5), observation_age_s=0.02, now=0.005
+    )
+
+    assert result.align_searched is True
+    assert result.align_capped is False
+    assert result.start_time == pytest.approx(0.1, abs=1e-3)
+    assert result.alignment_error < 0.05
+    assert result.alignment_error < 1e-6
+
+
+def test_alignment_widens_the_window_until_it_matches() -> None:
+    executor = _executor(threshold=1e-4)
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
+    executor.execute_once(now=0.005)
+
+    # The match sits at t = 1.0, five ×1.5 widenings past the first window's 0.2.
+    result = executor.install(
+        _scale_x(_action(), 0.05), observation_age_s=0.02, now=0.005
+    )
+
+    assert result.align_searched is True
+    assert result.align_capped is False
+    assert result.start_time == pytest.approx(1.0, abs=1e-3)
+    assert result.alignment_error < 1e-4
+
+
+def test_alignment_keeps_min_time_when_it_is_already_best() -> None:
+    executor = _executor()
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
+    executor.execute_once(now=0.0)
+
+    result = executor.install(_action(), observation_age_s=0.02, now=0.0)
+
+    # min_time is the exact match here and bounded minimize_scalar returns an
+    # interior point, so searching must be allowed to change nothing.
+    assert result.align_searched is True
+    assert result.start_time == 0.0
+    assert result.alignment_error == pytest.approx(0.0, abs=1e-12)
+
+
+def test_align_capped_reports_the_twenty_percent_rail() -> None:
+    executor = _executor()
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
+    executor.execute_once(now=0.4)
+
+    # The outgoing plan is at phase 5.0, far past the 20% rail at 1.8.
+    result = executor.install(_action(), observation_age_s=0.01, now=0.5)
+
+    assert result.align_searched is True
+    assert result.align_capped is True
+    assert result.start_time == pytest.approx(1.8, abs=1e-3)
+    assert result.alignment_error == pytest.approx(5.0 - result.start_time)
+
+
 def test_invalid_replacement_does_not_replace_active_plan() -> None:
     executor = _executor()
-    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
     invalid = _action()
     invalid[0] = np.nan
 
     with pytest.raises(ValueError, match="non-finite"):
-        executor.install(invalid, inference_latency_s=0.1, now=0.1)
+        executor.install(invalid, observation_age_s=0.1, now=0.1)
 
     assert executor.execute_once(now=0.2)
     assert executor.last_raw_command is not None
@@ -419,7 +483,7 @@ def test_rejects_empty_spline_domain() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         executor.install(
             _action(knots=np.zeros(_ROWS)),
-            inference_latency_s=0.0,
+            observation_age_s=0.0,
             now=0.0,
         )
 
@@ -429,7 +493,7 @@ def test_remaining_time_and_replan_state() -> None:
     assert executor.replan_needed(now=0.0)
     assert executor.remaining_s(now=0.0) is None
 
-    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
     executor.execute_once(now=0.0)
     executor.execute_once(now=0.5)
 
@@ -457,7 +521,7 @@ def test_loop_uses_absolute_deadlines_and_counts_skipped_ticks() -> None:
         stop_event=stop_event,
         clock=advancing_clock,
     )
-    executor.install(_action(), inference_latency_s=0.0, now=0.0)
+    executor.install(_action(), observation_age_s=0.0, now=0.0)
 
     executor.start()
     executor.join()

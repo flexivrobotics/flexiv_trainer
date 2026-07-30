@@ -516,7 +516,7 @@ def convert_lerobot_tcp_actions_to_bspline(
     )
 
     metadata = {
-        "format_version": 2,
+        "format_version": 3,
         "source_dataset": str(source),
         "source_action_names": action_names,
         "selected_sides": [layout.side for layout in layouts],

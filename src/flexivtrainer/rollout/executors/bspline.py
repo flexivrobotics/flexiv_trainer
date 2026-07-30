@@ -92,6 +92,11 @@ class BSplineInstallResult:
     alignment_error: float
     warning: str | None
     blend_s: float = 0.0
+    align_searched: bool = False
+    # Search stopped at the time_align_max_fraction rail, not by converging.
+    align_capped: bool = False
+    # Error at min_time; minus alignment_error, this is what the search bought.
+    align_endpoint_error: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,8 +434,8 @@ class BSplineExecutor:
         self,
         spline: BSpline,
         target: np.ndarray,
-        inference_latency_s: float,
-    ) -> tuple[float, float]:
+        observation_age_s: float,
+    ) -> tuple[float, float, bool, bool, float]:
         min_time = float(spline.t[self._degree])
         max_time = float(spline.t[-self._degree - 1])
         max_allowed = min_time + (
@@ -438,7 +443,7 @@ class BSplineExecutor:
         ) * self._alignment_max_fraction
         initial_max = float(
             np.clip(
-                min_time + max(0.0, inference_latency_s) * self._source_rate,
+                min_time + max(0.0, observation_age_s) * self._source_rate,
                 min_time,
                 max_allowed,
             )
@@ -448,10 +453,15 @@ class BSplineExecutor:
         def objective(t: float) -> float:
             return float(np.abs(np.asarray(spline(t))[indices] - target[indices]).sum())
 
+        # The threshold governs widening only. Gating the loop on the error at
+        # min_time skipped the search on every real replan; see BSPLINE_ROLLOUT.md.
         best_time = min_time
-        best_error = self._alignment_error(spline, target, best_time)
+        endpoint_error = self._alignment_error(spline, target, min_time)
+        best_error = endpoint_error
+        searched = False
+        capped = False
         scale = 1.0
-        while best_error > self._alignment_threshold and scale <= 20:
+        while True:
             upper = min(
                 min_time + (initial_max - min_time) * scale,
                 max_allowed,
@@ -463,22 +473,26 @@ class BSplineExecutor:
                 bounds=(min_time, upper),
                 method="bounded",
             )
-            best_time = float(result.x)
-            best_error = self._alignment_error(
-                spline,
-                target,
-                best_time,
-            )
+            candidate = float(result.x)
+            error = self._alignment_error(spline, target, candidate)
+            searched = True
+            # Bounded minimize_scalar can land worse than an endpoint on a
+            # non-unimodal objective, so min_time stays a candidate.
+            if error < best_error:
+                best_time, best_error = candidate, error
             if upper >= max_allowed:
+                capped = True
+                break
+            if best_error <= self._alignment_threshold or scale > 20:
                 break
             scale *= 1.5
-        return best_time, best_error
+        return best_time, best_error, searched, capped, endpoint_error
 
     def install(
         self,
         flat_action: Sequence[float] | np.ndarray,
         *,
-        inference_latency_s: float,
+        observation_age_s: float,
         now: float | None = None,
     ) -> BSplineInstallResult:
         spline = self._decode(flat_action)
@@ -491,6 +505,9 @@ class BSplineExecutor:
             offset: np.ndarray | None = None
             velocity_offset: np.ndarray | None = None
             blend_s = 0.0
+            align_searched = False
+            align_capped = False
+            align_endpoint_error = 0.0
             previous = self._plan
             if previous is None or self._last_raw_command is None:
                 start_time = float(np.clip(0.0, min_time, max_time))
@@ -501,11 +518,13 @@ class BSplineExecutor:
                 # value makes the correction replay a pose up to one control period
                 # old, which commands a momentary dead stop at every handoff.
                 target = self._sample(previous, install_time)
-                start_time, alignment_error = self._align(
-                    spline,
-                    target,
-                    inference_latency_s,
-                )
+                (
+                    start_time,
+                    alignment_error,
+                    align_searched,
+                    align_capped,
+                    align_endpoint_error,
+                ) = self._align(spline, target, observation_age_s)
                 indices = self._aligned_indices
                 # Alignment returns the closest approach, not an exact match, and it
                 # never considers velocity. Carry both mismatches as decaying terms.
@@ -550,7 +569,15 @@ class BSplineExecutor:
                 blend_s=blend_s,
             )
             self._condition.notify_all()
-        return BSplineInstallResult(start_time, alignment_error, warning, blend_s)
+        return BSplineInstallResult(
+            start_time,
+            alignment_error,
+            warning,
+            blend_s,
+            align_searched=align_searched,
+            align_capped=align_capped,
+            align_endpoint_error=align_endpoint_error,
+        )
 
     def _spline_time(self, plan: _Plan, now: float) -> float:
         return float(

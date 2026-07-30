@@ -97,7 +97,7 @@ def make_bspline_dataset(
     info["features"]["action"]["names"] = action_names
     info_path.write_text(json.dumps(info), encoding="utf-8")
     metadata = {
-        "format_version": 2,
+        "format_version": 3,
         "degree": degree,
         "chunk_size": horizon - 2 * degree,
         "knot_units": "source_frames",
