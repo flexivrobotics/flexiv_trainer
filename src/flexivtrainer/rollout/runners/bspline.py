@@ -161,6 +161,8 @@ class BSplineRunner:
                     rollout_cfg.time_align_error_threshold
                 ),
                 time_align_max_fraction=rollout_cfg.time_align_max_fraction,
+                handoff_blend_s=getattr(rollout_cfg, "handoff_blend_s", 0.15),
+                handoff_max_accel=getattr(rollout_cfg, "handoff_max_accel", 2.0),
             )
             if self._bspline_layout.gripper_sides:
                 gripper_executor = GripperExecutor(
@@ -208,6 +210,7 @@ class BSplineRunner:
         policy: Any,
         postprocessor: Any,
         executor: BSplineExecutor,
+        observed_at: float,
     ) -> tuple[float, BSplineInstallResult | None]:
         infer_started = time.monotonic()
         actions = policy.predict_action_chunk()
@@ -217,11 +220,39 @@ class BSplineRunner:
         inference_latency = time.monotonic() - infer_started
         if self._stop_event.is_set():
             return inference_latency, None
+        # Alignment needs observation staleness, which includes the planner's
+        # queueing delay -- not the compute time infer_ms reports.
         result = executor.install(
             self._bspline_action_vector(actions),
-            inference_latency_s=inference_latency,
+            observation_age_s=time.monotonic() - observed_at,
         )
         return inference_latency, result
+
+    def _log_timing_contract(self) -> None:
+        """Log what governs timing, so a timing fault is not read as a model fault."""
+        cfg = self._rollout_cfg
+        config = getattr(self._policy, "config", None)
+        # Only speed_scale is guarded, because only it is used arithmetically.
+        speed_scale = float(getattr(cfg, "speed_scale", 1.0) or 1.0)
+        # apply_rollout_overrides puts the effective step count on the model, not cfg.
+        steps = getattr(
+            getattr(self._policy, "diffusion", None), "num_inference_steps", None
+        )
+        if steps is None:
+            steps = getattr(config, "num_inference_steps", None)
+        fields = {
+            "target_hz": self._target_hz,
+            "control_hz": getattr(cfg, "control_hz", None),
+            "denoise_steps": steps,
+            "knot_rate_hz": getattr(config, "knot_rate_hz", None),
+            "playback_speed": getattr(cfg, "playback_speed", None),
+            "speed_scale": speed_scale,
+            "source_rate": self._target_hz * speed_scale,
+            "predict_before_end_s": getattr(cfg, "predict_before_end_s", None),
+            "handoff_blend_s": getattr(cfg, "handoff_blend_s", None),
+        }
+        detail = " ".join(f"{key}={value}" for key, value in fields.items())
+        self._append_log("INFO", "ROLLOUT", "B-spline timing contract", detail)
 
     def _run(self) -> None:
         policy = self._policy
@@ -237,12 +268,17 @@ class BSplineRunner:
         assert executor is not None
 
         policy.reset()
+        self._log_timing_contract()
         period = 1.0 / target_hz
         next_observation = time.monotonic()
+        observed_at = next_observation
         camera_names = resolve_recording_image_names(None, sides)
         max_steps = self._max_steps
         inference_latency = 0.0
         alignment_error = 0.0
+        blend_s = 0.0
+        align_searched = False
+        align_capped = False
         step = 0
         inference_future: (
             Future[tuple[float, BSplineInstallResult | None]] | None
@@ -273,6 +309,9 @@ class BSplineRunner:
                     inference_future = None
                     if result is not None:
                         alignment_error = result.alignment_error
+                        blend_s = result.blend_s
+                        align_searched = result.align_searched
+                        align_capped = result.align_capped
                         installed = True
                         if result.warning is not None:
                             warn("B-spline handoff warning", result.warning)
@@ -287,6 +326,7 @@ class BSplineRunner:
                 observed = now >= next_observation
                 snapshot: dict[str, Any] | None = None
                 if observed:
+                    observed_at = now
                     gripper_states = (
                         gripper.measured_states() if gripper is not None else None
                     )
@@ -318,6 +358,7 @@ class BSplineRunner:
                         policy,
                         postprocessor,
                         executor,
+                        observed_at,
                     )
 
                 executor_status = executor.status()
@@ -336,6 +377,9 @@ class BSplineRunner:
                         ),
                         "infer_ms": round(inference_latency * 1000.0, 1),
                         "alignment_error": round(alignment_error, 6),
+                        "handoff_blend_s": round(blend_s, 4),
+                        "align_searched": align_searched,
+                        "align_capped": align_capped,
                         "handoff_warnings": executor_status.handoff_warnings,
                         "fresh": installed,
                     }

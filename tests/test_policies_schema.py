@@ -91,8 +91,29 @@ def test_bspline_diffusion_rollout_family_defaults() -> None:
     assert rollout.predict_before_end_s == 0.06
     assert rollout.time_align_error_threshold == 0.1
     assert rollout.time_align_max_fraction == 0.2
+    assert rollout.handoff_blend_s == 0.15
+    assert rollout.handoff_max_accel == 2.0
     assert rollout.noise_scheduler_type == "DDIM"
     assert rollout.num_denoise_steps == 16
+
+
+def test_crop_ratio_actually_enables_random_crop() -> None:
+    """LeRobot clears crop_shape at ratio 1.0, so the default must be below it."""
+    from flexivtrainer.policies.lerobot_plugins.configuration_bspline_diffusion import (
+        BSplineDiffusionConfig,
+    )
+
+    for family in (
+        PolicyConfig().bspline_diffusion.training,
+        PolicyConfig().diffusion.training,
+    ):
+        assert family.crop_ratio < 1.0
+
+    resolved = BSplineDiffusionConfig(
+        resize_shape=(240, 320),
+        crop_ratio=PolicyConfig().bspline_diffusion.training.crop_ratio,
+    )
+    assert resolved.crop_shape == (216, 288)
 
 
 def test_temporal_ensemble_coeff_is_float_not_optional_string() -> None:

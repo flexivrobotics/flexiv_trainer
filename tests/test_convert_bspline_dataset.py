@@ -192,7 +192,7 @@ def test_convert_dual_arm_gripper_data_and_ties_row_statistics(tmp_path) -> None
     converted_info = json.loads((output / "meta" / "info.json").read_text())
     action_names = converted_info["features"]["action"]["names"]
     spline_info = json.loads((output / "meta" / "bspline.json").read_text())
-    assert spline_info["format_version"] == 2
+    assert spline_info["format_version"] == 3
     assert spline_info["parameter_matrix_shape"] == [16, 21]
     assert spline_info["active_control_rows"] == 12
     assert spline_info["gripper_width_sides"] == list(sides)

@@ -97,7 +97,7 @@ def make_bspline_dataset(
     info["features"]["action"]["names"] = action_names
     info_path.write_text(json.dumps(info), encoding="utf-8")
     metadata = {
-        "format_version": 2,
+        "format_version": 3,
         "degree": degree,
         "chunk_size": horizon - 2 * degree,
         "knot_units": "source_frames",
@@ -172,6 +172,22 @@ class _FakePulse:
         pass
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('  "max_translation_error_m": 0.001982460286132769,', "INFO"),
+        ('  "max_rotation_error_deg": 0.16161622827698138', "INFO"),
+        ("RuntimeError: CUDA out of memory", "ERROR"),
+        ("Dataset conversion failed", "ERROR"),
+    ],
+)
+def test_stream_level_treats_bspline_error_metrics_as_info(
+    line: str,
+    expected: str,
+) -> None:
+    assert train_policy._stream_level(line) == expected
+
+
 def test_parse_compact_number_supports_suffixes_and_floats(tmp_path: Path) -> None:
     service = make_service(tmp_path)
 
@@ -189,7 +205,10 @@ def test_update_job_from_log_parses_common_lerobot_lines(tmp_path: Path) -> None
         "dataset.num_frames=50000 (50K)",
         "dataset.num_episodes=125",
         "Start offline training on a fixed dataset, with effective batch size: 64",
-        "step:500 smpl:32000 ep:10 epch:0.5 loss:0.234 grdn:1.111 lr:1.0e-04 updt_s:0.120 data_s:0.030",
+        (
+            "step:500 smpl:32000 ep:10 epch:0.5 loss:0.234 grdn:1.111 "
+            "lr:1.0e-04 updt_s:0.120 data_s:0.030"
+        ),
         "Checkpoint policy after step 500",
         "Eval policy at step 500",
         "End of training",
@@ -590,6 +609,73 @@ def test_start_bspline_training_injects_authoritative_dataset_contract(
             )
         ),
     ]
+
+
+def test_start_raw_bspline_converts_then_trains_with_converted_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = make_service(tmp_path)
+    dataset = make_dataset(tmp_path)
+    output = tmp_path / "training" / "bspline_pipeline"
+    commands: list[list[str]] = []
+
+    def popen(command, *args, **kwargs):
+        commands.append(command)
+        return _FakeProcess()
+
+    monkeypatch.setattr(train_policy.subprocess, "Popen", popen)
+    monkeypatch.setattr(train_policy.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(train_policy, "Pulse", _FakePulse)
+    monkeypatch.setattr(train_policy, "resolve_training_device", lambda _: "cpu")
+    monkeypatch.setattr(
+        service,
+        "_bspline_dataset_contract",
+        lambda _: {
+            "horizon": 20,
+            "degree": 3,
+            "knot_rate_hz": 10.0,
+            "action_feature_names": ["bspline.row_00.knot"],
+        },
+    )
+    monkeypatch.setattr(
+        service, "_rgb_only_policy_input_features", lambda _: None
+    )
+
+    snapshot = service.start(
+        dataset,
+        output,
+        "bspline_diffusion",
+        extra_args=["--policy.horizon", "20"],
+    )
+
+    assert snapshot["phase"] == "converting"
+    assert snapshot["source_dataset_root"] == str(dataset.resolve())
+    assert snapshot["converted_dataset_root"].startswith(
+        str((tmp_path / "datasets").resolve())
+    )
+    assert len(commands) == 1
+    conversion_command = commands[0]
+    assert "flexivtrainer.cli.convert_bspline_dataset" in conversion_command
+    assert conversion_command[
+        conversion_command.index("--chunk-size") + 1
+    ] == "14"
+
+    job = service._job
+    assert job is not None
+    service._collect_conversion(
+        job,
+        ["--policy.horizon", "20"],
+        checkpoint_info=None,
+    )
+
+    assert len(commands) == 2
+    training_command = commands[1]
+    assert training_command[training_command.index("--dataset.root") + 1] == str(
+        job.dataset_root
+    )
+    assert "--policy.horizon=20" in training_command
+    assert job.phase == "completed"
+    assert job.status == "completed"
 
 
 def test_start_bspline_training_rejects_invalid_format_before_spawn(

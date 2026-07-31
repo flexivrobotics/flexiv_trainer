@@ -35,11 +35,68 @@ _ROTATION_AXES = ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
 _ZERO_VECTOR = [0.0] * 6
 
 
+# Peak |w''| of the quintic handoff decay below, at u = (3±sqrt(3))/6. The blend
+# length is derived from it so a larger gap is closed over a longer window
+# instead of a more violent one.
+_QUINTIC_PEAK_CURVATURE = 10.0 / math.sqrt(3.0)
+
+
+_HERMITE_VELOCITY_PEAK_CURVATURE = 6.0
+
+
+def _handoff_decay(u: float) -> float:
+    """Quintic ease from 1 to 0, flat at both ends. Carries the position gap.
+
+    A linear fade would hold a constant offset velocity for the whole window and
+    then drop it, trading one position step for two velocity steps -- the
+    position-fade kink the waypoint path used to suffer. This profile enters and
+    leaves at zero velocity and zero acceleration, so nothing switches on or off.
+    """
+    if u <= 0.0:
+        return 1.0
+    if u >= 1.0:
+        return 0.0
+    return 1.0 - u * u * u * (10.0 - 15.0 * u + 6.0 * u * u)
+
+
+def _handoff_decay_rate(u: float) -> float:
+    """d/du of _handoff_decay."""
+    if u <= 0.0 or u >= 1.0:
+        return 0.0
+    return -30.0 * u * u * (1.0 - u) * (1.0 - u)
+
+
+def _handoff_velocity_decay(u: float) -> float:
+    """Hermite companion: 0 at both ends, unit slope at u=0.
+
+    _handoff_decay alone only makes position continuous; the two curves still
+    leave the splice at different velocities, which is what reads as a direction
+    snap. Scaling this term by the velocity mismatch cancels that too, making the
+    handoff C1. Zero value and slope at u=1 so it lands cleanly on the new plan.
+    """
+    if u <= 0.0 or u >= 1.0:
+        return 0.0
+    return u * (1.0 - u) ** 3
+
+
+def _handoff_velocity_decay_rate(u: float) -> float:
+    """d/du of _handoff_velocity_decay."""
+    if u <= 0.0 or u >= 1.0:
+        return 0.0
+    return (1.0 - u) ** 2 * (1.0 - 4.0 * u)
+
+
 @dataclass(frozen=True, slots=True)
 class BSplineInstallResult:
     start_time: float
     alignment_error: float
     warning: str | None
+    blend_s: float = 0.0
+    align_searched: bool = False
+    # Search stopped at the time_align_max_fraction rail, not by converging.
+    align_capped: bool = False
+    # Error at min_time; minus alignment_error, this is what the search bought.
+    align_endpoint_error: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +141,13 @@ class _Plan:
     max_time: float
     start_time: float
     installed_at: float
+    # Position and velocity mismatch against the plan this one replaced, decayed to
+    # zero over blend_s so the handoff steps neither the commanded pose nor its
+    # rate. deriv is the spline's first derivative, cached for the next handoff.
+    deriv: BSpline | None = None
+    offset: np.ndarray | None = None
+    velocity_offset: np.ndarray | None = None
+    blend_s: float = 0.0
 
 
 def _repair_knots(knots: np.ndarray) -> np.ndarray:
@@ -196,6 +260,8 @@ class BSplineExecutor:
         predict_before_end_s: float = 0.06,
         time_align_error_threshold: float = 0.1,
         time_align_max_fraction: float = 0.2,
+        handoff_blend_s: float = 0.15,
+        handoff_max_accel: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         public_layout, layouts = _parse_layout(feature_names)
@@ -215,6 +281,10 @@ class BSplineExecutor:
             raise ValueError("time_align_error_threshold must be nonnegative")
         if not 0 < time_align_max_fraction <= 1:
             raise ValueError("time_align_max_fraction must be in (0, 1]")
+        if handoff_blend_s < 0:
+            raise ValueError("handoff_blend_s must be nonnegative")
+        if handoff_max_accel <= 0:
+            raise ValueError("handoff_max_accel must be positive")
 
         self._robots = list(robots)
         self._layout = public_layout
@@ -229,7 +299,15 @@ class BSplineExecutor:
         self._predict_before_end_s = float(predict_before_end_s)
         self._alignment_threshold = float(time_align_error_threshold)
         self._alignment_max_fraction = float(time_align_max_fraction)
+        self._handoff_blend_s = float(handoff_blend_s)
+        self._handoff_max_accel = float(handoff_max_accel)
         self._clock = clock
+        # Positions + rotation-6D for every arm; gripper width is excluded from
+        # both alignment and the handoff offset.
+        self._aligned_indices = np.asarray(
+            [index for layout in layouts for index in layout.alignment_indices],
+            dtype=np.intp,
+        )
 
         self._condition = threading.Condition(threading.RLock())
         self._plan: _Plan | None = None
@@ -267,17 +345,97 @@ class BSplineExecutor:
 
     def _alignment_error(self, spline: BSpline, target: np.ndarray, t: float) -> float:
         current = np.asarray(spline(t), dtype=np.float64)
-        indices = [
-            index for layout in self._layouts for index in layout.alignment_indices
-        ]
+        indices = self._aligned_indices
         return float(np.max(np.abs(current[indices] - target[indices])))
+
+    def _blend_duration(
+        self, position_gap: float, velocity_gap: float, remaining_s: float
+    ) -> float:
+        """Pick a blend window that bounds the acceleration the correction adds.
+
+        The position term peaks at ``_QUINTIC_PEAK_CURVATURE * gap / T**2`` and the
+        velocity term at ``_HERMITE_VELOCITY_PEAK_CURVATURE * gap / T``; solving
+        each for ``T`` at ``handoff_max_accel`` keeps a large mismatch gentle
+        instead of violent. Never shorter than the configured base, and never long
+        enough to outlive the plan it is correcting.
+        """
+        if self._handoff_blend_s <= 0.0:
+            return 0.0
+        if position_gap <= 0.0 and velocity_gap <= 0.0:
+            return 0.0
+        blend = self._handoff_blend_s
+        if position_gap > 0.0:
+            blend = max(
+                blend,
+                math.sqrt(
+                    _QUINTIC_PEAK_CURVATURE * position_gap / self._handoff_max_accel
+                ),
+            )
+        if velocity_gap > 0.0:
+            blend = max(
+                blend,
+                _HERMITE_VELOCITY_PEAK_CURVATURE
+                * velocity_gap
+                / self._handoff_max_accel,
+            )
+        if remaining_s > 0.0:
+            blend = min(blend, 0.5 * remaining_s)
+        return max(blend, 0.0)
+
+    def _sample(self, plan: _Plan, now: float) -> np.ndarray:
+        """Commanded pose for a plan, including any active handoff correction."""
+        out = np.asarray(
+            plan.spline(self._spline_time(plan, now)), dtype=np.float64
+        )
+        if plan.blend_s <= 0.0:
+            return out
+        u = (now - plan.installed_at) / plan.blend_s
+        if u >= 1.0:
+            return out
+        if plan.offset is not None:
+            out = out + plan.offset * _handoff_decay(u)
+        if plan.velocity_offset is not None:
+            out = out + plan.velocity_offset * (
+                plan.blend_s * _handoff_velocity_decay(u)
+            )
+        return out
+
+    def _sample_velocity(self, plan: _Plan, now: float) -> np.ndarray:
+        """Commanded velocity in real time, matching what _sample produces."""
+        raw_time = plan.start_time + (now - plan.installed_at) * self._source_rate
+        if plan.deriv is None:
+            velocity = np.zeros(len(self._channels) - 1, dtype=np.float64)
+        else:
+            velocity = (
+                np.asarray(
+                    plan.deriv(self._spline_time(plan, now)), dtype=np.float64
+                )
+                * self._source_rate
+            )
+            # Outside the domain the pose is held, so it is not moving at all.
+            if not plan.min_time < raw_time < plan.max_time:
+                velocity = np.zeros_like(velocity)
+        if plan.blend_s <= 0.0:
+            return velocity
+        u = (now - plan.installed_at) / plan.blend_s
+        if u >= 1.0:
+            return velocity
+        if plan.offset is not None:
+            velocity = velocity + plan.offset * (
+                _handoff_decay_rate(u) / plan.blend_s
+            )
+        if plan.velocity_offset is not None:
+            velocity = velocity + plan.velocity_offset * (
+                _handoff_velocity_decay_rate(u)
+            )
+        return velocity
 
     def _align(
         self,
         spline: BSpline,
         target: np.ndarray,
-        inference_latency_s: float,
-    ) -> tuple[float, float]:
+        observation_age_s: float,
+    ) -> tuple[float, float, bool, bool, float]:
         min_time = float(spline.t[self._degree])
         max_time = float(spline.t[-self._degree - 1])
         max_allowed = min_time + (
@@ -285,27 +443,25 @@ class BSplineExecutor:
         ) * self._alignment_max_fraction
         initial_max = float(
             np.clip(
-                min_time + max(0.0, inference_latency_s) * self._source_rate,
+                min_time + max(0.0, observation_age_s) * self._source_rate,
                 min_time,
                 max_allowed,
             )
         )
-        indices = np.asarray(
-            [
-                index
-                for layout in self._layouts
-                for index in layout.alignment_indices
-            ],
-            dtype=np.intp,
-        )
+        indices = self._aligned_indices
 
         def objective(t: float) -> float:
             return float(np.abs(np.asarray(spline(t))[indices] - target[indices]).sum())
 
+        # The threshold governs widening only. Gating the loop on the error at
+        # min_time skipped the search on every real replan; see BSPLINE_ROLLOUT.md.
         best_time = min_time
-        best_error = self._alignment_error(spline, target, best_time)
+        endpoint_error = self._alignment_error(spline, target, min_time)
+        best_error = endpoint_error
+        searched = False
+        capped = False
         scale = 1.0
-        while best_error > self._alignment_threshold and scale <= 20:
+        while True:
             upper = min(
                 min_time + (initial_max - min_time) * scale,
                 max_allowed,
@@ -317,22 +473,26 @@ class BSplineExecutor:
                 bounds=(min_time, upper),
                 method="bounded",
             )
-            best_time = float(result.x)
-            best_error = self._alignment_error(
-                spline,
-                target,
-                best_time,
-            )
+            candidate = float(result.x)
+            error = self._alignment_error(spline, target, candidate)
+            searched = True
+            # Bounded minimize_scalar can land worse than an endpoint on a
+            # non-unimodal objective, so min_time stays a candidate.
+            if error < best_error:
+                best_time, best_error = candidate, error
             if upper >= max_allowed:
+                capped = True
+                break
+            if best_error <= self._alignment_threshold or scale > 20:
                 break
             scale *= 1.5
-        return best_time, best_error
+        return best_time, best_error, searched, capped, endpoint_error
 
     def install(
         self,
         flat_action: Sequence[float] | np.ndarray,
         *,
-        inference_latency_s: float,
+        observation_age_s: float,
         now: float | None = None,
     ) -> BSplineInstallResult:
         spline = self._decode(flat_action)
@@ -340,16 +500,56 @@ class BSplineExecutor:
         min_time = float(spline.t[self._degree])
         max_time = float(spline.t[-self._degree - 1])
 
+        deriv = spline.derivative(1)
         with self._condition:
-            if self._plan is None or self._last_raw_command is None:
+            offset: np.ndarray | None = None
+            velocity_offset: np.ndarray | None = None
+            blend_s = 0.0
+            align_searched = False
+            align_capped = False
+            align_endpoint_error = 0.0
+            previous = self._plan
+            if previous is None or self._last_raw_command is None:
                 start_time = float(np.clip(0.0, min_time, max_time))
                 alignment_error = 0.0
             else:
-                start_time, alignment_error = self._align(
-                    spline,
-                    self._last_raw_command,
-                    inference_latency_s,
+                # Align and blend against where the outgoing plan is *at this
+                # instant*, not the pose sent on the last tick. Using the stale
+                # value makes the correction replay a pose up to one control period
+                # old, which commands a momentary dead stop at every handoff.
+                target = self._sample(previous, install_time)
+                (
+                    start_time,
+                    alignment_error,
+                    align_searched,
+                    align_capped,
+                    align_endpoint_error,
+                ) = self._align(spline, target, observation_age_s)
+                indices = self._aligned_indices
+                # Alignment returns the closest approach, not an exact match, and it
+                # never considers velocity. Carry both mismatches as decaying terms.
+                residual = np.zeros_like(target)
+                residual[indices] = (
+                    target[indices]
+                    - np.asarray(spline(start_time), dtype=np.float64)[indices]
                 )
+                rate_residual = np.zeros_like(target)
+                rate_residual[indices] = (
+                    self._sample_velocity(previous, install_time)[indices]
+                    - np.asarray(deriv(start_time), dtype=np.float64)[indices]
+                    * self._source_rate
+                )
+                remaining_s = (max_time - start_time) / self._source_rate
+                blend_s = self._blend_duration(
+                    float(np.max(np.abs(residual[indices]))),
+                    float(np.max(np.abs(rate_residual[indices]))),
+                    remaining_s,
+                )
+                if blend_s > 0.0:
+                    if np.any(residual):
+                        offset = residual
+                    if np.any(rate_residual):
+                        velocity_offset = rate_residual
             warning = None
             if alignment_error > self._alignment_threshold:
                 warning = (
@@ -363,9 +563,21 @@ class BSplineExecutor:
                 max_time=max_time,
                 start_time=start_time,
                 installed_at=install_time,
+                deriv=deriv,
+                offset=offset,
+                velocity_offset=velocity_offset,
+                blend_s=blend_s,
             )
             self._condition.notify_all()
-        return BSplineInstallResult(start_time, alignment_error, warning)
+        return BSplineInstallResult(
+            start_time,
+            alignment_error,
+            warning,
+            blend_s,
+            align_searched=align_searched,
+            align_capped=align_capped,
+            align_endpoint_error=align_endpoint_error,
+        )
 
     def _spline_time(self, plan: _Plan, now: float) -> float:
         return float(
@@ -382,10 +594,10 @@ class BSplineExecutor:
             plan = self._plan
             if plan is None:
                 return False
-            raw = np.asarray(
-                plan.spline(self._spline_time(plan, current_time)),
-                dtype=np.float64,
-            )
+            # The blend runs on real seconds, not spline time: the smoothness that
+            # matters is the robot's, so speed_scale must not change how fast the
+            # handoff correction is retired.
+            raw = self._sample(plan, current_time)
             if not np.all(np.isfinite(raw)):
                 raise ValueError("Sampled B-spline command contains non-finite values")
 
@@ -408,6 +620,9 @@ class BSplineExecutor:
                 )
                 if layout.gripper_index is not None:
                     grippers[layout.side] = float(raw[layout.gripper_index])
+            # Must be the blended pose that was actually sent, not the bare spline
+            # sample: the next handoff aligns against this, and matching a pose the
+            # robot never received would silently reintroduce the step.
             self._last_raw_command = raw.copy()
             self._last_gripper_widths = grippers
             self._sent_count += 1

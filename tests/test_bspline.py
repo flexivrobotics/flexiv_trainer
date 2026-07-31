@@ -119,6 +119,36 @@ def test_rotation_6d_round_trip_preserves_orientation() -> None:
     assert np.max(difference.magnitude()) < 1e-10
 
 
+def test_target_tail_rows_carry_real_lookahead_not_a_repeated_control_point() -> None:
+    frame_count = 60
+    sample = np.linspace(0.0, 1.0, frame_count)
+    controls = np.stack(
+        [np.sin(4.0 * np.pi * sample), np.cos(3.0 * np.pi * sample), sample],
+        axis=1,
+    )
+
+    result = build_episode_spline_targets(
+        controls, degree=3, chunk_size=10, max_error=1e-4
+    )
+    fitted = np.asarray(result.fit.spline.c, dtype=np.float64)
+    assert len(fitted) >= 20, "fit too short to have any interior window"
+
+    tails = result.parameters[:, 12:, 1:]
+    row11 = result.parameters[:, 11:12, 1:]
+    repeated = np.all(np.isclose(tails, row11), axis=(1, 2))
+    # Only the windows that run past the coefficient array may repeat.
+    assert not repeated.all(), "every tail is still a repeated control point"
+    assert repeated[-1], "the final window must fall back to repeat-padding"
+
+    # An interior frame's tail must be the next four real fitted coefficients.
+    frame = int(np.flatnonzero(~repeated)[0])
+    knot = float(result.parameters[frame, 0, 0]) + frame
+    start = int(np.flatnonzero(np.isclose(result.fit.spline.t, knot))[0])
+    np.testing.assert_allclose(
+        result.parameters[frame, 12:, 1:], fitted[start + 12 : start + 16], atol=1e-6
+    )
+
+
 def test_episode_targets_preserve_fitted_curve_over_each_local_segment() -> None:
     frame_count = 24
     sample = np.linspace(0.0, 1.0, frame_count)

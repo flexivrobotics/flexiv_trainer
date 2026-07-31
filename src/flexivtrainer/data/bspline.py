@@ -369,22 +369,21 @@ def _chunk_fitted_spline(
     for start_index in range(0, len(unique_span) - 1, stride):
         slice_start = min(start_index, len(full_knots) - expected_rows)
         knots = full_knots[slice_start : slice_start + expected_rows]
-        active_controls = full_controls[
-            slice_start : slice_start + active_control_rows
-        ]
-        if len(active_controls) != active_control_rows:
+        # Take control points over the same window as the knots. The decoder uses
+        # only the first active_control_rows, but the policy regresses all of them,
+        # so the tail carries real lookahead instead of a repeated constant.
+        controls = full_controls[slice_start : slice_start + expected_rows]
+        if len(controls) < active_control_rows:
             raise AssertionError("Incomplete active B-spline control-point window")
-
-        # The policy-facing format has as many control rows as knot rows. SciPy
-        # uses only len(knots) - degree - 1 of them; pad the ignored tail without
-        # increasing boundary-knot multiplicity.
-        controls = np.concatenate(
-            [
-                active_controls,
-                np.repeat(active_controls[-1:], degree + 1, axis=0),
-            ],
-            axis=0,
-        )
+        if len(controls) < expected_rows:
+            # Only the last few windows reach past the coefficient array.
+            controls = np.concatenate(
+                [
+                    controls,
+                    np.repeat(controls[-1:], expected_rows - len(controls), axis=0),
+                ],
+                axis=0,
+            )
         chunks.append(np.concatenate([knots[:, None], controls], axis=1))
 
     if not chunks:

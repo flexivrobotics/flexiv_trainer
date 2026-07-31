@@ -579,6 +579,10 @@ button:disabled {
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+.policy-grid--catalog {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .status-card,
 .policy-card,
 .browser-item {
@@ -3362,5 +3366,16 @@ button:active {
         align-items: center;
         gap: 0.7rem;
         flex-wrap: wrap;
+    }
+
+    .policy-grid--catalog {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 620px) {
+
+    .policy-grid--catalog {
+        grid-template-columns: 1fr;
     }
 }

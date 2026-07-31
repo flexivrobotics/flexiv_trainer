@@ -131,6 +131,7 @@ const state = {
         recordingSaveBusy: false,
         recordingSaveProgress: 0,
         trainingDeviceEvalBusy: false,
+        trainingDeviceEvalError: "",
         trainingDeviceAutoTriggeredStep: null,
         // Smoothed realtime recording FPS, derived from the change in captured
         // frames between status polls. Reset whenever a recording (re)starts.
@@ -202,6 +203,13 @@ const TELEOP_POLL_INTERVAL_MS = 100;
 // How often the view-independent fault watcher polls /teleop/status (1s) so the
 // floating fault widget surfaces a robot fault on any page, not just teleop.
 const FAULT_POLL_INTERVAL_MS = 1000;
+// Training status is server-authoritative. Keep polling independent of any
+// individual render or Start-button handler so conversion -> training handoffs
+// and live jobs recovered after navigation/reload cannot leave a stale screen.
+const TRAINING_STATUS_POLL_INTERVAL_MS = 2000;
+// Device discovery can contend with a cold PyTorch/CUDA warm-up. Never leave
+// the run screen permanently disabled if that backend probe becomes stuck.
+const TRAINING_DEVICE_EVALUATION_TIMEOUT_MS = 30000;
 // Active arm sides in capture order, mirroring RobotSerialConfig.active_sides()
 // on the backend. Single mode exposes only the chosen side; the index in this
 // list is the arm's capture order (and its follower-serial index).
@@ -1122,7 +1130,8 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
 
     // Camera feeds: stream the MP4 directly so the browser decodes it natively
     // (smooth playback) instead of fetching one re-encoded JPEG per frame.
-    // Display the left wrist before the right wrist (swap their positions).
+    // Preserve the established wrist-camera ordering, then place the ego view
+    // in the center so the two wrist perspectives flank it.
     const orderedCameraKeys = [...(preview.camera_keys || [])];
     const leftIdx = orderedCameraKeys.findIndex((k) => k.includes("left_wrist"));
     const rightIdx = orderedCameraKeys.findIndex((k) => k.includes("right_wrist"));
@@ -1131,6 +1140,17 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
             orderedCameraKeys[rightIdx],
             orderedCameraKeys[leftIdx],
         ];
+    }
+    const egoIdx = orderedCameraKeys.findIndex(
+        (key) => key === "ego" || key.endsWith(".ego"),
+    );
+    if (egoIdx !== -1) {
+        const [egoKey] = orderedCameraKeys.splice(egoIdx, 1);
+        orderedCameraKeys.splice(
+            Math.floor((orderedCameraKeys.length + 1) / 2),
+            0,
+            egoKey,
+        );
     }
     // For an episode-scoped preview the camera feeds live inside a shared MP4,
     // so target the episode's video file and play only its time window (native
@@ -2107,7 +2127,7 @@ function setTrainingDeviceEvalBusy(busy) {
     if (!button) {
         return;
     }
-    button.disabled = busy;
+    button.disabled = busy || state.trainingStatus?.status === "running";
     button.classList.toggle("icon-button--spinning", busy);
     button.setAttribute("aria-busy", busy ? "true" : "false");
 }
@@ -4981,7 +5001,7 @@ function renderTraining() {
             ${isFineTune ? `
                 <div class="output-picker"><div><p class="eyebrow">Source Checkpoint</p><strong>${escapeHtml(state.trainingCheckpointPath || "—")}</strong></div></div>
             ` : `<div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
-                <div class="policy-grid" id="policy-grid"></div>
+                <div class="policy-grid policy-grid--catalog" id="policy-grid"></div>
                 ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
             </div>`}
             <div id="policy-config-panel"></div>
@@ -5019,11 +5039,6 @@ function renderTraining() {
         return;
     }
 
-    if (state.ui.trainingDeviceAutoTriggeredStep !== runStep) {
-        state.ui.trainingDeviceAutoTriggeredStep = runStep;
-        refreshTrainingDevices({ silent: true }).catch((error) => showToast(error.message, true));
-    }
-
     const status = state.trainingStatus || { status: "ready", progress: 0, logs: [] };
     const progressDisplay = getTrainingProgressDisplay(status);
     const progress = progressDisplay.percent;
@@ -5035,8 +5050,23 @@ function renderTraining() {
     const isStopped = status.status === "stopped";
     const isFailed = status.status === "failed";
     const isCompleted = status.status === "completed";
+    // A live job must not launch a separate CUDA probe: a trainer already has
+    // its device in the command, while a converter will expose that device
+    // after handoff. Probing here can leave a recovered run showing a
+    // perpetual spinner while the backend warm-up lock is busy.
+    if (
+        !isRunning
+        && !state.trainingDevices
+        && !state.ui.trainingDeviceEvalBusy
+        && state.ui.trainingDeviceAutoTriggeredStep !== runStep
+    ) {
+        state.ui.trainingDeviceAutoTriggeredStep = runStep;
+        refreshTrainingDevices({ silent: true }).catch((error) => {
+            console.warn("Automatic training device evaluation failed", error);
+        });
+    }
     const outputDir = getTrainingOutputDir();
-    const canStart = !!outputDir;
+    const canStart = !!outputDir && !state.ui.trainingDeviceEvalBusy;
     const showsRestart = isStopped || isFailed || isCompleted;
     const primaryMarkup = isRunning
         ? TELEOP_STOP_MARKUP
@@ -5045,7 +5075,11 @@ function renderTraining() {
             : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
     const isDeviceEvalBusy = !!state.ui.trainingDeviceEvalBusy;
-    const trainingDevices = state.trainingDevices || { configured: "auto", resolved: "cpu", devices: [] };
+    const trainingDevices = state.trainingDevices || {
+        configured: state.trainingPolicies?.device || "auto",
+        resolved: "",
+        devices: [],
+    };
     const configuredDevice = trainingDevices.configured || "auto";
     const deviceOptions = isDeviceEvalBusy
         ? `<option value="" selected></option>`
@@ -5055,9 +5089,23 @@ function renderTraining() {
             const disabled = entry.name !== "auto" && !entry.available ? " disabled" : "";
             return `<option value="${escapeHtml(entry.name)}"${selected}${disabled}>${escapeHtml(label)}</option>`;
         }).join("");
+    const fallbackDeviceOptions = [...new Set(["auto", "cpu", configuredDevice])]
+        .map((device) => {
+            const selected = device === configuredDevice ? " selected" : "";
+            return `<option value="${escapeHtml(device)}"${selected}>${escapeHtml(device)}</option>`;
+        })
+        .join("");
     const deviceDetail = (() => {
         if (isDeviceEvalBusy) {
             return "Evaluating available devices...";
+        }
+        if (!state.trainingDevices && state.ui.trainingDeviceEvalError) {
+            return "Device evaluation unavailable. Click refresh to retry.";
+        }
+        if (isRunning && !state.trainingDevices) {
+            return status.phase === "converting"
+                ? `Training will use ${configuredDevice} after conversion`
+                : "Device is locked for the active training job";
         }
         const selected = (trainingDevices.devices || []).find((entry) => entry.name === configuredDevice);
         if (selected?.detail) {
@@ -5071,7 +5119,9 @@ function renderTraining() {
     const stateLabel = isPaused
         ? "Paused"
         : isRunning
-            ? "Running"
+            ? status.phase === "converting"
+                ? "Converting Dataset"
+                : "Training"
             : isStopped
                 ? "Stopped"
                 : _formatTrainingStatusLabel(status.status);
@@ -5083,10 +5133,10 @@ function renderTraining() {
                     <div class="training-device-row">
                         <label class="training-device-field" for="training-device-select">
                             <select id="training-device-select" ${(isRunning || isDeviceEvalBusy) ? "disabled" : ""}>
-                                ${deviceOptions || `<option value="auto" selected>auto</option><option value="cpu">cpu</option>`}
+                                ${deviceOptions || fallbackDeviceOptions}
                             </select>
                         </label>
-                        <button class="secondary-button icon-button training-device-reload" id="training-device-reload" type="button" aria-label="Evaluate training devices" title="Evaluate training devices" ${isDeviceEvalBusy ? "disabled" : ""}>
+                        <button class="secondary-button icon-button training-device-reload" id="training-device-reload" type="button" aria-label="Evaluate training devices" title="Evaluate training devices" ${(isRunning || isDeviceEvalBusy) ? "disabled" : ""}>
                             ${RESET_ICON_SVG}
                         </button>
                     </div>
@@ -5251,8 +5301,169 @@ function _restoreTrainingLogView(container) {
     });
 }
 
+let trainingPollingGeneration = 0;
+
+function trainingRunStep(mode = state.trainingMode) {
+    return mode === "fine_tune" ? 5 : 4;
+}
+
+function trainingDeviceFromStatus(status) {
+    const command = Array.isArray(status?.command) ? status.command : [];
+    for (let index = 0; index < command.length; index += 1) {
+        const token = String(command[index] || "");
+        if (token === "--policy.device" && command[index + 1]) {
+            return String(command[index + 1]);
+        }
+        if (token.startsWith("--policy.device=")) {
+            return token.slice("--policy.device=".length);
+        }
+    }
+    return "";
+}
+
+function restoreLiveTrainingDevice(status) {
+    const activeDevice = trainingDeviceFromStatus(status);
+    if (!activeDevice) {
+        return;
+    }
+
+    const devices = Array.isArray(state.trainingDevices?.devices)
+        ? [...state.trainingDevices.devices]
+        : [];
+    const existing = devices.find((entry) => entry.name === activeDevice);
+    if (existing) {
+        existing.available = true;
+        existing.detail = `Used by active training job`;
+    } else {
+        devices.push({
+            name: activeDevice,
+            available: true,
+            detail: `Used by active training job`,
+        });
+    }
+    state.trainingDevices = {
+        configured: activeDevice,
+        resolved: activeDevice,
+        devices,
+    };
+    state.ui.trainingDeviceEvalError = "";
+}
+
+function restoreLiveTrainingRun(status) {
+    if (!status?.job_id || status.status !== "running") {
+        return;
+    }
+
+    const mode = status.training_mode === "fine_tune" ? "fine_tune" : "new";
+    state.trainingMode = mode;
+    state.trainingStep = trainingRunStep(mode);
+    if (status.policy_type) {
+        state.selectedPolicy = status.policy_type;
+    }
+
+    const sourceDataset = status.source_dataset_root || status.dataset_root;
+    if (sourceDataset) {
+        state.mergedDatasetPath = sourceDataset;
+    }
+    state.trainingCheckpointPath = status.checkpoint_path || "";
+    if (mode === "fine_tune" && status.policy_type) {
+        const catalogEntry = state.trainingPolicies?.policies?.[status.policy_type];
+        state.trainingCheckpointInfo = {
+            ...(state.trainingCheckpointInfo || {}),
+            checkpoint_path: state.trainingCheckpointPath,
+            policy_type: status.policy_type,
+            policy_label: catalogEntry?.label || status.policy_type,
+        };
+    }
+}
+
+async function fetchTrainingStatus() {
+    return api(
+        "/training/status",
+        undefined,
+        {
+            timeoutMs: 5000,
+            timeoutMessage: "Training status request timed out",
+        },
+    );
+}
+
+function applyTrainingStatus(status, options = {}) {
+    state.trainingStatus = status;
+    if (status?.status === "running") {
+        // During B-spline conversion the command is the converter. As soon as
+        // the backend swaps in the trainer command, pick up its resolved device
+        // without launching a separate device probe.
+        restoreLiveTrainingDevice(status);
+    }
+    if (options.restoreRun) {
+        restoreLiveTrainingRun(status);
+    }
+}
+
+async function synchronizeTrainingStatus(options = {}) {
+    const status = await fetchTrainingStatus();
+    applyTrainingStatus(status, options);
+    return status;
+}
+
+function stopTrainingPolling() {
+    trainingPollingGeneration += 1;
+    window.clearTimeout(state.intervals.training);
+    state.intervals.training = null;
+}
+
+function startTrainingPolling(options = {}) {
+    stopTrainingPolling();
+    const generation = trainingPollingGeneration;
+    const immediate = options.immediate !== false;
+
+    const poll = async () => {
+        if (generation !== trainingPollingGeneration) {
+            return;
+        }
+
+        if (state.activeView === "training") {
+            try {
+                const status = await fetchTrainingStatus();
+                if (generation === trainingPollingGeneration) {
+                    applyTrainingStatus(status, {
+                        restoreRun: !!options.restoreRun,
+                    });
+                    if (
+                        state.activeView === "training"
+                        && state.trainingStep === trainingRunStep()
+                    ) {
+                        renderTraining();
+                    }
+                }
+            } catch (error) {
+                // A transient request or render failure must not kill future
+                // status updates. The next scheduled poll retries automatically.
+                console.warn("Training status refresh failed", error);
+            }
+        }
+
+        if (generation === trainingPollingGeneration) {
+            state.intervals.training = window.setTimeout(
+                poll,
+                TRAINING_STATUS_POLL_INTERVAL_MS,
+            );
+        }
+    };
+
+    if (immediate) {
+        void poll();
+    } else {
+        state.intervals.training = window.setTimeout(
+            poll,
+            TRAINING_STATUS_POLL_INTERVAL_MS,
+        );
+    }
+}
+
 function resetTrainingRunViewState() {
-    window.clearInterval(state.intervals.training);
+    stopTrainingPolling();
     state.trainingStatus = null;
     state.trainingOutputStamp = "";
     state.ui.trainingDeviceAutoTriggeredStep = null;
@@ -5268,6 +5479,7 @@ async function refreshTrainingDevices(options = {}) {
         return state.trainingDevices;
     }
     const previousDevices = state.trainingDevices;
+    state.ui.trainingDeviceEvalError = "";
     setTrainingDeviceEvalBusy(true);
     try {
         if (options.clearBeforeFetch) {
@@ -5280,13 +5492,21 @@ async function refreshTrainingDevices(options = {}) {
         if (options.delayMs) {
             await new Promise((resolve) => window.setTimeout(resolve, options.delayMs));
         }
-        state.trainingDevices = await api(options.force ? "/training/devices?force=true" : "/training/devices");
+        state.trainingDevices = await api(
+            options.force ? "/training/devices?force=true" : "/training/devices",
+            undefined,
+            {
+                timeoutMs: TRAINING_DEVICE_EVALUATION_TIMEOUT_MS,
+                timeoutMessage: "Training device evaluation timed out",
+            },
+        );
         if (state.trainingPolicies) {
             state.trainingPolicies.device = state.trainingDevices.configured;
         }
         return state.trainingDevices;
     } catch (error) {
         state.trainingDevices = previousDevices;
+        state.ui.trainingDeviceEvalError = error.message || "Device evaluation failed";
         if (!options.silent) {
             throw error;
         }
@@ -5526,16 +5746,19 @@ async function startTrainingRun(outputDir) {
                     : null,
             }),
         });
-        renderTraining();
-        window.clearInterval(state.intervals.training);
-        state.intervals.training = window.setInterval(async () => {
-            if (state.activeView !== "training" || state.trainingStep !== runStep) {
-                return;
-            }
-            state.trainingStatus = await api("/training/status");
+        // Register the self-healing poller before rendering the initial server
+        // snapshot. Even if rendering fails, the next status tick can recover.
+        startTrainingPolling();
+        try {
             renderTraining();
-        }, 2000);
+        } catch (error) {
+            console.warn(
+                "Initial training status render failed; polling will retry",
+                error,
+            );
+        }
     } catch (error) {
+        stopTrainingPolling();
         showToast(error.message, true);
         state.trainingStep = configStep;
         renderTraining();
@@ -5591,6 +5814,9 @@ function getTrainingProgressDisplay(status) {
             percent: Number.isFinite(status.progress) ? Math.max(0, Math.min(100, Math.round(status.progress))) : 0,
             label: escapeHtml(formatValue(status.error || "Training failed")),
         };
+    }
+    if (status.status === "running" && status.phase === "converting") {
+        return { percent: 0, label: "Preparing B-spline dataset…" };
     }
 
     const latestTrackerLine = _latestTrainingTrackerLine(status);
@@ -5726,7 +5952,10 @@ function renderTrainingTerminalLogs(status) {
         if (metrics.grad_norm !== undefined) parts.push(`grdn=${Number(metrics.grad_norm).toFixed(3)}`);
         if (metrics.lr !== undefined) parts.push(`lr=${Number(metrics.lr).toExponential(2)}`);
         if (status.log_lines !== undefined) parts.push(`lines=${status.log_lines}`);
-        html += _terminalLogRow("INFO", "·", "Training job running", parts.join(" "));
+        const runningMessage = status.phase === "converting"
+            ? "B-spline dataset conversion running"
+            : "Training job running";
+        html += _terminalLogRow("INFO", "·", runningMessage, parts.join(" "));
     }
 
     for (const line of logs) {
@@ -6288,18 +6517,37 @@ async function bootstrapProcessing() {
 }
 
 async function bootstrapTraining() {
-    if (state.trainingBootstrapped) {
-        return;
+    const firstBootstrap = !state.trainingBootstrapped;
+    if (firstBootstrap) {
+        await api("/training/bootstrap", { method: "POST" });
+        state.trainingPolicies = await api("/training/policies");
+        state.selectedPolicy = state.trainingPolicies.default;
+        state.trainingBootstrapped = true;
     }
-    await api("/training/bootstrap", { method: "POST" });
-    state.trainingPolicies = await api("/training/policies");
-    state.selectedPolicy = state.trainingPolicies.default;
-    state.trainingBootstrapped = true;
+
+    // Reconcile with the server every time this view is entered. This restores
+    // a live run after navigation or page reload and makes the backend phase
+    // authoritative over any stale in-memory conversion snapshot.
+    stopTrainingPolling();
+    try {
+        await synchronizeTrainingStatus({ restoreRun: true });
+    } catch (error) {
+        console.warn("Initial training status synchronization failed", error);
+    }
     if (state.activeView === "training") {
         renderTraining();
     }
-    state.ui.trainingDeviceAutoTriggeredStep = 4;
-    refreshTrainingDevices({ silent: true }).catch((error) => showToast(error.message, true));
+    startTrainingPolling({ immediate: false });
+
+    if (
+        firstBootstrap
+        && state.trainingStatus?.status !== "running"
+        && !state.trainingDevices
+    ) {
+        refreshTrainingDevices({ silent: true }).catch((error) => {
+            console.warn("Training device prefetch failed", error);
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
