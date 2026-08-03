@@ -19,6 +19,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
@@ -33,12 +34,18 @@ from flexivtrainer.rollout.checkpoint import (
     _checkpoint_target_hz,
     _default_policy_loader,
     _positive_float,
+    checkpoint_action_names,
+    checkpoint_action_output_dim,
     checkpoint_image_resolutions,
     resolve_checkpoint_path,
 )
 from flexivtrainer.rollout.executors.bspline import (
     BSplineActionLayout,
     parse_bspline_action_layout,
+)
+from flexivtrainer.rollout.executors.waypoint import (
+    build_action_layout,
+    canonical_action_names,
 )
 from flexivtrainer.rollout.hardware import _default_robot_factory
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
@@ -66,7 +73,7 @@ def _describe_rollout_overrides(rollout_cfg: Any) -> str:
         )
     if getattr(rollout_cfg, "compile_model", False):
         # Compilation is lazy, so the cost lands on the first inference step.
-        parts.append("model compiled; first inference includes compilation")
+        parts.append("model compilation enabled; first inference includes compilation")
     return "; ".join(parts) or "applied"
 
 
@@ -102,6 +109,7 @@ class RolloutService:
 
         self._lock = threading.Lock()
         self._running = False
+        self._stopping = False
         self._error: str | None = None
         self._stop_reason: str | None = None
         self._checkpoint_path: str | None = None
@@ -119,7 +127,9 @@ class RolloutService:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            if self._running:
+            if self._stopping:
+                status = "stopping"
+            elif self._running:
                 status = "running"
             elif self._error:
                 status = "failed"
@@ -150,6 +160,15 @@ class RolloutService:
         task = task.strip() if isinstance(task, str) else None
         task = task or None
         with self._lock:
+            # A Python thread cannot be killed and torch.compile is not
+            # interruptible, so refuse rather than let two planners overlap.
+            active_runner = self._runner
+            planner_alive = active_runner is not None and active_runner.is_alive()
+            if self._stopping or (planner_alive and not self._running):
+                raise RuntimeError(
+                    "The previous rollout planner has not exited yet; wait for "
+                    "it to finish and retry."
+                )
             if self._running:
                 raise RuntimeError("Rollout is already running")
             # A fresh RDK connection cannot coexist with the TDK controller
@@ -200,7 +219,21 @@ class RolloutService:
         overrides_applied = (
             override_fn(policy, rollout_cfg) if override_fn is not None else False
         )
+        compile_act = bool(
+            policy_type == "act"
+            and getattr(rollout_cfg, "compile_model", False)
+        )
+        compile_mode = str(getattr(rollout_cfg, "compile_mode", "reduce-overhead"))
+        overrides_applied |= compile_act
+        uses_cuda_graphs = bool(
+            compile_act
+            and compile_mode == "reduce-overhead"
+            and str(device).startswith("cuda")
+        )
         bspline_layout: BSplineActionLayout | None = None
+        waypoint_layout: list[dict[str, Any]] | None = None
+        waypoint_action_dim: int | None = None
+        waypoint_layout_inferred = False
         end_effector_config: dict[str, Any] = {}
         if is_bspline:
             bspline_layout = self._preflight_bspline(
@@ -211,9 +244,21 @@ class RolloutService:
                 bspline_layout, end_effector_config
             )
         else:
+            (
+                waypoint_layout,
+                waypoint_action_dim,
+                waypoint_layout_inferred,
+            ) = self._preflight_waypoint(
+                checkpoint_path,
+                policy,
+                sides,
+                followers,
+            )
             self._apply_n_action_steps(policy, rollout_cfg)
 
-        self._stop_event.clear()
+        # Per run: a zombie planner keeps the old event, which stays set, so
+        # clearing a shared one can no longer un-stop it.
+        self._stop_event = threading.Event()
         robots: list[Any] = []
         try:
             for serial in followers:
@@ -266,11 +311,13 @@ class RolloutService:
                 on_error=self._on_runner_error,
                 on_cleanup_error=self._on_runner_cleanup_error,
                 on_finished=self._on_runner_finished,
-                release_robots=self._release_robots,
+                release_robots=self._make_release_robots(robots),
                 stop_robots=hardware.stop_robots,
                 prepare_motion=self._prepare_motion,
             )
         else:
+            assert waypoint_layout is not None
+            assert waypoint_action_dim is not None
             runner = WaypointRunner(
                 policy=policy,
                 preprocessor=preprocessor,
@@ -283,6 +330,8 @@ class RolloutService:
                 target_hz=target_hz,
                 device=device,
                 task=task,
+                action_layout=waypoint_layout,
+                action_dim=waypoint_action_dim,
                 motion_limits=motion_limits,
                 planner_hz_fallback=app_rollout.planner_hz,
                 expected_hz_fallback=app_rollout.action_dt_hz,
@@ -293,7 +342,13 @@ class RolloutService:
                 append_wrench=self._wrench.append,
                 on_error=self._on_runner_error,
                 on_finished=self._on_runner_finished,
-                release_robots=self._release_robots,
+                release_robots=self._make_release_robots(robots),
+                prepare_policy=(
+                    partial(act_policy.compile_model, mode=compile_mode)
+                    if compile_act
+                    else None
+                ),
+                uses_cuda_graphs=uses_cuda_graphs,
             )
 
         with self._lock:
@@ -301,6 +356,7 @@ class RolloutService:
             self._task = task
             self._error = None
             self._stop_reason = None
+            self._stopping = False
             self._robots = robots
             self._device = device
             self._target_hz = target_hz
@@ -324,6 +380,16 @@ class RolloutService:
                     f"device={device} sides={'+'.join(sides)}",
                 )
             )
+            if waypoint_layout_inferred:
+                self._logs.append(
+                    _encode_ui_log(
+                        "WARNING",
+                        "ROLLOUT",
+                        "Waypoint action layout inferred",
+                        f"output_dim={waypoint_action_dim} sides={'+'.join(sides)}; "
+                        "checkpoint training dataset metadata was unavailable",
+                    )
+                )
             if overrides_applied:
                 self._logs.append(
                     _encode_ui_log(
@@ -352,6 +418,7 @@ class RolloutService:
     def _on_runner_finished(self, stop_reason: str | None, step: int) -> None:
         with self._lock:
             self._running = False
+            self._stopping = False
             if stop_reason is not None and self._stop_reason is None:
                 self._stop_reason = stop_reason
             reason = self._stop_reason or "stopped"
@@ -371,9 +438,18 @@ class RolloutService:
         runner = self._runner
         if runner is not None:
             cleanup_errors.extend(runner.stop())
+            if runner.is_alive():
+                # Reporting idle here would let the next start() sail past the
+                # _running guard while this planner still owns the GPU and robots.
+                with self._lock:
+                    self._stopping = True
+                    if cleanup_errors and self._error is None:
+                        self._error = "; ".join(cleanup_errors)
+                return self.status()
         self._runner = None
         self._release_robots()
         with self._lock:
+            self._stopping = False
             if cleanup_errors and self._error is None:
                 self._error = "; ".join(cleanup_errors)
             # Only attribute the stop to the operator when the run did not
@@ -436,6 +512,72 @@ class RolloutService:
             f"falling back to rollout.action_dt_hz={target_hz:.1f}",
         )
         return target_hz
+
+    @staticmethod
+    def _action_feature_dim(features: Any) -> int | None:
+        if not isinstance(features, dict):
+            return None
+        action = features.get("action")
+        if action is None:
+            for key, value in features.items():
+                if getattr(key, "value", None) == "action":
+                    action = value
+                    break
+        shape = (
+            action.get("shape")
+            if isinstance(action, dict)
+            else getattr(action, "shape", None)
+        )
+        if (
+            not isinstance(shape, list | tuple)
+            or len(shape) != 1
+            or isinstance(shape[0], bool)
+            or not isinstance(shape[0], int)
+            or shape[0] <= 0
+        ):
+            return None
+        return int(shape[0])
+
+    def _preflight_waypoint(
+        self,
+        checkpoint_path: str,
+        policy: Any,
+        sides: list[str],
+        followers: list[str],
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """Resolve a waypoint action contract before any robot is connected."""
+
+        if len(followers) != len(sides):
+            raise RuntimeError(
+                "Every active waypoint arm must have a follower robot serial"
+            )
+        config = getattr(policy, "config", None)
+        policy_dim = self._action_feature_dim(
+            getattr(config, "output_features", None)
+        )
+        saved_dim = checkpoint_action_output_dim(checkpoint_path)
+        if policy_dim is not None and saved_dim is not None and policy_dim != saved_dim:
+            raise RuntimeError(
+                "Loaded policy action width does not match checkpoint metadata: "
+                f"policy={policy_dim} checkpoint={saved_dim}"
+            )
+        action_dim = policy_dim or saved_dim
+        if action_dim is None:
+            raise RuntimeError(
+                "Waypoint checkpoint has no valid one-dimensional action output"
+            )
+
+        try:
+            names = checkpoint_action_names(
+                checkpoint_path, self._settings.storage.root
+            )
+            inferred = names is None
+            if names is None:
+                names = canonical_action_names(action_dim, sides)
+            layout = build_action_layout(names, sides, action_dim)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        return layout, action_dim, inferred
 
     @staticmethod
     def _preflight_bspline(
@@ -559,3 +701,18 @@ class RolloutService:
         with self._lock:
             robots, self._robots = self._robots, []
         hardware.stop_robots(robots)
+
+    def _make_release_robots(self, robots: list[Any]) -> Callable[[], None]:
+        """Release only this run's robots.
+
+        A planner thread that outlives its stop() would otherwise reach the
+        shared list and stop the *next* run's robots from its own finally.
+        """
+
+        def release() -> None:
+            with self._lock:
+                if self._robots is robots:
+                    self._robots = []
+            hardware.stop_robots(robots)
+
+        return release

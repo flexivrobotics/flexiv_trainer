@@ -30,9 +30,14 @@ from flexivtrainer.rollout.checkpoint import (
     _checkpoint_policy_type,
     _checkpoint_requires_task,
     _checkpoint_target_hz,
+    checkpoint_action_names,
+    checkpoint_action_output_dim,
     checkpoint_image_resolutions,
 )
-from flexivtrainer.rollout.executors.waypoint import WaypointExecutor
+from flexivtrainer.rollout.executors.waypoint import (
+    WaypointExecutor,
+    canonical_action_names,
+)
 from flexivtrainer.rollout.hardware import _zero_ft_sensor
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
@@ -125,6 +130,10 @@ class _FakePolicy:
 
     def __init__(self, action_vector: list[float]) -> None:
         self._action = action_vector
+        self.config = SimpleNamespace(
+            type="act",
+            output_features={"action": {"shape": [len(action_vector)]}},
+        )
         self.batches: list[dict] = []
         self.reset_count = 0
 
@@ -150,7 +159,10 @@ def _fake_loader(policy):
 
 
 def _settings(tmp_path) -> AppSettings:
-    return AppSettings(storage=StorageConfig(root=tmp_path))
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    # Most loop tests use a minimal fake policy without a torch model.
+    settings.policies.act.rollout.compile_model = False
+    return settings
 
 
 def _teleop(initialized: bool = False):
@@ -189,6 +201,57 @@ def _checkpoint_with_dataset_fps(tmp_path, fps: int = 10) -> str:
     )
     (model / "train_config.json").write_text(
         json.dumps({"dataset": {"root": str(dataset)}}),
+        encoding="utf-8",
+    )
+    return str(tmp_path / "ckpt")
+
+
+def _checkpoint_with_action_schema(
+    tmp_path, action_names: list[str], *, output_dim: int | None = None
+) -> str:
+    dataset = tmp_path / "datasets" / "actions"
+    meta = dataset / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(
+        json.dumps(
+            {
+                "fps": 10,
+                "features": {
+                    "action": {
+                        "dtype": "float32",
+                        "shape": [len(action_names)],
+                        "names": action_names,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = tmp_path / "ckpt" / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "type": "act",
+                "output_features": {
+                    "action": {
+                        "type": "ACTION",
+                        "shape": [output_dim or len(action_names)],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model / "train_config.json").write_text(
+        json.dumps(
+            {
+                "dataset": {
+                    "root": str(dataset),
+                    "repo_id": "local/actions",
+                }
+            }
+        ),
         encoding="utf-8",
     )
     return str(tmp_path / "ckpt")
@@ -414,6 +477,14 @@ def test_checkpoint_target_hz_reads_training_dataset_fps(tmp_path) -> None:
     checkpoint = _checkpoint_with_dataset_fps(tmp_path, fps=12)
 
     assert _checkpoint_target_hz(checkpoint) == 12.0
+
+
+def test_checkpoint_recovers_named_action_contract(tmp_path) -> None:
+    names = canonical_action_names(26, ["left_arm", "right_arm"])
+    checkpoint = _checkpoint_with_action_schema(tmp_path, names)
+
+    assert checkpoint_action_output_dim(checkpoint) == 26
+    assert checkpoint_action_names(checkpoint, tmp_path) == names
 
 
 def _checkpoint_of_type(tmp_path, policy_type: str) -> str:
@@ -692,6 +763,18 @@ def test_stop_releases_robot_when_gripper_shutdown_fails(tmp_path) -> None:
     assert "worker stuck" in status["error"]
 
 
+def _stub_cudagraph_state(monkeypatch) -> None:
+    """Keep torch's real cudagraph thread-local out of mocked-compile tests."""
+    monkeypatch.setattr(
+        "flexivtrainer.rollout._cudagraph_state.seed_thread_local_state",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout._cudagraph_state.teardown_rollout_gpu_state",
+        lambda device, **kwargs: None,
+    )
+
+
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:
     """Start the loop and stop it after at least one command is sent."""
     service.start(checkpoint)
@@ -851,6 +934,123 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
         and t.is_alive()
         for t in threading.enumerate()
     )
+    assert any(
+        "Waypoint action layout inferred" in entry
+        for entry in service.status()["logs"]
+    )
+
+
+def test_dual_arm_act_without_wrench_uses_checkpoint_action_names(
+    tmp_path, monkeypatch
+) -> None:
+    sides = ["left_arm", "right_arm"]
+    names = canonical_action_names(26, sides)
+    checkpoint = _checkpoint_with_action_schema(tmp_path, names)
+    left_pose = [0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0]
+    left_twist = [1.0] * 6
+    right_pose = [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]
+    right_twist = [2.0] * 6
+    action = [*left_pose, *left_twist, *right_pose, *right_twist]
+    policy = _FakePolicy(action)
+    robots = {"F1": _FakeRobot("F1"), "F2": _FakeRobot("F2")}
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: [
+            TeleopRobotPair(leader_serial="L1", follower_serial="F1"),
+            TeleopRobotPair(leader_serial="L2", follower_serial="F2"),
+        ],
+        lambda: sides,
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robots[serial],
+        resolve_device=lambda configured: "cpu",
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(checkpoint)
+    deadline = time.monotonic() + 2.0
+    while (
+        (not robots["F1"].commands or not robots["F2"].commands)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    service.stop()
+
+    left_command = robots["F1"].commands[0]
+    right_command = robots["F2"].commands[0]
+    assert left_command[0] == pytest.approx(left_pose)
+    assert left_command[1] == [0.0] * 6
+    assert left_command[2] == pytest.approx(left_twist)
+    assert right_command[0] == pytest.approx(right_pose)
+    assert right_command[1] == [0.0] * 6
+    assert right_command[2] == pytest.approx(right_twist)
+    assert not any(
+        "Waypoint action layout inferred" in entry
+        for entry in service.status()["logs"]
+    )
+
+
+def test_waypoint_schema_mismatch_fails_before_robot_initialization(
+    tmp_path,
+) -> None:
+    names = canonical_action_names(38, ["left_arm", "right_arm"])
+    checkpoint = _checkpoint_with_action_schema(tmp_path, names, output_dim=26)
+    policy = _FakePolicy([0.0] * 26)
+    initialized: list[str] = []
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: [
+            TeleopRobotPair(leader_serial="L1", follower_serial="F1"),
+            TeleopRobotPair(leader_serial="L2", follower_serial="F2"),
+        ],
+        lambda: ["left_arm", "right_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: initialized.append(serial),
+        resolve_device=lambda configured: "cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="output=26 names=38"):
+        service.start(checkpoint)
+
+    assert initialized == []
+
+
+def test_unknown_waypoint_action_width_fails_before_robot_initialization(
+    tmp_path,
+) -> None:
+    policy = _FakePolicy([0.0] * 27)
+    initialized: list[str] = []
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: [
+            TeleopRobotPair(leader_serial="L1", follower_serial="F1"),
+            TeleopRobotPair(leader_serial="L2", follower_serial="F2"),
+        ],
+        lambda: ["left_arm", "right_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: initialized.append(serial),
+        resolve_device=lambda configured: "cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="Cannot infer waypoint"):
+        service.start(_checkpoint(tmp_path))
+
+    assert initialized == []
 
 
 def test_start_threads_task_into_prediction(tmp_path, monkeypatch) -> None:
@@ -1009,7 +1209,10 @@ def test_overlapped_replan_forces_and_extends_committed_path(
     policy = _FakePolicy(action)
     # Identify as diffusion so the per-family rollout config (replan_steps=4)
     # applies instead of the shared defaults.
-    policy.config = SimpleNamespace(type="diffusion")
+    policy.config = SimpleNamespace(
+        type="diffusion",
+        output_features={"action": {"shape": [len(action)]}},
+    )
     robot = _FakeRobot("F1")
     settings = _settings(tmp_path)
     settings.policies.diffusion.rollout.replan_steps = 4
@@ -1094,7 +1297,9 @@ def test_n_action_steps_override_applies_clamps_and_skips(tmp_path) -> None:
 
 def test_act_rollout_overrides_disable_temporal_ensembling() -> None:
     # Set explicitly: the shipped default is an operator preference that flips.
-    rollout_cfg = act_policy.RolloutConfig(disable_temporal_ensemble=True)
+    rollout_cfg = act_policy.RolloutConfig(
+        disable_temporal_ensemble=True, compile_model=False
+    )
     policy = SimpleNamespace(
         config=SimpleNamespace(temporal_ensemble_coeff=0.01, n_action_steps=1),
         temporal_ensembler=object(),
@@ -1109,7 +1314,9 @@ def test_act_rollout_overrides_disable_temporal_ensembling() -> None:
 
 
 def test_act_rollout_overrides_respect_the_opt_out() -> None:
-    rollout_cfg = act_policy.RolloutConfig(disable_temporal_ensemble=False)
+    rollout_cfg = act_policy.RolloutConfig(
+        disable_temporal_ensemble=False, compile_model=False
+    )
     ensembler = object()
     policy = SimpleNamespace(
         config=SimpleNamespace(temporal_ensemble_coeff=0.01, n_action_steps=1),
@@ -1226,7 +1433,11 @@ def test_rollout_for_selects_per_policy_config_and_loop_runs_for_act(
     action = [float(i) for i in range(19)]
     policy = _FakePolicy(action)
     policy.config = SimpleNamespace(
-        type="act", temporal_ensemble_coeff=0.01, n_action_steps=1, chunk_size=60
+        type="act",
+        temporal_ensemble_coeff=0.01,
+        n_action_steps=1,
+        chunk_size=60,
+        output_features={"action": {"shape": [len(action)]}},
     )
     policy.temporal_ensembler = object()
     robot = _FakeRobot("F1")
@@ -1331,7 +1542,10 @@ def test_rollout_start_clears_depth_alignment_leases(tmp_path, monkeypatch) -> N
     # policy loop until its lease lapsed, so starting a rollout drops it.
     cleared: list[bool] = []
     policy = _FakePolicy([float(i) for i in range(19)])
-    policy.config = SimpleNamespace(type="act")
+    policy.config = SimpleNamespace(
+        type="act",
+        output_features={"action": {"shape": [len(policy._action)]}},
+    )
     robot = _FakeRobot("F1")
     service = _make_service(tmp_path, policy=policy, robot=robot)
     service._cameras = SimpleNamespace(
@@ -1355,49 +1569,326 @@ def test_rollout_start_clears_depth_alignment_leases(tmp_path, monkeypatch) -> N
     assert cleared == [True]
 
 
-def test_act_compile_override_replaces_only_the_model(monkeypatch) -> None:
+def test_sequential_act_compilation_replaces_only_each_model(monkeypatch) -> None:
     # Compile the tensor core, not ACTPolicy: select_action mutates a Python
     # deque and is not a pure graph.
-    calls: list[tuple] = []
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "torch.compiler.reset",
+        lambda: calls.append("reset"),
+    )
     monkeypatch.setattr(
         "torch.compile",
         lambda model, **kwargs: calls.append((model, kwargs)) or "COMPILED",
     )
-    sentinel = object()
-    policy = SimpleNamespace(config=SimpleNamespace(type="act"), model=sentinel)
-    rollout_cfg = act_policy.RolloutConfig(compile_model=True)
+    model_26 = object()
+    model_38 = object()
+    for action_dim, model in ((26, model_26), (38, model_38)):
+        policy = SimpleNamespace(
+            config=SimpleNamespace(type="act", action_dim=action_dim),
+            model=model,
+        )
+        act_policy.compile_model(policy)
+        assert policy.model == "COMPILED"
 
-    assert act_policy.apply_rollout_overrides(policy, rollout_cfg) is True
-    assert policy.model == "COMPILED"
-    assert calls[0][0] is sentinel
-    assert calls[0][1] == {"mode": "reduce-overhead"}
+    assert calls == [
+        "reset",
+        (model_26, {"mode": "reduce-overhead"}),
+        "reset",
+        (model_38, {"mode": "reduce-overhead"}),
+    ]
 
 
-def test_act_compile_failure_falls_back_to_eager(monkeypatch) -> None:
+def test_act_compile_failure_stops_before_waypoint_dispatch(
+    tmp_path, monkeypatch
+) -> None:
     def boom(model, **kwargs):
         raise RuntimeError("inductor unavailable")
 
+    monkeypatch.setattr("torch.compiler.reset", lambda: None)
     monkeypatch.setattr("torch.compile", boom)
+    _stub_cudagraph_state(monkeypatch)
     sentinel = object()
-    policy = SimpleNamespace(config=SimpleNamespace(type="act"), model=sentinel)
-
-    applied = act_policy.apply_rollout_overrides(
-        policy, act_policy.RolloutConfig(compile_model=True)
+    policy = SimpleNamespace(
+        config=SimpleNamespace(
+            type="act",
+            output_features={"action": {"shape": [19]}},
+        ),
+        model=sentinel,
+    )
+    settings = _settings(tmp_path)
+    settings.policies.act.rollout.compile_model = True
+    robot = _FakeRobot("F1")
+    service = RolloutService(
+        settings,
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: _single_arm_pairs(),
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cuda:0",
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
-    # A missing accelerator must not abort the rollout.
-    assert applied is False
+    service.start(_checkpoint(tmp_path))
+    deadline = time.monotonic() + 2.0
+    while service.status()["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    status = service.stop()
+
+    assert "inductor unavailable" in status["error"]
+    assert robot.commands == []
     assert policy.model is sentinel
+
+
+@pytest.mark.parametrize(
+    ("device", "expected_events"),
+    [
+        (
+            "cuda:0",
+            ["reset", "compile", "mark", "predict", "mark", "predict"],
+        ),
+        ("cpu", ["reset", "compile", "predict", "predict"]),
+    ],
+)
+def test_compiled_act_marks_only_cuda_inference_steps(
+    tmp_path, monkeypatch, device, expected_events
+) -> None:
+    events: list[str] = []
+    worker_threads: list[int] = []
+    caller_thread = threading.get_ident()
+    action = [float(i) for i in range(19)]
+    policy = _FakePolicy(action)
+    policy.model = object()
+    robot = _FakeRobot("F1")
+    settings = _settings(tmp_path)
+    settings.policies.act.rollout.compile_model = True
+    settings.rollout.max_steps = 2
+    service = RolloutService(
+        settings,
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: _single_arm_pairs(),
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: device,
+    )
+
+    def record(event: str) -> None:
+        events.append(event)
+        worker_threads.append(threading.get_ident())
+
+    monkeypatch.setattr("torch.compiler.reset", lambda: record("reset"))
+    monkeypatch.setattr(
+        "torch.compile", lambda model, **kwargs: record("compile") or model
+    )
+    monkeypatch.setattr(
+        "torch.compiler.cudagraph_mark_step_begin",
+        lambda: record("mark"),
+    )
+    _stub_cudagraph_state(monkeypatch)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            record("predict")
+            or (np.tile(pol.select_action(obs), (8, 1)), True)
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._cuda_sync", lambda device: None
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path))
+    deadline = time.monotonic() + 2.0
+    while service.status()["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    service.stop()
+
+    assert events == expected_events
+    assert set(worker_threads) == {worker_threads[0]}
+    assert worker_threads[0] != caller_thread
+
+
+def test_cuda_graph_state_is_seeded_on_the_planner_thread_before_compile(
+    tmp_path, monkeypatch
+) -> None:
+    # torch.compiler.reset() reaches reset_cudagraph_trees() on the calling
+    # thread, so seeding after it would still hit the bare AssertionError.
+    events: list[str] = []
+    threads: dict[str, int] = {}
+    policy = _FakePolicy([float(i) for i in range(19)])
+    policy.model = object()
+    robot = _FakeRobot("F1")
+    settings = _settings(tmp_path)
+    settings.policies.act.rollout.compile_model = True
+    settings.rollout.max_steps = 1
+    service = RolloutService(
+        settings,
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: _single_arm_pairs(),
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cuda:0",
+    )
+
+    def record(event: str) -> None:
+        events.append(event)
+        threads[event] = threading.get_ident()
+
+    monkeypatch.setattr(
+        "flexivtrainer.rollout._cudagraph_state.seed_thread_local_state",
+        lambda: record("seed"),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout._cudagraph_state.teardown_rollout_gpu_state",
+        lambda device, **kwargs: record(f"teardown:{kwargs['cudagraphs_seeded']}"),
+    )
+    monkeypatch.setattr("torch.compiler.reset", lambda: record("reset"))
+    monkeypatch.setattr(
+        "torch.compile", lambda model, **kwargs: record("compile") or model
+    )
+    monkeypatch.setattr("torch.compiler.cudagraph_mark_step_begin", lambda: None)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path))
+    deadline = time.monotonic() + 2.0
+    while service.status()["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    service.stop()
+
+    assert events[:3] == ["seed", "reset", "compile"]
+    assert events[-1] == "teardown:True"
+    assert threads["seed"] != threading.get_ident()
+    assert threads["seed"] == threads["compile"] == threads["teardown:True"]
+
+
+def test_cuda_graph_state_is_not_seeded_without_compilation(
+    tmp_path, monkeypatch
+) -> None:
+    seeded: list[str] = []
+    torn_down: list[bool] = []
+    policy = _FakePolicy([float(i) for i in range(19)])
+    robot = _FakeRobot("F1")
+    settings = _settings(tmp_path)
+    settings.rollout.max_steps = 1
+    service = RolloutService(
+        settings,
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: _single_arm_pairs(),
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cuda:0",
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout._cudagraph_state.seed_thread_local_state",
+        lambda: seeded.append("seed"),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout._cudagraph_state.teardown_rollout_gpu_state",
+        lambda device, **kwargs: torn_down.append(kwargs["cudagraphs_seeded"]),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    _run_one_tick(service, robot, _checkpoint(tmp_path))
+
+    # Teardown must not reset trees this thread never seeded: that reproduces
+    # the original assert on top of whatever ended the run.
+    assert seeded == []
+    assert torn_down == [False]
+
+
+def test_each_run_gets_a_fresh_stop_event(tmp_path, monkeypatch) -> None:
+    policy = _FakePolicy([float(i) for i in range(19)])
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    checkpoint = _checkpoint(tmp_path)
+    _run_one_tick(service, robot, checkpoint)
+    first_event = service._stop_event
+    robot.commands.clear()
+    _run_one_tick(service, robot, checkpoint)
+
+    # A shared event would be cleared by the second start(), un-stopping any
+    # planner from the first run that had not exited yet.
+    assert service._stop_event is not first_event
+    assert first_event.is_set()
+
+
+def test_start_refuses_while_the_previous_planner_is_alive(
+    tmp_path, monkeypatch
+) -> None:
+    release = threading.Event()
+    policy = _FakePolicy([float(i) for i in range(19)])
+    policy.model = object()
+    robot = _FakeRobot("F1")
+    settings = _settings(tmp_path)
+    settings.policies.act.rollout.compile_model = True
+    service = RolloutService(
+        settings,
+        _cameras(),
+        _teleop(initialized=False),
+        lambda: _single_arm_pairs(),
+        lambda: ["single_arm"],
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cpu",
+    )
+    monkeypatch.setattr("torch.compiler.reset", lambda: None)
+    monkeypatch.setattr(
+        "torch.compile",
+        lambda model, **kwargs: release.wait(timeout=10.0) or model,
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    checkpoint = _checkpoint(tmp_path)
+    service.start(checkpoint)
+    try:
+        status = service.stop()
+        assert status["status"] == "stopping"
+        with pytest.raises(RuntimeError, match="has not exited yet"):
+            service.start(checkpoint)
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5.0
+    while service.status()["status"] == "stopping" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.status()["status"] != "stopping"
 
 
 def test_describe_rollout_overrides_mentions_compilation() -> None:
     detail = _describe_rollout_overrides(act_policy.RolloutConfig(compile_model=True))
-    assert "compiled" in detail
+    assert "compilation" in detail
 
     both = _describe_rollout_overrides(
         act_policy.RolloutConfig(compile_model=True, disable_temporal_ensemble=True)
     )
-    assert "compiled" in both and "ensembling disabled" in both
+    assert "compilation" in both and "ensembling disabled" in both
 
 
 def test_playback_speed_scales_the_action_rate(tmp_path) -> None:

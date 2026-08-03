@@ -20,6 +20,7 @@ import shlex
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, TextIO
@@ -123,6 +124,13 @@ def describe_exception(exc: BaseException) -> str:
     if not message:
         return exception_name
     return f"{exception_name}: {message}"
+
+
+def describe_traceback(exc: BaseException) -> str:
+    """Full stack text. describe_exception collapses a bare assert to a bare
+    type name, which is unactionable for failures raised deep in dependencies.
+    """
+    return "".join(traceback.format_exception(exc)).strip()
 
 
 def _record_detail(record: logging.LogRecord) -> str:

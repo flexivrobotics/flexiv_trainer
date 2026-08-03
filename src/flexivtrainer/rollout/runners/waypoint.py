@@ -25,14 +25,17 @@ from typing import Any
 import numpy as np
 
 from flexivtrainer.data.lerobot_io import (
-    build_features_from_sample,
     resolve_recording_image_names,
 )
-from flexivtrainer.observability import describe_exception, warn
-from flexivtrainer.rollout import observations
+from flexivtrainer.observability import (
+    describe_exception,
+    describe_traceback,
+    error,
+    warn,
+)
+from flexivtrainer.rollout import _cudagraph_state, observations
 from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
-    build_action_layout,
     normalize_pose_quaternion,
 )
 
@@ -53,6 +56,8 @@ class WaypointRunner:
         target_hz: float,
         device: str,
         task: str | None,
+        action_layout: list[dict[str, Any]],
+        action_dim: int,
         motion_limits: tuple[float, float, float, float],
         planner_hz_fallback: float,
         expected_hz_fallback: float,
@@ -63,6 +68,8 @@ class WaypointRunner:
         on_error: Callable[[str], None],
         on_finished: Callable[[str | None, int], None],
         release_robots: Callable[[], None],
+        prepare_policy: Callable[[Any], None] | None = None,
+        uses_cuda_graphs: bool = False,
         image_resolutions: dict[str, tuple[int, int]] | None = None,
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -77,6 +84,8 @@ class WaypointRunner:
         self._target_hz = target_hz
         self._device = device
         self._task = task
+        self._action_layout = action_layout
+        self._action_dim = action_dim
         self._motion_limits = motion_limits
         self._planner_hz_fallback = planner_hz_fallback
         self._expected_hz_fallback = expected_hz_fallback
@@ -89,6 +98,8 @@ class WaypointRunner:
         self._on_error = on_error
         self._on_finished = on_finished
         self._release_robots = release_robots
+        self._prepare_policy = prepare_policy
+        self._uses_cuda_graphs = uses_cuda_graphs
 
         self._error: str | None = None
         self._stop_reason: str | None = None
@@ -115,8 +126,13 @@ class WaypointRunner:
             thread.join(timeout=timeout)
             if thread.is_alive():
                 cleanup_errors.append("Rollout planner did not stop cleanly")
-        self._thread = None
+        alive = thread is not None and thread.is_alive()
+        self._thread = thread if alive else None
         return cleanup_errors
+
+    def is_alive(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     def status(self) -> dict[str, Any]:
         return {"error": self._error, "stop_reason": self._stop_reason}
@@ -134,7 +150,6 @@ class WaypointRunner:
         target_hz = self._target_hz
         task = self._task
 
-        policy.reset()
         period = 1.0 / self._planner_hz()
         # Waypoint spacing follows dataset FPS, not planner frequency.
         dt = 1.0 / float(target_hz)
@@ -143,7 +158,10 @@ class WaypointRunner:
         replan_steps: int | None = None
         max_steps = self._max_steps
         camera_names = resolve_recording_image_names(None, sides)
-        layout: list[dict[str, Any]] | None = None
+        layout = self._action_layout
+        # Off by default: _actions_to_lists already syncs the tensors it copies,
+        # so this only shifts GPU wait out of infer_ms and into to_list.
+        debug_timing = bool(getattr(rollout_cfg, "debug_timing", False))
         log_every = max(1, int(self._planner_hz() // 2))
         stage_times: dict[str, deque[float]] = {
             name: deque(maxlen=10)
@@ -156,7 +174,30 @@ class WaypointRunner:
         waypoint_executor: WaypointExecutor | None = None
         previous_loop_start: float | None = None
         step = 0
+        actions: Any = None
+        seeded = False
         try:
+            cuda_graph_step_begin: Callable[[], None] | None = None
+            if self._uses_cuda_graphs:
+                import torch  # noqa: PLC0415
+
+                # Must precede compilation: torch.compiler.reset() reaches
+                # reset_cudagraph_trees() on this thread and asserts unseeded.
+                _cudagraph_state.seed_thread_local_state()
+                seeded = True
+                cuda_graph_step_begin = torch.compiler.cudagraph_mark_step_begin
+            if self._prepare_policy is not None:
+                self._prepare_policy(policy)
+            policy.reset()
+            waypoint_executor = WaypointExecutor(
+                robots,
+                layout,
+                self._stop_event,
+                self._motion_limits,
+                action_dim=self._action_dim,
+            )
+            self._waypoint_executor = waypoint_executor
+            waypoint_executor.start()
             while not self._stop_event.is_set():
                 loop_start = time.monotonic()
                 loop_period = (
@@ -192,24 +233,10 @@ class WaypointRunner:
                 stage_times["build_obs"].append(now - mark)
                 mark = now
 
-                if layout is None:
-                    features, _, _ = build_features_from_sample(
-                        snapshot, images, None, sides
-                    )
-                    action_feature = features.get("action")
-                    action_names = action_feature["names"] if action_feature else []
-                    layout = build_action_layout(action_names, sides)
-                    waypoint_executor = WaypointExecutor(
-                        robots,
-                        layout,
-                        self._stop_event,
-                        self._motion_limits,
-                    )
-                    self._waypoint_executor = waypoint_executor
-                    waypoint_executor.start()
-
                 # Replan early enough to retain a committed path during inference.
                 force = replan_steps is None or step % replan_steps == 0
+                if cuda_graph_step_begin is not None:
+                    cuda_graph_step_begin()
                 actions, fresh = observations._predict_action_chunk(
                     observation,
                     policy,
@@ -219,7 +246,8 @@ class WaypointRunner:
                     force_refresh=force,
                     task=task,
                 )
-                observations._cuda_sync(self._device)
+                if debug_timing:
+                    observations._cuda_sync(self._device)
                 now = time.monotonic()
                 infer_seconds = now - mark
                 stage_times["inference"].append(infer_seconds)
@@ -227,12 +255,12 @@ class WaypointRunner:
                 mark = now
 
                 action_lists = self._actions_to_lists(actions)
+                waypoint_executor.validate_actions(action_lists)
                 now = time.monotonic()
                 stage_times["to_list"].append(now - mark)
                 mark = now
 
                 # Fresh chunks replace pending waypoints on an anchored time grid.
-                assert waypoint_executor is not None
                 if fresh:
                     if replan_steps is None:
                         effective = len(action_lists)
@@ -299,12 +327,21 @@ class WaypointRunner:
             self._error = detail
             self._on_error(detail)
             warn("Rollout stopped", detail)
+            error("Rollout planner thread crashed", describe_traceback(exc))
         finally:
             # Stop commands before releasing robot connections.
             if waypoint_executor is not None:
                 self._stop_event.set()
                 waypoint_executor.join()
             self._waypoint_executor = None
+            # Drop anything that can alias a CUDA-graph output buffer before
+            # tearing the pool down, or its memory cannot be reclaimed.
+            actions = None
+            self._policy = self._preprocessor = self._postprocessor = None
+            del policy, preprocessor, postprocessor
+            _cudagraph_state.teardown_rollout_gpu_state(
+                self._device, cudagraphs_seeded=seeded
+            )
             self._release_robots()
             self._on_finished(self._stop_reason, step)
 

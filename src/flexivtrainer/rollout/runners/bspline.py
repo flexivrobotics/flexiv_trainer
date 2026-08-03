@@ -25,8 +25,13 @@ from typing import Any
 import numpy as np
 
 from flexivtrainer.data.lerobot_io import resolve_recording_image_names
-from flexivtrainer.observability import describe_exception, warn
-from flexivtrainer.rollout import observations
+from flexivtrainer.observability import (
+    describe_exception,
+    describe_traceback,
+    error,
+    warn,
+)
+from flexivtrainer.rollout import _cudagraph_state, observations
 from flexivtrainer.rollout.executors.bspline import (
     BSplineActionLayout,
     BSplineExecutor,
@@ -133,10 +138,15 @@ class BSplineRunner:
             thread.join(timeout=timeout)
             if thread.is_alive():
                 cleanup_errors.append("Rollout planner did not stop cleanly")
-        self._thread = None
+        alive = thread is not None and thread.is_alive()
+        self._thread = thread if alive else None
         self._bspline_executor = None
         self._gripper_executor = None
         return cleanup_errors
+
+    def is_alive(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     def status(self) -> dict[str, Any]:
         return {"error": self._error, "stop_reason": self._stop_reason}
@@ -413,6 +423,7 @@ class BSplineRunner:
             self._error = detail
             self._on_error(detail)
             warn("Rollout stopped", detail)
+            error("Rollout planner thread crashed", describe_traceback(exc))
         finally:
             self._stop_event.set()
             inference_pool.shutdown(wait=True, cancel_futures=True)
@@ -431,5 +442,9 @@ class BSplineRunner:
                     self._on_cleanup_error(describe_exception(exc))
             self._bspline_executor = None
             self._gripper_executor = None
+            self._policy = self._preprocessor = self._postprocessor = None
+            _cudagraph_state.teardown_rollout_gpu_state(
+                self._device, cudagraphs_seeded=False
+            )
             self._release_robots()
             self._on_finished(self._stop_reason, step)

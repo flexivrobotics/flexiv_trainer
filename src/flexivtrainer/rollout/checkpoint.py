@@ -127,6 +127,109 @@ def _dataset_root_candidates(root: str, model_dir: Path) -> list[Path]:
     )
 
 
+def _checkpoint_dataset_candidates(
+    checkpoint_path: str, storage_root: Path | None = None
+) -> list[Path]:
+    """Return recoverable roots for the dataset baked into a checkpoint."""
+
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    train_config = _read_json(model_dir / "train_config.json") or {}
+    dataset = train_config.get("dataset") if isinstance(train_config, dict) else None
+    if not isinstance(dataset, dict):
+        return []
+
+    candidates: list[Path] = []
+    root = dataset.get("root")
+    if isinstance(root, str) and root.strip():
+        candidates.extend(_dataset_root_candidates(root, model_dir))
+
+    # LeRobot checkpoints also retain repo_id. It lets a checkpoint survive a
+    # moved/deleted absolute dataset path as long as the dataset still exists in
+    # this app's storage root.
+    repo_id = dataset.get("repo_id")
+    if storage_root is not None and isinstance(repo_id, str) and repo_id.strip():
+        dataset_name = repo_id.rstrip("/").rsplit("/", 1)[-1]
+        if dataset_name:
+            storage = Path(storage_root).expanduser().resolve(strict=False)
+            candidates.extend(
+                [storage / "datasets" / dataset_name, storage / dataset_name]
+            )
+
+    return list(
+        dict.fromkeys(
+            candidate.expanduser().resolve(strict=False)
+            for candidate in candidates
+        )
+    )
+
+
+def checkpoint_action_output_dim(checkpoint_path: str) -> int | None:
+    """Read the flat action width declared by a waypoint checkpoint."""
+
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    config = _read_json(model_dir / "config.json") or {}
+    output_features = config.get("output_features")
+    action = (
+        output_features.get("action")
+        if isinstance(output_features, dict)
+        else None
+    )
+    shape = action.get("shape") if isinstance(action, dict) else None
+    if (
+        not isinstance(shape, list | tuple)
+        or len(shape) != 1
+        or isinstance(shape[0], bool)
+        or not isinstance(shape[0], int)
+        or shape[0] <= 0
+    ):
+        return None
+    return int(shape[0])
+
+
+def checkpoint_action_names(
+    checkpoint_path: str, storage_root: Path | None = None
+) -> list[str] | None:
+    """Recover ordered action-axis names from a checkpoint's training dataset.
+
+    Ordinary LeRobot waypoint configs retain the action width but not the scalar
+    axis names. The training dataset remains the authoritative source for where
+    each arm's pose, twist, and optional wrench live in that flat vector.
+    """
+
+    for candidate in _checkpoint_dataset_candidates(checkpoint_path, storage_root):
+        info_path = candidate / "meta" / "info.json"
+        if not info_path.is_file():
+            continue
+        info = _read_json(info_path) or {}
+        features = info.get("features")
+        action = features.get("action") if isinstance(features, dict) else None
+        if action is None:
+            continue
+        names = action.get("names") if isinstance(action, dict) else None
+        if not isinstance(names, list) or not names or not all(
+            isinstance(name, str) and name for name in names
+        ):
+            raise ValueError(
+                f"Training dataset action feature has no valid named axes: {info_path}"
+            )
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"Training dataset action axes are not unique: {info_path}"
+            )
+        shape = action.get("shape")
+        if (
+            not isinstance(shape, list | tuple)
+            or len(shape) != 1
+            or shape[0] != len(names)
+        ):
+            raise ValueError(
+                "Training dataset action shape does not match its named axes: "
+                f"{info_path}"
+            )
+        return list(names)
+    return None
+
+
 def _checkpoint_target_hz(checkpoint_path: str) -> float | None:
     """Read of the dataset FPS baked into a LeRobot checkpoint."""
     model_dir = _checkpoint_model_dir(checkpoint_path)

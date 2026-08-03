@@ -24,40 +24,117 @@ from flexivtrainer.observability import describe_exception, warn
 _POSE_DIM = 7
 _TWIST_DIM = 6
 _WRENCH_DIM = 6
+_POSE_AXES = ("x", "y", "z", "q_w", "q_x", "q_y", "q_z")
+_TWIST_AXES = ("vx", "vy", "vz", "wx", "wy", "wz")
+_WRENCH_AXES = ("fx", "fy", "fz", "mx", "my", "mz")
 
 
-def _find_run(names: list[str], prefix: str) -> int | None:
-    for index, name in enumerate(names):
-        if name.startswith(prefix):
-            return index
-    return None
+def _group_slice(
+    names: list[str], prefix: str, axes: tuple[str, ...], *, required: bool
+) -> slice | None:
+    indices = [index for index, name in enumerate(names) if name.startswith(prefix)]
+    if not indices:
+        if required:
+            raise ValueError(f"Action schema is missing required group '{prefix}*'")
+        return None
+    start = indices[0]
+    expected = [f"{prefix}{axis}" for axis in axes]
+    actual = [names[index] for index in indices]
+    if (
+        len(indices) != len(axes)
+        or indices != list(range(start, start + len(axes)))
+        or actual != expected
+    ):
+        raise ValueError(
+            f"Action group '{prefix}*' must contain {len(axes)} contiguous "
+            "axes in canonical order"
+        )
+    return slice(start, start + len(axes))
+
+
+def canonical_action_names(action_dim: int, sides: list[str]) -> list[str]:
+    """Infer only the recorder's unambiguous legacy waypoint layouts."""
+
+    if not sides:
+        raise ValueError("At least one active arm side is required")
+    if action_dim == len(sides) * (_POSE_DIM + _TWIST_DIM + _WRENCH_DIM):
+        groups = (
+            ("tcp_pose", _POSE_AXES),
+            ("tcp_twist", _TWIST_AXES),
+            ("tcp_wrench", _WRENCH_AXES),
+        )
+    elif action_dim == len(sides) * (_POSE_DIM + _TWIST_DIM):
+        groups = (("tcp_pose", _POSE_AXES), ("tcp_twist", _TWIST_AXES))
+    else:
+        supported = sorted(
+            {
+                len(sides) * (_POSE_DIM + _TWIST_DIM),
+                len(sides) * (_POSE_DIM + _TWIST_DIM + _WRENCH_DIM),
+            }
+        )
+        raise ValueError(
+            "Cannot infer waypoint action layout from "
+            f"width {action_dim}; canonical widths for {len(sides)} arm(s) "
+            f"are {supported}"
+        )
+    return [
+        f"{side}.{group}.{axis}"
+        for side in sides
+        for group, axes in groups
+        for axis in axes
+    ]
 
 
 def build_action_layout(
-    action_names: list[str], sides: list[str]
+    action_names: list[str], sides: list[str], action_dim: int | None = None
 ) -> list[dict[str, Any]]:
+    if not action_names:
+        raise ValueError("Waypoint action feature names are required")
+    if len(set(action_names)) != len(action_names):
+        raise ValueError("Waypoint action feature names must be unique")
+    expected_dim = len(action_names) if action_dim is None else action_dim
+    if len(action_names) != expected_dim:
+        raise ValueError(
+            "Checkpoint action width does not match its named schema: "
+            f"output={expected_dim} names={len(action_names)}"
+        )
+
+    pose_sides: list[str] = []
+    marker = ".tcp_pose."
+    for name in action_names:
+        if marker not in name:
+            continue
+        side = name.split(marker, 1)[0]
+        if side not in pose_sides:
+            pose_sides.append(side)
+    if pose_sides != sides:
+        raise ValueError(
+            "Checkpoint arm layout does not match active sides: "
+            f"checkpoint={pose_sides} active={sides}"
+        )
+
     layout: list[dict[str, Any]] = []
     for side in sides:
-        pose_start = _find_run(action_names, f"{side}.tcp_pose.")
-        twist_start = _find_run(action_names, f"{side}.tcp_twist.")
-        wrench_start = _find_run(action_names, f"{side}.tcp_wrench.")
         layout.append(
             {
                 "side": side,
-                "pose": (
-                    None
-                    if pose_start is None
-                    else slice(pose_start, pose_start + _POSE_DIM)
+                "pose": _group_slice(
+                    action_names,
+                    f"{side}.tcp_pose.",
+                    _POSE_AXES,
+                    required=True,
                 ),
-                "twist": (
-                    None
-                    if twist_start is None
-                    else slice(twist_start, twist_start + _TWIST_DIM)
+                "twist": _group_slice(
+                    action_names,
+                    f"{side}.tcp_twist.",
+                    _TWIST_AXES,
+                    required=False,
                 ),
-                "wrench": (
-                    None
-                    if wrench_start is None
-                    else slice(wrench_start, wrench_start + _WRENCH_DIM)
+                "wrench": _group_slice(
+                    action_names,
+                    f"{side}.tcp_wrench.",
+                    _WRENCH_AXES,
+                    required=False,
                 ),
             }
         )
@@ -97,11 +174,28 @@ class WaypointExecutor:
         layout: list[dict[str, Any]],
         stop_event: threading.Event,
         motion_limits: tuple[float, float, float, float],
+        *,
+        action_dim: int | None = None,
     ) -> None:
         self._robots = robots
         self._layout = layout
         self._stop_event = stop_event
         self._motion_limits = motion_limits
+        required_dim = max(
+            (
+                section.stop
+                for arm in layout
+                for section in (arm.get("pose"), arm.get("twist"), arm.get("wrench"))
+                if isinstance(section, slice) and section.stop is not None
+            ),
+            default=0,
+        )
+        self._action_dim = required_dim if action_dim is None else action_dim
+        if self._action_dim < required_dim:
+            raise ValueError(
+                "Waypoint action layout exceeds checkpoint output width: "
+                f"layout={required_dim} output={self._action_dim}"
+            )
         self._condition = threading.Condition()
         self._waypoints: list[_TimedWaypoint] = []
         self._error: str | None = None
@@ -115,6 +209,13 @@ class WaypointExecutor:
         target_times: list[float],
         now: float,
     ) -> None:
+        self.validate_actions(actions)
+        if len(actions) != len(target_times):
+            raise ValueError(
+                "Waypoint action and target-time counts must match: "
+                f"actions={len(actions)} target_times={len(target_times)}"
+            )
+
         waypoints: list[_TimedWaypoint] = []
         for action, target_time in zip(actions, target_times):
             if target_time <= now:
@@ -160,6 +261,18 @@ class WaypointExecutor:
             self._waypoints = waypoints
             self._scheduled_count = len(waypoints)
             self._condition.notify()
+
+    def validate_actions(self, actions: list[list[float]]) -> None:
+        """Reject malformed chunks before constructing any per-arm commands."""
+
+        if not actions:
+            raise ValueError("Waypoint policy returned an empty action chunk")
+        for index, action in enumerate(actions):
+            if len(action) != self._action_dim:
+                raise ValueError(
+                    f"Waypoint action {index} has width {len(action)}, "
+                    f"expected {self._action_dim}"
+                )
 
     def _send_waypoint(self, waypoint: _TimedWaypoint) -> None:
         max_lin_vel, max_ang_vel, max_lin_acc, max_ang_acc = self._motion_limits
