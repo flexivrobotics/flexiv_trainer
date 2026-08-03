@@ -19,6 +19,7 @@ import pytest
 from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     build_action_layout,
+    canonical_action_names,
 )
 
 
@@ -55,11 +56,7 @@ def _executor(stop_event: threading.Event | None = None) -> WaypointExecutor:
 
 
 def test_build_action_layout_locates_command_runs() -> None:
-    names = (
-        [f"single_arm.tcp_pose.{index}" for index in range(7)]
-        + [f"single_arm.tcp_twist.{index}" for index in range(6)]
-        + [f"single_arm.tcp_wrench.{index}" for index in range(6)]
-    )
+    names = canonical_action_names(19, ["single_arm"])
 
     layout = build_action_layout(names, ["single_arm"])
 
@@ -67,6 +64,100 @@ def test_build_action_layout_locates_command_runs() -> None:
     assert layout[0]["pose"] == slice(0, 7)
     assert layout[0]["twist"] == slice(7, 13)
     assert layout[0]["wrench"] == slice(13, 19)
+
+
+@pytest.mark.parametrize(
+    ("sides", "action_dim", "expected_twist", "expected_wrench"),
+    [
+        (["single_arm"], 13, slice(7, 13), None),
+        (["single_arm"], 19, slice(7, 13), slice(13, 19)),
+        (["left_arm", "right_arm"], 26, slice(20, 26), None),
+        (["left_arm", "right_arm"], 38, slice(26, 32), slice(32, 38)),
+    ],
+)
+def test_canonical_layouts_cover_full_and_no_wrench_actions(
+    sides, action_dim, expected_twist, expected_wrench
+) -> None:
+    names = canonical_action_names(action_dim, sides)
+    layout = build_action_layout(names, sides, action_dim)
+
+    assert len(names) == action_dim
+    assert layout[-1]["twist"] == expected_twist
+    assert layout[-1]["wrench"] == expected_wrench
+
+
+@pytest.mark.parametrize("include_wrench", [False, True])
+def test_dual_arm_dispatch_maps_each_arm_and_zero_fills_missing_wrench(
+    include_wrench,
+) -> None:
+    sides = ["left_arm", "right_arm"]
+    action_dim = 38 if include_wrench else 26
+    layout = build_action_layout(
+        canonical_action_names(action_dim, sides), sides, action_dim
+    )
+    robots = [_FakeRobot(), _FakeRobot()]
+    executor = WaypointExecutor(
+        robots,
+        layout,
+        threading.Event(),
+        (0.25, 0.6, 1.0, 2.5),
+        action_dim=action_dim,
+    )
+    left_pose = [0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0]
+    right_pose = [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]
+    left_twist = [1.0] * 6
+    right_twist = [2.0] * 6
+    left_wrench = [3.0] * 6
+    right_wrench = [4.0] * 6
+    action = [*left_pose, *left_twist]
+    if include_wrench:
+        action.extend(left_wrench)
+    action.extend([*right_pose, *right_twist])
+    if include_wrench:
+        action.extend(right_wrench)
+
+    executor.replace_waypoints([action], [101.0], now=100.0)
+    executor._send_waypoint(executor._waypoints[0])
+
+    assert robots[0].commands[0][0] == left_pose
+    assert robots[0].commands[0][1] == (
+        left_wrench if include_wrench else [0.0] * 6
+    )
+    assert robots[0].commands[0][2] == left_twist
+    assert robots[1].commands[0][0] == right_pose
+    assert robots[1].commands[0][1] == (
+        right_wrench if include_wrench else [0.0] * 6
+    )
+    assert robots[1].commands[0][2] == right_twist
+
+
+def test_malformed_action_width_is_rejected_before_dispatch() -> None:
+    sides = ["left_arm", "right_arm"]
+    layout = build_action_layout(canonical_action_names(26, sides), sides, 26)
+    robots = [_FakeRobot(), _FakeRobot()]
+    executor = WaypointExecutor(
+        robots,
+        layout,
+        threading.Event(),
+        (0.25, 0.6, 1.0, 2.5),
+        action_dim=26,
+    )
+
+    with pytest.raises(ValueError, match="width 25, expected 26"):
+        executor.replace_waypoints([[0.0] * 25], [101.0], now=100.0)
+
+    assert executor._waypoints == []
+    assert all(not robot.commands for robot in robots)
+
+
+def test_layout_rejects_unknown_width_and_partial_named_group() -> None:
+    with pytest.raises(ValueError, match="Cannot infer"):
+        canonical_action_names(27, ["left_arm", "right_arm"])
+
+    names = canonical_action_names(13, ["single_arm"])
+    names.pop()
+    with pytest.raises(ValueError, match="must contain 6 contiguous axes"):
+        build_action_layout(names, ["single_arm"])
 
 
 def test_replace_waypoints_replaces_pending_waypoints() -> None:

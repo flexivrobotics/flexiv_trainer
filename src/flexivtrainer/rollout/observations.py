@@ -25,10 +25,11 @@ from flexivtrainer.data.lerobot_io import (
     extract_recording_frame_values,
     extract_recording_images,
 )
-from flexivtrainer.observability import info, warn
+from flexivtrainer.observability import describe_exception, info, warn
 
 _FORCE_REFRESH_WARNED = False
 _RESOLUTION_UNKNOWN_WARNED = False
+_CUDA_SYNC_WARNED = False
 _RESIZE_LOGGED: set[str] = set()
 # Aspect ratios closer than this are treated as the same framing.
 _ASPECT_TOLERANCE = 0.02
@@ -133,8 +134,12 @@ def _cuda_sync(device: str) -> None:
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-    except Exception:  # pragma: no cover - torch optional
-        pass
+    except Exception as exc:  # pragma: no cover - torch optional
+        # Async kernel faults surface at the next sync, so never discard this.
+        global _CUDA_SYNC_WARNED
+        if not _CUDA_SYNC_WARNED:
+            _CUDA_SYNC_WARNED = True
+            warn("CUDA synchronize failed during rollout", describe_exception(exc))
 
 
 # Matches the teleop telemetry rate; the planner ticks ~3x faster than this.

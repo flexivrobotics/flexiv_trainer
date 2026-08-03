@@ -24,11 +24,16 @@ be turned off without retraining.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
-from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.observability import (
+    describe_exception,
+    describe_traceback,
+    error,
+    warn,
+)
 from flexivtrainer.policies._shared import SharedRolloutConfig, SharedTrainingConfig
 
 
@@ -65,6 +70,9 @@ class RolloutConfig(SharedRolloutConfig):
     # ACT's forward is kernel-launch-bound (~1700 dispatches), so CUDA-graph
     # replay roughly halves it. Measured 7.99ms -> 4.00ms on an RTX 5090.
     compile_model: bool = True
+    # "default" keeps Inductor but drops CUDA graphs, trading that speedup for
+    # a rollout that never touches cudagraph-tree state.
+    compile_mode: Literal["reduce-overhead", "default"] = "reduce-overhead"
 
 
 def _disable_temporal_ensemble(policy: Any) -> bool:
@@ -82,19 +90,33 @@ def _disable_temporal_ensemble(policy: Any) -> bool:
     return True
 
 
-def _compile_model(policy: Any) -> bool:
+def compile_model(policy: Any, mode: str = "reduce-overhead") -> None:
     """Compile the tensor core only; select_action mutates a Python deque."""
     import torch  # noqa: PLC0415
 
     model = getattr(policy, "model", None)
     if model is None:
-        return False
+        raise RuntimeError("ACT policy has no model to compile")
+    # Kept separate so a failure names the call that raised: reset walks torch's
+    # process-global backend registry and can fail independently of compilation.
     try:
-        policy.model = torch.compile(model, mode="reduce-overhead")
+        torch.compiler.reset()
     except Exception as exc:
-        warn("Failed to compile ACT model; using eager", describe_exception(exc))
-        return False
-    return True
+        error(
+            "torch.compiler.reset() failed before ACT compile",
+            describe_traceback(exc),
+        )
+        raise RuntimeError(
+            f"Failed to reset compiler state before compiling ACT model: "
+            f"{describe_exception(exc)}"
+        ) from exc
+    try:
+        policy.model = torch.compile(model, mode=mode)
+    except Exception as exc:
+        error("torch.compile() failed for ACT", describe_traceback(exc))
+        raise RuntimeError(
+            f"Failed to compile ACT model: {describe_exception(exc)}"
+        ) from exc
 
 
 def apply_rollout_overrides(policy: Any, rollout_cfg: RolloutConfig) -> bool:
@@ -102,6 +124,4 @@ def apply_rollout_overrides(policy: Any, rollout_cfg: RolloutConfig) -> bool:
     applied = False
     if getattr(rollout_cfg, "disable_temporal_ensemble", False):
         applied |= _disable_temporal_ensemble(policy)
-    if getattr(rollout_cfg, "compile_model", False):
-        applied |= _compile_model(policy)
     return applied
