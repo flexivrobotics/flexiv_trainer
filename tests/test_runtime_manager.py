@@ -335,3 +335,52 @@ def test_preview_dataset_lists_depth_separately(tmp_path, monkeypatch) -> None:
 
     assert preview["camera_keys"] == ["observation.images.ego"]
     assert preview["resolution"] == [2, 3]  # [height, width] from camera shape
+
+
+def _config_manager(tmp_path) -> RuntimeManager:
+    manager = _bare_manager(tmp_path)
+    manager._robot_config = RobotSerialConfig().normalized()
+    manager.shutdowns = []
+    manager.cameras = SimpleNamespace(set_active_locations=lambda names: None)
+    manager.recording = SimpleNamespace(
+        shutdown=lambda: manager.shutdowns.append("recording")
+    )
+    manager.teleop = SimpleNamespace(
+        shutdown=lambda: manager.shutdowns.append("teleop"),
+        snapshot=lambda: SimpleNamespace(
+            available=True, initialized=False, started=False, error=None, fault=None
+        ),
+    )
+    manager.service_summary = lambda: {}
+    return manager
+
+
+def test_recording_preferences_persist_across_reload(tmp_path) -> None:
+    manager = _config_manager(tmp_path)
+    entries = ["observation.images.ego", "observation.state.left_arm.tcp_pose"]
+
+    manager.update_robot_config(
+        RobotSerialConfig(recording_entries=entries, record_resolution="240p")
+    )
+
+    # A fresh manager reads them back off disk, like a browser reload.
+    reloaded = _bare_manager(tmp_path)
+    reloaded._robot_config = reloaded._load_robot_config()
+    snapshot = reloaded.robot_config_snapshot()
+    assert snapshot["recording_entries"] == entries
+    assert snapshot["record_resolution"] == "240p"
+
+
+def test_saving_recording_preferences_does_not_bounce_services(tmp_path) -> None:
+    manager = _config_manager(tmp_path)
+
+    manager.update_robot_config(
+        RobotSerialConfig(
+            recording_entries=["observation.images.ego"], record_resolution="360p"
+        )
+    )
+    assert manager.shutdowns == []
+
+    # A real hardware change still does restart them.
+    manager.update_robot_config(RobotSerialConfig(arm_mode="single"))
+    assert manager.shutdowns == ["recording", "teleop"]
