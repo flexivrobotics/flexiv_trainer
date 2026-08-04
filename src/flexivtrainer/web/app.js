@@ -332,6 +332,59 @@ function recordingEntryOptions() {
 function defaultRecordingEntryIds() {
     return recordingEntryOptions().map((option) => option.id);
 }
+
+// Cached in the persisted robot config, alongside the serials and home posture.
+function persistedRecordingEntryIds() {
+    const saved = state.summary?.robot_config?.recording_entries;
+    return Array.isArray(saved) ? saved.filter((entry) => typeof entry === "string") : [];
+}
+
+// Seeding `recordingOfferedEntries` is what stops reconcile from re-selecting
+// entries this checklist deliberately left off.
+function restoreRecordingEntries() {
+    const saved = persistedRecordingEntryIds();
+    if (!saved.length) {
+        return;
+    }
+    const order = defaultRecordingEntryIds();
+    const valid = new Set(order);
+    const selected = new Set(saved.filter((entry) => valid.has(entry)));
+    // Saved under a different arm mode: not a deselection, so keep the defaults.
+    if (!selected.size) {
+        return;
+    }
+    state.recordingOfferedEntries = valid;
+    state.recordingEntries = order.filter((entry) => selected.has(entry));
+}
+
+function restoreRecordResolution() {
+    const saved = state.summary?.robot_config?.record_resolution;
+    if (RESOLUTION_PRESETS.some((preset) => preset.id === saved)) {
+        state.recordResolution = saved;
+    }
+}
+
+function saveRecordResolution() {
+    if (!state.summary?.robot_config) {
+        return;
+    }
+    state.summary.robot_config.record_resolution = state.recordResolution;
+    queueRobotConfigSave();
+}
+
+// Carries entries for inactive sides so an arm-mode round trip keeps both arms'.
+function saveRecordingEntries() {
+    if (!state.summary?.robot_config) {
+        return;
+    }
+    const offered = new Set(defaultRecordingEntryIds());
+    const carried = persistedRecordingEntryIds().filter((entry) => !offered.has(entry));
+    state.summary.robot_config.recording_entries = [
+        ...carried,
+        ...state.recordingEntries,
+    ];
+    queueRobotConfigSave();
+}
 const SERVICE_RESET_TARGETS = {
     teleop_service: "teleop",
     cameras: "cameras",
@@ -2259,7 +2312,7 @@ function onArmConfigChanged() {
     renderHomeRobotConfigInputs();
     renderHomeStatus();
     renderHomeEndEffectors();
-    queueRobotConfigSave();
+    saveRecordingEntries();
 }
 
 function renderHomeRobotConfigInputs() {
@@ -3234,6 +3287,7 @@ function renderRecordingOptions(recording = {}) {
     setToggleAllButton(selectAllButton, allSelected);
     selectAllButton.onclick = () => {
         state.recordingEntries = allSelected ? [] : [...defaultIds];
+        saveRecordingEntries();
         renderRecordingOptions(recording);
         renderRecordingStatusPanel(state.teleopStatus);
     };
@@ -3268,6 +3322,7 @@ function renderRecordingOptions(recording = {}) {
                 nextSelected.delete(option.id);
             }
             state.recordingEntries = defaultIds.filter((entryId) => nextSelected.has(entryId));
+            saveRecordingEntries();
             renderRecordingOptions(recording);
             renderRecordingStatusPanel(state.teleopStatus);
         };
@@ -3303,6 +3358,7 @@ function renderRecordResolutionOptions(recording = {}) {
         `;
         label.querySelector("input").onchange = () => {
             state.recordResolution = preset.id;
+            saveRecordResolution();
             renderRecordResolutionOptions(recording);
         };
         container.appendChild(label);
@@ -7483,6 +7539,8 @@ async function init() {
     bindGlobalEvents();
     renderNotificationCenter();
     await refreshSummary();
+    restoreRecordingEntries();
+    restoreRecordResolution();
     renderTeleop();
     renderTraining();
     setActiveView("home");
