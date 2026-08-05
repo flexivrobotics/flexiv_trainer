@@ -19,7 +19,8 @@ The steps to set up and use this software can be summarized as:
 
 ## Software Requirements
 
-1. Python 3.12 or newer (use 3.12 or 3.13 for Orbbec camera support).
+1. Python 3.12 or 3.14. Orbbec cameras require 3.12; on 3.14 only RealSense
+   cameras are supported.
 2. GPU acceleration (optional but recommended).
 3. System config for realtime scheduling (see below).
 
@@ -69,9 +70,9 @@ binding itself does not import those packages and works against LeRobot's own
 
 The wheel is published for CPython 3.8–3.13 on Linux (x64/ARM64), Windows x64
 and Apple Silicon — there is no 3.14 wheel and no source distribution, so
-**Orbbec cameras need a Python 3.12 or 3.13 environment**. When the SDK is
-absent the app still runs, reporting Orbbec as unavailable while RealSense
-cameras keep working.
+**Orbbec cameras need a Python 3.12 environment**. When the SDK is absent the
+app still runs, reporting Orbbec as unavailable while RealSense cameras keep
+working.
 
 On Linux, install the Orbbec udev rules once so cameras are reachable without
 root. Skipping this is the usual cause of a camera that appears in `lsusb` but
