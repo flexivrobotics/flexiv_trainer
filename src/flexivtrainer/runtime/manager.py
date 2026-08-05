@@ -272,7 +272,11 @@ class RuntimeManager:
 
     def update_robot_config(self, payload: RobotSerialConfig) -> dict[str, Any]:
         normalized = payload.normalized()
-        changed = normalized != self._robot_config
+        # These save on every toggle; they must not bounce the services.
+        ignored = {"recording_entries": [], "record_resolution": ""}
+        changed = normalized.model_copy(update=ignored) != (
+            self._robot_config.model_copy(update=ignored)
+        )
         self._robot_config = normalized
         self._save_robot_config()
         self.cameras.set_active_locations(

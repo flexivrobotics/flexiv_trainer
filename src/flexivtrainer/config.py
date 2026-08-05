@@ -161,6 +161,10 @@ class RobotSerialConfig(BaseModel):
     home_posture_deg: list[float] = Field(
         default_factory=lambda: list(DEFAULT_HOME_POSTURE_DEG)
     )
+    # Cached recording checklist; empty means never saved, so defaults apply.
+    recording_entries: list[str] = Field(default_factory=list)
+    # Cached capture-resolution preset id; empty means never saved.
+    record_resolution: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -214,6 +218,11 @@ class RobotSerialConfig(BaseModel):
             # so toggling between single/dual keeps cached choices.
             end_effector_config=dict(self.end_effector_config),
             home_posture_deg=self._normalize_home_posture(),
+            # Entries for inactive sides are kept, as with the serials above.
+            recording_entries=[
+                str(entry) for entry in self.recording_entries if str(entry).strip()
+            ],
+            record_resolution=str(self.record_resolution).strip(),
         )
 
     @classmethod
