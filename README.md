@@ -19,7 +19,7 @@ The steps to set up and use this software can be summarized as:
 
 ## Software Requirements
 
-1. Python 3.12 or newer.
+1. Python 3.12 or newer (use 3.12 or 3.13 for Orbbec camera support).
 2. GPU acceleration (optional but recommended).
 3. System config for realtime scheduling (see below).
 
@@ -48,7 +48,47 @@ echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
 
 ### Supported cameras
 
-- RealSense cameras
+- Intel RealSense cameras
+- Orbbec cameras (Gemini 305/330 series and other OrbbecSDK v2 devices)
+
+Both vendors can be used at the same time; each camera location is assigned a
+device serial independently, so a setup may mix RealSense and Orbbec cameras.
+
+Orbbec support needs the `pyorbbecsdk2` SDK, installed separately with
+`--no-deps`:
+
+```bash
+pip install --no-deps 'pyorbbecsdk2>=2.1'
+```
+
+The `--no-deps` is required, not optional. `pyorbbecsdk2` declares hard pins for
+its bundled *example* scripts (`av==12.3.0`, `open3d`, `pygame`, …) that
+conflict with LeRobot's `av>=15,<16`; a plain install fails to resolve. The
+binding itself does not import those packages and works against LeRobot's own
+`av`.
+
+The wheel is published for CPython 3.8–3.13 on Linux (x64/ARM64), Windows x64
+and Apple Silicon — there is no 3.14 wheel and no source distribution, so
+**Orbbec cameras need a Python 3.12 or 3.13 environment**. When the SDK is
+absent the app still runs, reporting Orbbec as unavailable while RealSense
+cameras keep working.
+
+On Linux, install the Orbbec udev rules once so cameras are reachable without
+root. Skipping this is the usual cause of a camera that appears in `lsusb` but
+never connects in the app:
+
+```bash
+sudo ./scripts/install-orbbec-udev-rules.sh
+```
+
+Replug the camera afterwards so the new permissions apply.
+
+The rules cover both the raw USB node and the V4L2 `/dev/videoN` nodes. Without
+the V4L2 rule the camera is still *discovered* but fails to open with
+`uvc_open failed ... Return Code: -6`, because those nodes default to
+`root:video` and most accounts are not in the `video` group.
+
+Use a USB 3.0 port; the Gemini 305 falls back to reduced frame rates on USB 2.0.
 
 ## Install
 

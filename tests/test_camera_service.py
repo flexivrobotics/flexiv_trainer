@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from flexivtrainer.cameras import realsense as realsense_module
-from flexivtrainer.cameras.realsense import RealSenseService
+from flexivtrainer.cameras import service as camera_module
+from flexivtrainer.cameras.service import CameraService
 from flexivtrainer.config import AppSettings, CameraConfig, StorageConfig
 
 
@@ -66,16 +66,19 @@ def test_start_streams_fast_fails_when_no_cameras_are_detected(
 ) -> None:
     start_calls: list[str | None] = []
     fake_rs = make_fake_rs([], start_calls)
-    monkeypatch.setattr(realsense_module, "rs", fake_rs)
+    monkeypatch.setattr(camera_module, "rs", fake_rs)
 
-    service = RealSenseService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    service = CameraService(AppSettings(storage=StorageConfig(root=tmp_path)))
 
     status = service.start_streams()
 
     assert start_calls == []
     assert set(status["errors"]) == {"ego", "left_wrist", "right_wrist", "wrist"}
+    # The message names whichever vendors were actually searched, so it depends
+    # on which SDKs are installed in this environment ("No RealSense camera is
+    # available" vs "No RealSense or Orbbec camera is available").
     assert all(
-        "No RealSense camera is available" in message
+        message.startswith("No ") and message.endswith("camera is available")
         for message in status["errors"].values()
     )
     assert all(not camera["started"] for camera in status["cameras"].values())
@@ -86,9 +89,9 @@ def test_start_streams_fast_fails_when_configured_serial_is_missing(
 ) -> None:
     start_calls: list[str | None] = []
     fake_rs = make_fake_rs([FakeDevice("D435", "AVAILABLE")], start_calls)
-    monkeypatch.setattr(realsense_module, "rs", fake_rs)
+    monkeypatch.setattr(camera_module, "rs", fake_rs)
 
-    service = RealSenseService(
+    service = CameraService(
         AppSettings(
             storage=StorageConfig(root=tmp_path),
             cameras=[CameraConfig(name="ego", device_serial="MISSING")],
@@ -114,9 +117,9 @@ def test_ensure_default_assignment_fills_unassigned_slots(
         ],
         start_calls,
     )
-    monkeypatch.setattr(realsense_module, "rs", fake_rs)
+    monkeypatch.setattr(camera_module, "rs", fake_rs)
 
-    service = RealSenseService(
+    service = CameraService(
         AppSettings(
             storage=StorageConfig(root=tmp_path),
             cameras=[
@@ -148,9 +151,9 @@ def test_ensure_default_assignment_replaces_stale_serials(
         ],
         start_calls,
     )
-    monkeypatch.setattr(realsense_module, "rs", fake_rs)
+    monkeypatch.setattr(camera_module, "rs", fake_rs)
 
-    service = RealSenseService(
+    service = CameraService(
         AppSettings(
             storage=StorageConfig(root=tmp_path),
             cameras=[
@@ -173,7 +176,7 @@ def test_ensure_default_assignment_replaces_stale_serials(
 
 
 def test_capture_frame_reads_only_requested_camera(tmp_path) -> None:
-    service = RealSenseService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    service = CameraService(AppSettings(storage=StorageConfig(root=tmp_path)))
     payload = {
         "image": np.zeros((2, 3, 3), dtype=np.uint8),
         "timestamp_ms": 12.3,
@@ -182,7 +185,7 @@ def test_capture_frame_reads_only_requested_camera(tmp_path) -> None:
         "height": 2,
     }
     service._runtimes["ego"].started = True
-    service._runtimes["ego"].pipeline = object()
+    service._runtimes["ego"].stream = object()
 
     def fake_read_frames(*, block, timeout_ms, camera_names):
         assert block is True
@@ -198,7 +201,7 @@ def test_capture_frame_reads_only_requested_camera(tmp_path) -> None:
 
 
 def test_capture_frame_falls_back_to_cached_frame(tmp_path) -> None:
-    service = RealSenseService(AppSettings(storage=StorageConfig(root=tmp_path)))
+    service = CameraService(AppSettings(storage=StorageConfig(root=tmp_path)))
     cached_payload = {
         "image": np.zeros((2, 2, 3), dtype=np.uint8),
         "timestamp_ms": 1.0,
@@ -207,7 +210,7 @@ def test_capture_frame_falls_back_to_cached_frame(tmp_path) -> None:
         "height": 2,
     }
     service._runtimes["ego"].started = True
-    service._runtimes["ego"].pipeline = object()
+    service._runtimes["ego"].stream = object()
     service._last_frames["ego"] = cached_payload
     service.read_frames = lambda *, block, timeout_ms, camera_names: {}
 
@@ -220,7 +223,7 @@ def test_set_active_locations_releases_now_inactive_cameras(tmp_path) -> None:
     # A camera started for a slot that is no longer active (e.g. the single-arm
     # "wrist" slot after switching to dual) must be released so its device
     # returns to the pool for the new mode's active slots.
-    service = RealSenseService(
+    service = CameraService(
         AppSettings(
             storage=StorageConfig(root=tmp_path),
             cameras=[
@@ -231,16 +234,16 @@ def test_set_active_locations_releases_now_inactive_cameras(tmp_path) -> None:
         )
     )
     service._runtimes["wrist"].started = True
-    service._runtimes["wrist"].pipeline = SimpleNamespace(stop=lambda: None)
+    service._runtimes["wrist"].stream = SimpleNamespace(stop=lambda: None)
 
     service.set_active_locations(["ego", "left_wrist"])
 
     assert service._runtimes["wrist"].started is False
-    assert service._runtimes["wrist"].pipeline is None
+    assert service._runtimes["wrist"].stream is None
 
 
-def _alignment_service(tmp_path) -> RealSenseService:
-    return RealSenseService(
+def _alignment_service(tmp_path) -> CameraService:
+    return CameraService(
         AppSettings(
             storage=StorageConfig(root=tmp_path),
             cameras=[CameraConfig(name="ego"), CameraConfig(name="left_wrist")],
@@ -285,7 +288,7 @@ def test_depth_alignment_survives_a_camera_restart(tmp_path) -> None:
     service.acquire_depth_alignment(["ego"])
     runtime = service._runtimes["ego"]
     runtime.started = True
-    runtime.pipeline = SimpleNamespace(stop=lambda: None)
+    runtime.stream = SimpleNamespace(stop=lambda: None)
 
     with service._lock:
         service._stop_runtime(runtime)
@@ -300,12 +303,12 @@ def test_depth_alignment_lease_expires_with_no_further_calls(
     # The lease must lapse on evaluation, not on the next renew.
     service = _alignment_service(tmp_path)
     now = [1000.0]
-    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(camera_module.time, "monotonic", lambda: now[0])
 
     service.renew_depth_alignment_lease("ego")
     assert service.depth_alignment_active("ego") is True
 
-    now[0] += realsense_module._ALIGN_LEASE_S + 0.1
+    now[0] += camera_module._ALIGN_LEASE_S + 0.1
 
     assert service.depth_alignment_active("ego") is False
 
@@ -315,7 +318,7 @@ def test_depth_alignment_lease_does_not_consume_a_reference(
 ) -> None:
     service = _alignment_service(tmp_path)
     now = [1000.0]
-    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(camera_module.time, "monotonic", lambda: now[0])
 
     for _ in range(5):
         now[0] += 0.1
@@ -332,11 +335,11 @@ def test_expiring_lease_does_not_cancel_a_recording_hold(
 ) -> None:
     service = _alignment_service(tmp_path)
     now = [1000.0]
-    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(camera_module.time, "monotonic", lambda: now[0])
 
     service.renew_depth_alignment_lease("ego")
     service.acquire_depth_alignment(["ego"])
-    now[0] += realsense_module._ALIGN_LEASE_S + 1.0
+    now[0] += camera_module._ALIGN_LEASE_S + 1.0
 
     # A long recording gets no preview polls; its hold must outlive the lease.
     assert service.depth_alignment_active("ego") is True
@@ -348,7 +351,7 @@ def test_clear_depth_alignment_leases_drops_viewers_but_not_holders(
     tmp_path, monkeypatch
 ) -> None:
     service = _alignment_service(tmp_path)
-    monkeypatch.setattr(realsense_module.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(camera_module.time, "monotonic", lambda: 1000.0)
 
     service.renew_depth_alignment_lease("ego")
     service.renew_depth_alignment_lease("left_wrist")

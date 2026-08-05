@@ -22,6 +22,12 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.cameras.backends import (
+    CameraBackend,
+    CameraStream,
+    OrbbecBackend,
+    RealSenseBackend,
+)
 from flexivtrainer.config import AppSettings, CameraConfig
 from flexivtrainer.observability import describe_exception
 
@@ -32,16 +38,40 @@ except (
 ):  # pragma: no cover - dependency availability is environment-specific
     rs = None
 
+# OrbbecSDK v2 (Gemini 305/330 series); `pyorbbecsdk` is the v1 package kept for
+# older devices. Bound at module level to mirror `rs`, so tests can swap it.
+try:  # pragma: no cover - dependency availability is environment-specific
+    import pyorbbecsdk2 as ob
+except ImportError:  # pragma: no cover
+    try:
+        import pyorbbecsdk as ob
+    except ImportError:  # pragma: no cover
+        ob = None
+
 # Restart a started-but-silent pipeline after this long without a frame.
 SILENT_RESTART_AFTER_S = 3.0
 # Drop a depth-preview alignment lease this long after its last frame request.
 _ALIGN_LEASE_S = 3.0
 
 
+def _default_backends() -> list[CameraBackend]:
+    """Backends in auto-assignment priority order.
+
+    Each resolves its SDK through a getter rather than a captured import, so a
+    test that swaps this module's ``rs`` attribute for a fake SDK still steers
+    the RealSense backend.
+    """
+    return [
+        RealSenseBackend(module_getter=lambda: rs),
+        OrbbecBackend(module_getter=lambda: ob),
+    ]
+
+
 @dataclass
 class CameraRuntime:
     config: CameraConfig
-    pipeline: Any | None = None
+    stream: CameraStream | None = None
+    backend: CameraBackend | None = None
     started: bool = False
     actual_serial: str | None = None
     manual_assignment: bool = False
@@ -53,7 +83,6 @@ class CameraRuntime:
     # Depth is requested per config.use_depth; depth_started reflects whether the
     # pipeline actually came up with a depth stream (it can fall back to color).
     depth_started: bool = False
-    align: Any | None = None
     # Alignment costs a per-pixel remap every frame, so it only runs while
     # something wants aligned depth. Recording holds a balanced reference;
     # survives restarts so the silent-camera watchdog cannot unalign it
@@ -61,14 +90,26 @@ class CameraRuntime:
     # viewer has no close signal to release on.
     align_consumers: int = 0
     align_lease_until: float = 0.0
-    # RealSense Z16 values are device units. Recording stores uint16
-    # millimeters so LeRobot can infer and preserve the depth unit.
+    # Depth values are raw device units. Recording stores uint16 millimeters so
+    # LeRobot can infer and preserve the depth unit.
     depth_scale_m: float = 0.001
 
 
-class RealSenseService:
-    def __init__(self, settings: AppSettings) -> None:
+class CameraService:
+    """Manages every configured camera slot across all supported vendors."""
+
+    def __init__(
+        self, settings: AppSettings, backends: list[CameraBackend] | None = None
+    ) -> None:
         self._settings = settings
+        # Declaration order is the priority order used when auto-assigning a
+        # detected device to an empty slot.
+        self._backends: list[CameraBackend] = (
+            backends if backends is not None else _default_backends()
+        )
+        # Serial -> backend, refreshed on every discover() so a slot can be
+        # started with the SDK that actually owns its device.
+        self._serial_vendors: dict[str, str] = {}
         self._runtimes = {
             camera.name: CameraRuntime(
                 config=camera,
@@ -102,26 +143,56 @@ class RealSenseService:
                     runtime.actual_serial = None
 
     def available(self) -> bool:
-        return rs is not None
+        return any(backend.available() for backend in self._backends)
+
+    def _available_backends(self) -> list[CameraBackend]:
+        return [backend for backend in self._backends if backend.available()]
 
     def discover(self) -> dict[str, Any]:
-        if rs is None:
+        """Enumerate every camera visible to any installed vendor SDK."""
+        usable = self._available_backends()
+        if not usable:
             return {
                 "available": False,
                 "devices": [],
-                "errors": {"import": "pyrealsense2 is not importable"},
+                "errors": {
+                    backend.key: backend.unavailable_reason()
+                    for backend in self._backends
+                },
             }
 
-        context = rs.context()
-        devices = []
-        for device in context.devices:
-            devices.append(
-                {
-                    "name": device.get_info(rs.camera_info.name),
-                    "serial": device.get_info(rs.camera_info.serial_number),
-                }
-            )
-        return {"available": True, "devices": devices, "errors": dict(self._errors)}
+        devices: list[dict[str, Any]] = []
+        errors = dict(self._errors)
+        vendors: dict[str, str] = {}
+        for backend in usable:
+            try:
+                found = backend.discover()
+            except Exception as exc:  # pragma: no cover - hardware specific
+                # One vendor's SDK failing must not hide the other's cameras.
+                errors[backend.key] = describe_exception(exc)
+                continue
+            for device in found:
+                # A serial already claimed by an earlier backend wins; the same
+                # physical camera must never appear twice in the picker.
+                if device.serial in vendors:
+                    continue
+                vendors[device.serial] = device.vendor
+                devices.append(
+                    {
+                        "name": device.name,
+                        "serial": device.serial,
+                        "vendor": device.vendor,
+                    }
+                )
+        self._serial_vendors = vendors
+        return {"available": True, "devices": devices, "errors": errors}
+
+    def _backend_for_serial(self, serial: str) -> CameraBackend | None:
+        vendor = self._serial_vendors.get(serial)
+        for backend in self._backends:
+            if backend.key == vendor:
+                return backend
+        return None
 
     def configured_serials(self) -> dict[str, str | None]:
         return {
@@ -191,7 +262,7 @@ class RealSenseService:
             # Drop sticky auto-assignments so each slot is re-resolved freshly.
             runtime.actual_serial = None
 
-        if rs is None:
+        if not self.available():
             return
 
         available_serials = self._available_serials()
@@ -231,15 +302,14 @@ class RealSenseService:
                 thread.join(timeout=2.0)
             finally:
                 self._lock.acquire()
-        if runtime.pipeline is not None:
+        if runtime.stream is not None:
             try:
-                runtime.pipeline.stop()
+                runtime.stream.stop()
             except Exception as exc:  # pragma: no cover - hardware specific
                 self._errors[runtime.config.name] = describe_exception(exc)
-        runtime.pipeline = None
+        runtime.stream = None
         runtime.started = False
         runtime.depth_started = False
-        runtime.align = None
         runtime.depth_scale_m = 0.001
         runtime.last_frame_time = None
         runtime.fps = 0.0
@@ -269,94 +339,57 @@ class RealSenseService:
     ) -> None:
         serial = self._resolve_runtime_serial(runtime, available_serials)
         if serial is None:
-            runtime.pipeline = None
+            runtime.stream = None
             runtime.started = False
             return
 
-        def _build_config(with_depth: bool) -> Any:
-            config = rs.config()
-            if serial:
-                config.enable_device(serial)
-            config.enable_stream(
-                rs.stream.color,
-                runtime.config.width,
-                runtime.config.height,
-                rs.format.bgr8,
-                runtime.config.fps,
+        backend = self._backend_for_serial(serial)
+        if backend is None:
+            runtime.stream = None
+            runtime.started = False
+            self._errors[runtime.config.name] = (
+                f"Camera serial {serial} is not detected"
             )
-            if with_depth:
-                config.enable_stream(
-                    rs.stream.depth,
-                    runtime.config.width,
-                    runtime.config.height,
-                    rs.format.z16,
-                    runtime.config.fps,
-                )
-            return config
+            return
 
         want_depth = bool(runtime.config.use_depth)
-        pipeline = rs.pipeline()
         try:
-            depth_started = want_depth
-            if want_depth:
-                try:
-                    started_config = _build_config(True)
-                    profile = pipeline.start(started_config)
-                except Exception as exc:  # pragma: no cover - hardware specific
-                    # Depth may be unsupported on this device; retry color-only so
-                    # recording still comes up (surfaced via the status warning).
-                    self._errors[runtime.config.name] = (
-                        f"Depth stream unavailable, using color only: "
-                        f"{describe_exception(exc)}"
-                    )
-                    # A failed start can leave an SDK pipeline unusable; retry
-                    # with a fresh instance for the color-only fallback.
-                    pipeline = rs.pipeline()
-                    started_config = _build_config(False)
-                    profile = pipeline.start(started_config)
-                    depth_started = False
-            else:
-                started_config = _build_config(False)
-                profile = pipeline.start(started_config)
-            runtime.pipeline = pipeline
+            stream, warning = backend.open(
+                serial,
+                width=runtime.config.width,
+                height=runtime.config.height,
+                fps=runtime.config.fps,
+                want_depth=want_depth,
+            )
+            runtime.stream = stream
+            runtime.backend = backend
             runtime.started = True
-            runtime.depth_started = depth_started
-            runtime.align = rs.align(rs.stream.color) if depth_started else None
-            runtime.depth_scale_m = 0.001
-            if depth_started:
-                try:
-                    runtime.depth_scale_m = float(
-                        profile.get_device().first_depth_sensor().get_depth_scale()
-                    )
-                except Exception:  # pragma: no cover - device/API specific
-                    pass
+            runtime.depth_started = stream.depth_started
+            runtime.depth_scale_m = stream.depth_scale_m
             runtime.last_frame_time = None
             runtime.fps = 0.0
-            try:
-                runtime.actual_serial = profile.get_device().get_info(
-                    rs.camera_info.serial_number
-                )
-            except Exception:  # pragma: no cover - hardware specific
-                runtime.actual_serial = serial
-            # Keep the depth-fallback warning; clear only genuine prior errors.
-            if depth_started or not want_depth:
+            runtime.actual_serial = stream.actual_serial or serial
+            if warning:
+                # Surfaced as a status warning so recording still comes up.
+                self._errors[runtime.config.name] = warning
+            else:
                 self._errors.pop(runtime.config.name, None)
             # A single background thread owns the pipeline and continuously
             # pulls frames into the cache. Consumers (live preview + recording)
             # read the cached frame instead of polling the pipeline themselves,
             # which previously made two readers contend for frames and made the
             # measured FPS swing wildly whenever recording started.
-            # Pass stop_event/pipeline as args so a restart can't orphan this thread.
+            # Pass stop_event/stream as args so a restart can't orphan this thread.
             runtime.stop_event = threading.Event()
             runtime.capture_thread = threading.Thread(
                 target=self._acquire_loop,
-                args=(runtime, pipeline, runtime.stop_event, started_config),
+                args=(runtime, stream, runtime.stop_event, serial),
                 name=f"camera-acquire-{runtime.config.name}",
                 daemon=True,
             )
             runtime.capture_thread.start()
         except Exception as exc:  # pragma: no cover - hardware specific
-            runtime.pipeline = None
+            runtime.stream = None
             runtime.started = False
             self._errors[runtime.config.name] = describe_exception(exc)
 
@@ -370,7 +403,7 @@ class RealSenseService:
         assignments remain pinned even when temporarily unavailable.
         Returns True when the configuration changed so callers can persist it.
         """
-        if rs is None:
+        if not self.available():
             return False
 
         with self._lifecycle_lock, self._lock:
@@ -413,11 +446,14 @@ class RealSenseService:
             return changed
 
     def start_streams(self, camera_names: list[str] | None = None) -> dict[str, Any]:
-        if rs is None:
+        if not self.available():
             return {
                 "available": False,
                 "started": False,
-                "errors": {"import": "pyrealsense2 is not importable"},
+                "errors": {
+                    backend.key: backend.unavailable_reason()
+                    for backend in self._backends
+                },
             }
 
         with self._lifecycle_lock:
@@ -426,8 +462,14 @@ class RealSenseService:
                 detected_devices = self.discover()["devices"]
                 available_serials = self._available_serials()
                 if not detected_devices:
+                    # Name the vendors actually searched, so an operator can tell
+                    # "nothing plugged in" from "that vendor's SDK is missing".
+                    labels = " or ".join(
+                        backend.label for backend in self._available_backends()
+                    )
+                    message = f"No {labels} camera is available"
                     for name in self._resolve_camera_names(camera_names):
-                        self._errors[name] = "No RealSense camera is available"
+                        self._errors[name] = message
                     return self.status()
                 for name in self._resolve_camera_names(camera_names):
                     runtime = self._runtimes[name]
@@ -498,7 +540,7 @@ class RealSenseService:
 
     def status(self) -> dict[str, Any]:
         return {
-            "available": rs is not None,
+            "available": self.available(),
             "cameras": {
                 name: {
                     "configured_serial": self._runtimes[name].config.device_serial,
@@ -529,13 +571,13 @@ class RealSenseService:
     def _acquire_loop(
         self,
         runtime: CameraRuntime,
-        pipeline: Any,
+        stream: CameraStream,
         stop_event: threading.Event,
-        config: Any,
+        serial: str,
     ) -> None:
         """Continuously pull frames for a single camera into the cache.
 
-        This is the only place the pipeline is read, so frame delivery and the
+        This is the only place the stream is read, so frame delivery and the
         measured FPS reflect the camera's true production cadence regardless of
         how many consumers (live preview, recording) are reading concurrently.
         """
@@ -545,36 +587,30 @@ class RealSenseService:
         errored = False
         while not stop_event.is_set():
             try:
-                raw_frames = pipeline.wait_for_frames(1_000)
-                if not raw_frames:
-                    continue
-                # Align depth to color so the cached depth map shares the color
-                # frame's pixel grid; align.process replaces the frame set. Read
-                # per frame so consumers can toggle alignment at runtime.
-                align = runtime.align if self._wants_alignment(runtime) else None
-                frames = align.process(raw_frames) if align is not None else raw_frames
-                color_frame = frames.get_color_frame()
-                if color_frame is None:
+                # Alignment is read per frame so consumers can toggle it at
+                # runtime; the backend skips the per-pixel remap when it is off.
+                aligned = self._wants_alignment(runtime)
+                pair = stream.read(1_000, aligned=aligned)
+                if pair is None:
                     continue
 
-                image = np.asanyarray(color_frame.get_data())
+                image = pair.color
                 depth = None
                 # Unaligned depth is never cached; it would pair the wrong
                 # distance with each color pixel.
-                if runtime.depth_started and align is not None:
-                    depth_frame = frames.get_depth_frame()
-                    if depth_frame is not None:
-                        raw_depth = np.asanyarray(depth_frame.get_data())
-                        # Convert RealSense device units to the uint16-mm unit
-                        # LeRobot 0.6 recognizes natively.
-                        scale_to_mm = runtime.depth_scale_m * 1000.0
-                        if abs(scale_to_mm - 1.0) < 1e-6:
-                            depth = raw_depth.astype(np.uint16, copy=False)
-                        else:
-                            depth = np.rint(
-                                raw_depth.astype(np.float32) * scale_to_mm
-                            ).clip(0, np.iinfo(np.uint16).max).astype(np.uint16)
-                timestamp_ms = color_frame.get_timestamp()
+                if runtime.depth_started and aligned and pair.depth is not None:
+                    raw_depth = pair.depth
+                    # Convert raw device units to the uint16-mm unit LeRobot 0.6
+                    # recognizes natively.
+                    runtime.depth_scale_m = pair.depth_scale_m
+                    scale_to_mm = pair.depth_scale_m * 1000.0
+                    if abs(scale_to_mm - 1.0) < 1e-6:
+                        depth = raw_depth.astype(np.uint16, copy=False)
+                    else:
+                        depth = np.rint(
+                            raw_depth.astype(np.float32) * scale_to_mm
+                        ).clip(0, np.iinfo(np.uint16).max).astype(np.uint16)
+                timestamp_ms = pair.timestamp_ms
                 now = time.monotonic()
                 with self._lock:
                     if runtime.last_frame_time is not None:
@@ -611,7 +647,7 @@ class RealSenseService:
                         "width": image.shape[1],
                         "height": image.shape[0],
                     }
-                    if runtime.depth_started and align is not None:
+                    if runtime.depth_started and aligned:
                         # Keep the previous depth map on a missing depth frame so
                         # a momentary drop never loses the tick's color frame.
                         if depth is None:
@@ -636,69 +672,68 @@ class RealSenseService:
                 ):
                     self._errors[name] = describe_exception(exc)
                     errored = True
-                pipeline, last_frame, restarts = self._restart_if_silent(
-                    runtime, pipeline, stop_event, config, last_frame, restarts
+                stream, last_frame, restarts = self._restart_if_silent(
+                    runtime, stream, stop_event, serial, last_frame, restarts
                 )
                 stop_event.wait(timeout=0.05)
 
     def _restart_if_silent(
         self,
         runtime: CameraRuntime,
-        pipeline: Any,
+        stream: CameraStream,
         stop_event: threading.Event,
-        config: Any,
+        serial: str,
         last_frame: float,
         restarts: int,
-    ) -> tuple[Any, float, int]:
-        # Restart a silent stream, escalating to hardware_reset (D405 on a shared
-        # hub often re-wedges on a plain restart). Never gives up.
+    ) -> tuple[CameraStream, float, int]:
+        # Restart a silent stream, escalating to a hardware reset (a D405 on a
+        # shared hub often re-wedges on a plain restart). Never gives up.
         if (
             time.monotonic() - last_frame < SILENT_RESTART_AFTER_S
             or stop_event.is_set()
         ):
-            return pipeline, last_frame, restarts
+            return stream, last_frame, restarts
         try:
-            pipeline.stop()
+            stream.stop()
         except Exception:  # pragma: no cover - hardware specific
             pass
+        backend = runtime.backend
+        if backend is None:  # pragma: no cover - a started runtime always has one
+            return stream, time.monotonic(), restarts + 1
         # Every 3rd attempt escalate to a hardware reset.
         if restarts > 0 and restarts % 3 == 0:
             self._hardware_reset(runtime, stop_event)
-        pipeline = rs.pipeline()
         try:
-            pipeline.start(config)
+            stream, _warning = backend.open(
+                serial,
+                width=runtime.config.width,
+                height=runtime.config.height,
+                fps=runtime.config.fps,
+                want_depth=bool(runtime.config.use_depth),
+            )
         except Exception as exc:  # pragma: no cover - hardware specific
             self._errors[runtime.config.name] = describe_exception(exc)
-            return pipeline, time.monotonic(), restarts + 1
+            return stream, time.monotonic(), restarts + 1
         with self._lock:
             if not stop_event.is_set():
-                runtime.pipeline = pipeline
-        return pipeline, time.monotonic(), restarts + 1
+                runtime.stream = stream
+                runtime.depth_started = stream.depth_started
+                runtime.depth_scale_m = stream.depth_scale_m
+        return stream, time.monotonic(), restarts + 1
 
     def _hardware_reset(
         self, runtime: CameraRuntime, stop_event: threading.Event
     ) -> None:
-        # hardware_reset drops the USB device; wait for it to re-enumerate.
+        # A hardware reset drops the USB device; wait for it to re-enumerate.
         serial = runtime.actual_serial or runtime.config.device_serial
-        if not serial:
+        backend = runtime.backend
+        if not serial or backend is None:
             return
-        try:
-            for device in rs.context().devices:
-                if device.get_info(rs.camera_info.serial_number) == serial:
-                    device.hardware_reset()
-                    break
-        except Exception:  # pragma: no cover - hardware specific
+        if not backend.reset(serial):
             return
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline and not stop_event.is_set():
-            try:
-                detected = [
-                    d.get_info(rs.camera_info.serial_number)
-                    for d in rs.context().devices
-                ]
-            except Exception:  # pragma: no cover - hardware specific
-                detected = []
-            if serial in detected:
+            if backend.is_present(serial):
                 return
             stop_event.wait(0.3)
 
@@ -708,8 +743,8 @@ class RealSenseService:
         timeout_ms: int = 1_000,
         camera_names: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
-        if rs is None:
-            raise RuntimeError("pyrealsense2 is not available")
+        if not self.available():
+            raise RuntimeError("No camera SDK is available")
 
         names = self._resolve_camera_names(camera_names)
 
@@ -723,7 +758,7 @@ class RealSenseService:
             with self._lock:
                 for name in names:
                     runtime = self._runtimes[name]
-                    if runtime.pipeline is None:
+                    if runtime.stream is None:
                         continue
                     cached = self._last_frames.get(name)
                     if cached is not None:
@@ -742,7 +777,7 @@ class RealSenseService:
     ) -> dict[str, Any]:
         selected_name = self._resolve_camera_names([camera_name])[0]
         runtime = self._runtimes[selected_name]
-        if runtime.pipeline is None or not runtime.started:
+        if runtime.stream is None or not runtime.started:
             raise RuntimeError(f"Camera '{selected_name}' is not started")
 
         frames = self.read_frames(
@@ -770,3 +805,8 @@ class RealSenseService:
                 "height": frame["height"],
             }
         return metadata
+
+
+# The service handled only RealSense until Orbbec support landed. Kept so any
+# out-of-tree caller importing the old name keeps working.
+RealSenseService = CameraService
