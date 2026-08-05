@@ -13,3 +13,6 @@ __pycache__/
 *.egg-info/
 
 .local/
+
+# Runtime log the Orbbec SDK writes into the working directory.
+Log/
