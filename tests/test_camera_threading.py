@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for RealSenseService thread safety and FPS smoothing."""
+"""Tests for CameraService thread safety and FPS smoothing."""
 
 import threading
 import time
@@ -21,8 +21,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from flexivtrainer.cameras import realsense as realsense_module
-from flexivtrainer.cameras.realsense import CameraRuntime, RealSenseService
+from flexivtrainer.cameras import service as camera_module
+from flexivtrainer.cameras.service import CameraRuntime, CameraService
 from flexivtrainer.config import AppSettings, CameraConfig, StorageConfig
 
 
@@ -34,7 +34,7 @@ def _make_service(
     pipeline_factory=None,
     start=True,
 ):
-    """Create a RealSenseService with fake cameras that produce frames."""
+    """Create a CameraService with fake cameras that produce frames."""
 
     class FakeColorFrame:
         def get_data(self):
@@ -100,9 +100,9 @@ def _make_service(
         ),
         align=lambda stream: SimpleNamespace(process=lambda frames: frames),
     )
-    monkeypatch.setattr(realsense_module, "rs", fake_rs)
+    monkeypatch.setattr(camera_module, "rs", fake_rs)
 
-    service = RealSenseService(
+    service = CameraService(
         AppSettings(
             storage=StorageConfig(root=tmp_path),
             cameras=cameras
@@ -293,7 +293,7 @@ def test_warming_up_timeout_is_not_reported_as_error(tmp_path, monkeypatch) -> N
 
 def test_mid_session_dropout_surfaces_error(tmp_path, monkeypatch) -> None:
     """A camera that streamed then stops delivering DOES surface an error."""
-    monkeypatch.setattr(realsense_module, "SILENT_RESTART_AFTER_S", 0.05)
+    monkeypatch.setattr(camera_module, "SILENT_RESTART_AFTER_S", 0.05)
 
     class FakeColorFrame:
         def get_data(self):
@@ -350,7 +350,7 @@ def test_mid_session_dropout_surfaces_error(tmp_path, monkeypatch) -> None:
 
 def test_silent_pipeline_watchdog_retries_and_resets(tmp_path, monkeypatch) -> None:
     """A silent pipeline is retried indefinitely and escalates to hardware_reset."""
-    monkeypatch.setattr(realsense_module, "SILENT_RESTART_AFTER_S", 0.02)
+    monkeypatch.setattr(camera_module, "SILENT_RESTART_AFTER_S", 0.02)
     starts: list[float] = []
     resets: list[str] = []
 
@@ -371,7 +371,7 @@ def test_silent_pipeline_watchdog_retries_and_resets(tmp_path, monkeypatch) -> N
         tmp_path, monkeypatch, pipeline_factory=lambda: BrokenPipeline()
     )
     # hardware_reset lives on the device object from context(); record calls.
-    fake_device = realsense_module.rs.context().devices[0]
+    fake_device = camera_module.rs.context().devices[0]
     fake_device.hardware_reset = lambda: resets.append("reset")
 
     deadline = time.monotonic() + 3.0

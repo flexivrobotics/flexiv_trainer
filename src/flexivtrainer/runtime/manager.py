@@ -19,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from flexivtrainer.cameras.realsense import RealSenseService
+from flexivtrainer.cameras.service import CameraService
 from flexivtrainer.config import (
     AppSettings,
     CameraSerialConfig,
@@ -138,7 +138,7 @@ class RuntimeManager:
             self.get_active_sides,
             self.get_end_effector_config,
         )
-        self.cameras = RealSenseService(settings)
+        self.cameras = CameraService(settings)
         self.cameras.set_active_locations(
             active_camera_names(self._robot_config.active_sides())
         )
@@ -370,7 +370,7 @@ class RuntimeManager:
             camera_state = "Unavailable"
             camera_tone = "error"
             camera_detail = self._service_message(
-                camera_errors, "RealSense is not available."
+                camera_errors, "No camera SDK is available."
             )
         elif configured_camera_count and streaming_count == configured_camera_count:
             camera_state = f"{streaming_count}/{configured_camera_count} connected"

@@ -2664,7 +2664,12 @@ function renderTeleopCameraConfig() {
         devices.forEach((device) => {
             seen.add(device.serial);
             const selected = device.serial === current ? " selected" : "";
-            options.push(`<option value="${device.serial}"${selected}>${device.serial}</option>`);
+            // Prefix the model name: with several vendors connected at once,
+            // bare serials give the operator no way to tell the cameras apart.
+            const label = device.name
+                ? `${device.name} (${device.serial})`
+                : device.serial;
+            options.push(`<option value="${device.serial}"${selected}>${escapeHtml(label)}</option>`);
         });
         if (current && !seen.has(current)) {
             options.push(`<option value="${current}" selected>${current}</option>`);

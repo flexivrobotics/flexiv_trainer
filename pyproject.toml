@@ -20,12 +20,28 @@ dependencies = [
   "flexivtdk==1.6.2",
   "lerobot[training,multi-task-dit,diffusion,smolvla,pi]==0.6.0",
   "pyrealsense2",
+  # NOTE: Orbbec camera support is the `orbbec` extra below, not a hard
+  # dependency -- see the comment there for why it cannot be resolved normally.
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.4,<9.0",
   "ruff>=0.12,<0.13",
+]
+# Orbbec camera support (Gemini 305/330 series). Kept out of the core
+# dependencies because pyorbbecsdk2 declares hard pins for its *example*
+# scripts -- notably `av==12.3.0` (3.12) / `av==13.0.0` (3.13) -- which
+# conflict irreconcilably with lerobot's `av>=15,<16`. The binding itself does
+# not use those packages, so install it without dependencies:
+#
+#   pip install --no-deps 'pyorbbecsdk2>=2.1'
+#
+# Verified working against av 15.1.0. The wheel is published for CPython
+# 3.8-3.13 only (no sdist), so Orbbec cameras need a 3.12/3.13 environment;
+# elsewhere the app runs with Orbbec reported as unavailable.
+orbbec = [
+  "pyorbbecsdk2>=2.1; python_version < '3.14'",
 ]
 
 [project.scripts]
