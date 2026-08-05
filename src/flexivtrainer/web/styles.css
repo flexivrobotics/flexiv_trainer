@@ -350,6 +350,11 @@ button:disabled {
     gap: 0.4rem;
 }
 
+.gripper-init--done {
+    border-color: rgba(47, 157, 100, 0.45);
+    color: #2f9d64;
+}
+
 .gripper-control-block {
     display: grid;
     gap: 0.6rem;
