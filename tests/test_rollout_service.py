@@ -1014,13 +1014,21 @@ def test_waypoint_rollout_schedules_gripper_width_and_observes_telemetry(
 
     class FakeGripperExecutor:
         def __init__(
-            self, robots, sides, configs, controlled_sides, *, failure_event
+            self,
+            robots,
+            sides,
+            configs,
+            controlled_sides,
+            *,
+            failure_event,
+            default_width_m=None,
         ) -> None:
             self.robots = robots
             self.sides = sides
             self.configs = configs
             self.controlled_sides = tuple(controlled_sides)
             self.failure_event = failure_event
+            self.default_width_m = default_width_m
             self.error = None
             self.initialized_mode = object()
             self.started = False
@@ -1055,6 +1063,7 @@ def test_waypoint_rollout_schedules_gripper_width_and_observes_telemetry(
                 "gripper_model": "Flexiv-GN01",
             }
         },
+        get_gripper_default_width=lambda: 0.06,
         policy_loader=_fake_loader(policy),
         robot_factory=lambda serial: robot,
         resolve_device=lambda configured: "cpu",
@@ -1090,6 +1099,7 @@ def test_waypoint_rollout_schedules_gripper_width_and_observes_telemetry(
     assert len(instances) == 1
     gripper = instances[0]
     assert gripper.initialized_mode is None
+    assert gripper.default_width_m == pytest.approx(0.06)
     assert gripper.started and gripper.stopped
     assert gripper.submissions
     assert gripper.submissions[0] == {"single_arm": pytest.approx(0.04)}

@@ -92,6 +92,7 @@ def _controller(
     clock=None,
     target_source=None,
     failure_event=None,
+    default_width_m=None,
 ) -> tuple[GripperExecutor, list[FakeGripper], list[tuple[str, str]]]:
     robot = robot or FakeRobot()
     sides = sides or ["left_arm"]
@@ -116,6 +117,8 @@ def _controller(
         kwargs["wait"] = wait
     if clock is not None:
         kwargs["clock"] = clock
+    if default_width_m is not None:
+        kwargs["default_width_m"] = default_width_m
     controller = GripperExecutor(
         [robot],
         sides,
@@ -146,6 +149,29 @@ def test_initializes_in_order_and_reports_measured_state() -> None:
     assert controller.measured_states() == {
         "left_arm": {"width": 0.04, "force": -2.5}
     }
+
+
+def test_initializes_to_default_width_without_capping_policy_targets() -> None:
+    waits: list[float] = []
+
+    def wait(event: threading.Event, timeout: float) -> bool:
+        waits.append(timeout)
+        return False
+
+    controller, grippers, _ = _controller(
+        wait=wait,
+        default_width_m=0.05,
+    )
+
+    controller.initialize()
+    controller.submit({"left_arm": 0.08})
+    controller._send_pending()
+
+    assert waits == [GripperExecutor.INIT_SETTLE_S]
+    assert grippers[0].moves == [
+        (0.05, 0.4, 5.0),
+        (0.08, 0.4, 5.0),
+    ]
 
 
 def test_rejects_controlled_side_without_configured_follower_gripper() -> None:

@@ -19,6 +19,15 @@ const state = {
     // side. Seeded from the gripper params once teleop is running; kept in
     // memory so user edits survive re-renders within a session.
     gripperControl: {},
+    // One shared default/open width for every configured gripper. Slider traffic
+    // is coalesced so at most one hardware request is in flight.
+    gripperWidthControl: {
+        value: null,
+        dirty: false,
+        pending: null,
+        inFlight: false,
+        timer: null,
+    },
     teleopStatus: null,
     cameraConfig: null,
     trainingPolicies: null,
@@ -2610,19 +2619,22 @@ async function refreshSummary() {
 
 function queueRobotConfigSave() {
     window.clearTimeout(state.timers.robotConfigSave);
-    state.timers.robotConfigSave = window.setTimeout(async () => {
-        try {
-            const result = await api("/system/robot-config", {
-                method: "PUT",
-                body: JSON.stringify(state.summary.robot_config),
-            });
-            state.summary.robot_config = result.robot_config;
-            state.summary.services = result.services;
-            renderHomeStatus();
-        } catch (error) {
-            showToast(error.message, true);
-        }
+    state.timers.robotConfigSave = window.setTimeout(() => {
+        saveRobotConfigNow().catch((error) => showToast(error.message, true));
     }, 180);
+}
+
+async function saveRobotConfigNow() {
+    window.clearTimeout(state.timers.robotConfigSave);
+    state.timers.robotConfigSave = null;
+    const result = await api("/system/robot-config", {
+        method: "PUT",
+        body: JSON.stringify(state.summary.robot_config),
+    });
+    state.summary.robot_config = result.robot_config;
+    state.summary.services = result.services;
+    renderHomeStatus();
+    return result;
 }
 
 const CAMERA_LOCATION_LABELS = {
@@ -3801,6 +3813,7 @@ function renderGripperControl(teleopStatus) {
     const teleop = teleopStatus?.teleop || {};
     const allInitialized = sides.every((side) => !!grippers[side]);
     updateGripperInitButton(teleop, allInitialized);
+    updateGlobalGripperWidthControl(teleop, allInitialized);
     sides.forEach((side) =>
         updateGripperControlBlock(side, grippers[side], teleop),
     );
@@ -3817,6 +3830,8 @@ function buildGripperControlPanel(content, sides, grippers) {
     initButton.textContent = "Init";
     initButton.onclick = () => initGrippers();
     content.appendChild(initButton);
+
+    buildGlobalGripperWidthControl(content, sides, grippers);
 
     const multiple = sides.length > 1;
     sides.forEach((side) => {
@@ -3879,6 +3894,140 @@ function buildGripperControlPanel(content, sides, grippers) {
             forceNumber.disabled = true;
         }
     });
+}
+
+function configuredGripperDefaultWidth() {
+    const value = state.summary?.robot_config?.gripper_default_width_m;
+    return Number.isFinite(value) ? value : null;
+}
+
+function buildGlobalGripperWidthControl(content, sides, grippers) {
+    const initialized = sides.map((side) => grippers[side]).filter(Boolean);
+    const block = document.createElement("div");
+    block.className = "gripper-default-width";
+    block.innerHTML = `
+        <label class="gripper-input-group">
+            <span>Default width: <strong class="gripper-width-value"></strong> m</span>
+            <div class="gripper-width-row">
+                <input type="range" class="gripper-width" step="0.001" />
+                <button type="button" class="secondary-button gripper-width-set">Set</button>
+            </div>
+            <small class="gripper-input-note gripper-width-note"></small>
+        </label>
+    `;
+    content.appendChild(block);
+
+    const slider = block.querySelector(".gripper-width");
+    const setButton = block.querySelector(".gripper-width-set");
+    if (initialized.length !== sides.length || initialized.length === 0) {
+        slider.disabled = true;
+        setButton.disabled = true;
+        block.querySelector(".gripper-width-note").textContent =
+            "Initialize all configured grippers to tune their shared width.";
+        return;
+    }
+
+    const min = Math.max(...initialized.map((params) => params.min_width));
+    const max = Math.min(...initialized.map((params) => params.max_width));
+    if (min > max) {
+        slider.disabled = true;
+        setButton.disabled = true;
+        block.querySelector(".gripper-width-note").textContent =
+            "The initialized grippers do not share a compatible width range.";
+        return;
+    }
+    const control = state.gripperWidthControl;
+    const configured = configuredGripperDefaultWidth();
+    if (control.value == null) {
+        control.value = configured ?? max;
+        control.dirty = configured == null;
+    }
+    const clamped = clampNumber(control.value, min, max);
+    if (clamped !== control.value) control.dirty = true;
+    control.value = clamped;
+    slider.min = min;
+    slider.max = max;
+
+    const render = () => {
+        const rounded = roundForInput(control.value, 3);
+        block.querySelector(".gripper-width-value").textContent = rounded;
+        slider.value = control.value;
+    };
+    const apply = (raw) => {
+        const parsed = parseFloat(raw);
+        if (Number.isNaN(parsed)) return;
+        control.value = clampNumber(parsed, min, max);
+        control.dirty = true;
+        render();
+        queueGripperWidthMove(control.value);
+        updateGlobalGripperWidthControl(
+            state.teleopStatus?.teleop || {},
+            true,
+        );
+    };
+    slider.oninput = () => apply(slider.value);
+    setButton.onclick = () => recordGripperDefaultWidth();
+    block.querySelector(".gripper-width-note").textContent =
+        `Shared range: ${roundForInput(min, 3)}–${roundForInput(max, 3)} m`;
+    render();
+}
+
+function updateGlobalGripperWidthControl(teleop, allInitialized) {
+    const block = byId("teleop-gripper-content")?.querySelector(".gripper-default-width");
+    if (!block) return;
+    const unavailable = !allInitialized || !!teleop.started || !!state.ui.gripperInitBusy;
+    block.querySelector(".gripper-width").disabled = unavailable;
+    const setButton = block.querySelector(".gripper-width-set");
+    setButton.disabled = unavailable || !state.gripperWidthControl.dirty;
+}
+
+function queueGripperWidthMove(width) {
+    const control = state.gripperWidthControl;
+    control.pending = width;
+    if (control.inFlight || control.timer !== null) return;
+    control.timer = window.setTimeout(flushGripperWidthMove, 1000 / 30);
+}
+
+async function flushGripperWidthMove() {
+    const control = state.gripperWidthControl;
+    control.timer = null;
+    if (control.inFlight || control.pending == null) return;
+    const width = control.pending;
+    control.pending = null;
+    control.inFlight = true;
+    try {
+        await moveGrippersToWidth(width);
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        control.inFlight = false;
+        if (control.pending != null && control.timer === null) {
+            control.timer = window.setTimeout(flushGripperWidthMove, 1000 / 30);
+        }
+    }
+}
+
+function moveGrippersToWidth(width) {
+    return api("/teleop/gripper/width", {
+        method: "POST",
+        body: JSON.stringify({ width }),
+    });
+}
+
+async function recordGripperDefaultWidth() {
+    const control = state.gripperWidthControl;
+    if (control.value == null || !state.summary?.robot_config) return;
+    const config = state.summary.robot_config;
+    const previous = config.gripper_default_width_m;
+    config.gripper_default_width_m = control.value;
+    try {
+        await saveRobotConfigNow();
+        control.dirty = false;
+        updateGlobalGripperWidthControl(state.teleopStatus?.teleop || {}, true);
+    } catch (error) {
+        config.gripper_default_width_m = previous;
+        showToast(error.message, true);
+    }
 }
 
 // Configure a range slider plus its number box for one gripper field: set their
@@ -4063,6 +4212,12 @@ async function initGrippers() {
         await new Promise((resolve) =>
             window.setTimeout(resolve, GRIPPER_INIT_WAIT_MS),
         );
+        const savedWidth = configuredGripperDefaultWidth();
+        if (savedWidth != null) {
+            await moveGrippersToWidth(savedWidth);
+            state.gripperWidthControl.value = savedWidth;
+            state.gripperWidthControl.dirty = false;
+        }
     } catch (error) {
         showToast(error.message, true);
     } finally {

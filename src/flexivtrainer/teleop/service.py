@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -92,6 +93,7 @@ class TeleopService:
         get_end_effector_config: (
             Callable[[], dict[str, EndEffectorSideConfig]] | None
         ) = None,
+        get_gripper_default_width: Callable[[], float | None] | None = None,
     ) -> None:
         self._settings = settings
         self._get_robot_pairs = get_robot_pairs or (lambda: settings.teleop_robot_pairs)
@@ -102,6 +104,7 @@ class TeleopService:
             lambda: ["left_arm", "right_arm"]
         )
         self._get_end_effector_config = get_end_effector_config or (lambda: {})
+        self._get_gripper_default_width = get_gripper_default_width or (lambda: None)
         self._controller: Any | None = None
         self._error: str | None = None
         self._initialized = False
@@ -115,6 +118,8 @@ class TeleopService:
         # runs with the teleop control loop (started/stopped by Start/Stop), not
         # gated by engage -- it keeps mirroring across engage/disengage cycles.
         self._end_effectors: EndEffectorController | None = None
+        self._gripper_initializing = False
+        self._gripper_move_lock = threading.Lock()
 
     def _configured_remote_serials(self) -> list[str]:
         serials: list[str] = []
@@ -408,6 +413,9 @@ class TeleopService:
             # not initialized are skipped per-tick (the panel shows a warning).
             self._ensure_end_effectors()
             if self._end_effectors is not None:
+                self._end_effectors.set_default_gripper_width(
+                    self._get_gripper_default_width()
+                )
                 self._end_effectors.start()
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
@@ -455,6 +463,7 @@ class TeleopService:
                 self._controller,
                 self._get_active_sides(),
                 dict(self._get_end_effector_config() or {}),
+                self._get_gripper_default_width(),
             )
         except Exception:  # pragma: no cover - hardware specific
             self._end_effectors = None
@@ -477,8 +486,14 @@ class TeleopService:
         self._ensure_end_effectors()
         if self._end_effectors is None or not self._end_effectors.has_grippers():
             return {"ok": False, "error": "No grippers configured"}
-        errors = self._end_effectors.initialize_grippers()
-        snapshot = self._end_effectors.gripper_snapshot()
+        if self._gripper_initializing:
+            return {"ok": False, "error": "Gripper initialization is already running"}
+        self._gripper_initializing = True
+        try:
+            errors = self._end_effectors.initialize_grippers()
+            snapshot = self._end_effectors.gripper_snapshot()
+        finally:
+            self._gripper_initializing = False
         if errors and not snapshot:
             return {"ok": False, "error": "; ".join(errors.values())}
         return {"ok": True, "gripper": snapshot, "errors": errors}
@@ -600,6 +615,35 @@ class TeleopService:
             return {"ok": True, "velocity": velocity, "force": force}
         except Exception as exc:  # pragma: no cover - hardware specific
             return {"ok": False, "error": describe_exception(exc)}
+
+    def set_gripper_width(self, width: float) -> dict[str, Any]:
+        """Tune every initialized gripper while the teleop loop is stopped."""
+
+        if self._started:
+            return {
+                "ok": False,
+                "error": "Stop teleoperation before tuning gripper width",
+            }
+        if self._gripper_initializing:
+            return {"ok": False, "error": "Wait for gripper initialization to finish"}
+        if self._end_effectors is None:
+            return {
+                "ok": False,
+                "error": "Initialize the gripper before tuning its width",
+            }
+        if not self._gripper_move_lock.acquire(blocking=False):
+            return {"ok": False, "error": "A gripper width command is already running"}
+        try:
+            result = self._end_effectors.move_grippers_to_width(width)
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
+        finally:
+            self._gripper_move_lock.release()
+        widths = result["widths"]
+        errors = result["errors"]
+        if errors and not widths:
+            return {"ok": False, "error": "; ".join(errors.values())}
+        return {"ok": True, "widths": widths, "errors": errors}
 
     def shutdown(self) -> None:
         if self._controller is None:

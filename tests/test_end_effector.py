@@ -309,6 +309,45 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
     assert len(gripper.moves) == moves_before
 
 
+def test_default_width_replaces_open_target_and_manual_tuning_clamps(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+
+    follower = FakeFollower()
+    tdk = FakeTDK(follower, [False] * 18)
+    cfg = EndEffectorSideConfig(
+        leader="digital_input",
+        follower="gripper",
+        gripper_activated_state="close",
+    )
+    ctl = ee.EndEffectorController(
+        tdk,
+        ["single_arm"],
+        {"single_arm": cfg},
+        default_gripper_width_m=0.06,
+    )
+    ctl._setup_gripper(0, ctl._configs[0])
+    gripper = ctl._grippers[0]
+
+    ctl._tick(0, ctl._configs[0])
+    assert gripper.moves[-1][0] == 0.06
+
+    result = ctl.move_grippers_to_width(0.2)
+    assert result == {"widths": {"single_arm": 0.1}, "errors": {}}
+    assert gripper.moves[-1][0] == 0.1
+
+    # Manual tuning resets the cached mirror state; the next tick reasserts Open
+    # using the newly tuned width (clamped independently for this gripper).
+    ctl._tick(0, ctl._configs[0])
+    assert gripper.moves[-1][0] == 0.1
+
+    tdk._leader_ports[0] = True
+    ctl._tick(0, ctl._configs[0])
+    assert gripper.moves[-1][0] == 0.0
+
+
 def test_side_index_maps_to_pair_index() -> None:
     # The second side ("right_arm") must drive pair index 1.
     follower = FakeFollower()

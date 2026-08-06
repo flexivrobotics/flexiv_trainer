@@ -31,6 +31,9 @@ class RobotConfigRequest(BaseModel):
     follower_robot_serials: list[str] = Field(default_factory=list)
     end_effector_config: dict[str, EndEffectorSideConfig] = Field(default_factory=dict)
     home_posture_deg: list[float] = Field(default_factory=list)
+    gripper_default_width_m: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False
+    )
     recording_entries: list[str] = Field(default_factory=list)
     record_resolution: str = ""
 

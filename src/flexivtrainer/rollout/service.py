@@ -89,6 +89,7 @@ class RolloutService:
         get_active_sides: Callable[[], list[str]],
         *,
         get_end_effector_config: Callable[[], dict[str, Any]] | None = None,
+        get_gripper_default_width: Callable[[], float | None] | None = None,
         policy_loader: Callable[[str, str], Any] = _default_policy_loader,
         robot_factory: Callable[[str], Any] = _default_robot_factory,
         resolve_device: Callable[[str], str] | None = None,
@@ -99,6 +100,7 @@ class RolloutService:
         self._get_robot_pairs = get_robot_pairs
         self._get_active_sides = get_active_sides
         self._get_end_effector_config = get_end_effector_config or (lambda: {})
+        self._get_gripper_default_width = get_gripper_default_width or (lambda: None)
         self._policy_loader = policy_loader
         self._robot_factory = robot_factory
         if resolve_device is None:
@@ -236,6 +238,7 @@ class RolloutService:
         waypoint_layout_inferred = False
         waypoint_gripper_sides: tuple[str, ...] = ()
         end_effector_config: dict[str, Any] = {}
+        gripper_default_width_m = self._get_gripper_default_width()
         if is_bspline:
             bspline_layout = self._preflight_bspline(
                 policy, sides, followers, target_hz
@@ -328,6 +331,7 @@ class RolloutService:
                 release_robots=self._make_release_robots(robots),
                 stop_robots=hardware.stop_robots,
                 prepare_motion=self._prepare_motion,
+                gripper_default_width_m=gripper_default_width_m,
             )
         else:
             assert waypoint_layout is not None
@@ -368,6 +372,7 @@ class RolloutService:
                     else None
                 ),
                 uses_cuda_graphs=uses_cuda_graphs,
+                gripper_default_width_m=gripper_default_width_m,
             )
 
         with self._lock:

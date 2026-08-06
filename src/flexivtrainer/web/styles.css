@@ -337,6 +337,7 @@ button:disabled {
 
 .gripper-control-stack {
     gap: 0.85rem;
+    min-width: 0;
 }
 
 .gripper-init {
@@ -353,6 +354,26 @@ button:disabled {
 .gripper-init--done {
     border-color: rgba(47, 157, 100, 0.45);
     color: #2f9d64;
+}
+
+.gripper-default-width {
+    padding-top: 0.85rem;
+    border-top: 2px solid rgba(72, 103, 125, 0.2);
+    min-width: 0;
+}
+
+.gripper-width-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 4.25rem;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.gripper-width-set {
+    width: 100%;
+    min-width: 0;
+    padding: 0.45rem 0.65rem;
 }
 
 .gripper-control-block {
@@ -396,16 +417,20 @@ button:disabled {
 }
 
 .gripper-input-group input[type="range"] {
-    flex: 1 1 auto;
-    width: auto;
+    flex: 1 1 0;
+    width: 0;
     min-width: 0;
     accent-color: rgba(105, 185, 232, 0.9);
     cursor: pointer;
 }
 
+.gripper-input-group .gripper-width-row > input[type="range"] {
+    width: 100%;
+}
+
 .gripper-number-input {
     flex: 0 0 auto;
-    width: 4.5rem;
+    width: 4rem;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: rgba(255, 255, 255, 0.82);
@@ -778,7 +803,7 @@ button:disabled {
 
 .teleop-shell {
     display: grid;
-    grid-template-columns: minmax(228px, 258px) minmax(0, 1fr) minmax(228px, 258px);
+    grid-template-columns: minmax(210px, 240px) minmax(0, 1fr) minmax(228px, 258px);
     align-items: start;
     gap: 0.85rem;
 }
@@ -791,11 +816,20 @@ button:disabled {
     position: sticky;
     top: 5.25rem;
     align-self: start;
+    min-width: 0;
 }
 
 .teleop-sidebar--left {
     display: grid;
     gap: 0.85rem;
+    width: 100%;
+    min-width: 0;
+}
+
+.teleop-sidebar--left > .panel {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .teleop-sidebar--right {

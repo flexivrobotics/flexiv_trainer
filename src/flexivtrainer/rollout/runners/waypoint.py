@@ -81,6 +81,7 @@ class WaypointRunner:
         uses_cuda_graphs: bool = False,
         image_resolutions: dict[str, tuple[int, int]] | None = None,
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
+        gripper_default_width_m: float | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -124,6 +125,7 @@ class WaypointRunner:
                 end_effector_config,
                 gripper_sides,
                 failure_event=stop_event,
+                default_width_m=gripper_default_width_m,
                 executor_factory=GripperExecutor,
             )
             for serial, robot in zip(followers, robots, strict=True):
