@@ -266,3 +266,31 @@ class GripperExecutor:
             }
         with self._lock:
             self._measured = measured
+
+
+def initialize_gripper_executor(
+    robots: Sequence[Any],
+    sides: Sequence[str],
+    configs: Mapping[str, Any],
+    controlled_sides: Collection[str],
+    *,
+    failure_event: threading.Event,
+    executor_factory: Callable[..., GripperExecutor] = GripperExecutor,
+) -> GripperExecutor | None:
+    """Create and initialize predicted grippers while their robots are IDLE."""
+
+    if not controlled_sides:
+        return None
+    executor = executor_factory(
+        robots,
+        sides,
+        configs,
+        controlled_sides,
+        failure_event=failure_event,
+    )
+    try:
+        executor.initialize()
+    except Exception:
+        executor.stop()
+        raise
+    return executor

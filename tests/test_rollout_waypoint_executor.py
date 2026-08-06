@@ -64,6 +64,36 @@ def test_build_action_layout_locates_command_runs() -> None:
     assert layout[0]["pose"] == slice(0, 7)
     assert layout[0]["twist"] == slice(7, 13)
     assert layout[0]["wrench"] == slice(13, 19)
+    assert layout[0]["gripper_width"] is None
+
+
+def test_named_layout_maps_gripper_width_and_requires_it_before_force() -> None:
+    names = [
+        *canonical_action_names(19, ["single_arm"]),
+        "single_arm.gripper.width",
+        "single_arm.gripper.force",
+    ]
+
+    layout = build_action_layout(names, ["single_arm"], len(names))
+
+    assert layout[0]["gripper_width"] == 19
+
+    force_only = [*names[:19], "single_arm.gripper.force"]
+    with pytest.raises(ValueError, match="force.*without required.*width"):
+        build_action_layout(force_only, ["single_arm"], len(force_only))
+
+
+def test_named_layout_maps_only_the_configured_gripper_side() -> None:
+    names = canonical_action_names(38, ["left_arm", "right_arm"])
+    names[19:19] = [
+        "left_arm.gripper.width",
+        "left_arm.gripper.force",
+    ]
+
+    layout = build_action_layout(names, ["left_arm", "right_arm"], len(names))
+
+    assert layout[0]["gripper_width"] == 19
+    assert layout[1]["gripper_width"] is None
 
 
 @pytest.mark.parametrize(
@@ -148,6 +178,60 @@ def test_malformed_action_width_is_rejected_before_dispatch() -> None:
 
     assert executor._waypoints == []
     assert all(not robot.commands for robot in robots)
+
+
+def test_gripper_width_is_submitted_only_when_timed_waypoint_fires() -> None:
+    names = [
+        *canonical_action_names(19, ["single_arm"]),
+        "single_arm.gripper.width",
+        "single_arm.gripper.force",
+    ]
+    layout = build_action_layout(names, ["single_arm"], len(names))
+    robot = _FakeRobot()
+    submissions: list[dict[str, float]] = []
+    executor = WaypointExecutor(
+        [robot],
+        layout,
+        threading.Event(),
+        (0.25, 0.6, 1.0, 2.5),
+        action_dim=len(names),
+        submit_gripper=lambda targets: submissions.append(dict(targets)),
+    )
+    action = [*_unit_pose(0.1), *([0.0] * 12), 0.042, -3.0]
+
+    executor.replace_waypoints([action], [101.0], now=100.0)
+
+    assert submissions == []
+    executor._send_waypoint(executor._waypoints[0])
+    assert submissions == [{"single_arm": pytest.approx(0.042)}]
+    # Recorded force is intentionally not forwarded to Gripper.Move().
+    assert set(submissions[0]) == {"single_arm"}
+
+
+def test_nonfinite_gripper_width_is_rejected_before_any_dispatch() -> None:
+    names = [
+        *canonical_action_names(19, ["single_arm"]),
+        "single_arm.gripper.width",
+        "single_arm.gripper.force",
+    ]
+    layout = build_action_layout(names, ["single_arm"], len(names))
+    robot = _FakeRobot()
+    submissions: list[dict[str, float]] = []
+    executor = WaypointExecutor(
+        [robot],
+        layout,
+        threading.Event(),
+        (0.25, 0.6, 1.0, 2.5),
+        action_dim=len(names),
+        submit_gripper=lambda targets: submissions.append(dict(targets)),
+    )
+    action = [*_unit_pose(0.1), *([0.0] * 12), float("nan"), -3.0]
+
+    with pytest.raises(ValueError, match="non-finite gripper width"):
+        executor.replace_waypoints([action], [101.0], now=100.0)
+
+    assert robot.commands == []
+    assert submissions == []
 
 
 def test_layout_rejects_unknown_width_and_partial_named_group() -> None:

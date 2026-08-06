@@ -234,14 +234,17 @@ class RolloutService:
         waypoint_layout: list[dict[str, Any]] | None = None
         waypoint_action_dim: int | None = None
         waypoint_layout_inferred = False
+        waypoint_gripper_sides: tuple[str, ...] = ()
         end_effector_config: dict[str, Any] = {}
         if is_bspline:
             bspline_layout = self._preflight_bspline(
                 policy, sides, followers, target_hz
             )
             end_effector_config = dict(self._get_end_effector_config() or {})
-            self._preflight_bspline_grippers(
-                bspline_layout, end_effector_config
+            self._preflight_grippers(
+                bspline_layout.gripper_sides,
+                end_effector_config,
+                policy_label="B-spline",
             )
         else:
             (
@@ -254,6 +257,20 @@ class RolloutService:
                 sides,
                 followers,
             )
+            waypoint_gripper_sides = tuple(
+                str(arm["side"])
+                for arm in waypoint_layout
+                if isinstance(arm.get("gripper_width"), int)
+            )
+            if waypoint_gripper_sides:
+                end_effector_config = dict(
+                    self._get_end_effector_config() or {}
+                )
+                self._preflight_grippers(
+                    waypoint_gripper_sides,
+                    end_effector_config,
+                    policy_label="Waypoint",
+                )
             self._apply_n_action_steps(policy, rollout_cfg)
 
         # Per run: a zombie planner keeps the old event, which stays set, so
@@ -267,9 +284,6 @@ class RolloutService:
                         self._robot_factory,
                         serial,
                         self._stop_event,
-                        prepare_motion=(
-                            None if is_bspline else self._prepare_motion
-                        ),
                     )
                 )
         except Exception as exc:
@@ -324,6 +338,7 @@ class RolloutService:
                 postprocessor=postprocessor,
                 robots=robots,
                 sides=sides,
+                followers=followers,
                 cameras=self._cameras,
                 image_resolutions=image_resolutions,
                 rollout_cfg=rollout_cfg,
@@ -332,6 +347,8 @@ class RolloutService:
                 task=task,
                 action_layout=waypoint_layout,
                 action_dim=waypoint_action_dim,
+                gripper_sides=waypoint_gripper_sides,
+                end_effector_config=end_effector_config,
                 motion_limits=motion_limits,
                 planner_hz_fallback=app_rollout.planner_hz,
                 expected_hz_fallback=app_rollout.action_dt_hz,
@@ -341,8 +358,10 @@ class RolloutService:
                 append_metric=self._metrics.append,
                 append_wrench=self._wrench.append,
                 on_error=self._on_runner_error,
+                on_cleanup_error=self._on_runner_cleanup_error,
                 on_finished=self._on_runner_finished,
                 release_robots=self._make_release_robots(robots),
+                stop_robots=hardware.stop_robots,
                 prepare_policy=(
                     partial(act_policy.compile_model, mode=compile_mode)
                     if compile_act
@@ -388,6 +407,17 @@ class RolloutService:
                         "Waypoint action layout inferred",
                         f"output_dim={waypoint_action_dim} sides={'+'.join(sides)}; "
                         "checkpoint training dataset metadata was unavailable",
+                    )
+                )
+            if waypoint_gripper_sides:
+                self._logs.append(
+                    _encode_ui_log(
+                        "INFO",
+                        "ROLLOUT",
+                        "Waypoint gripper control enabled",
+                        "sides="
+                        f"{'+'.join(waypoint_gripper_sides)} "
+                        "command=width force=device-limited",
                     )
                 )
             if overrides_applied:
@@ -637,12 +667,14 @@ class RolloutService:
         return getattr(config, name, None)
 
     @classmethod
-    def _preflight_bspline_grippers(
+    def _preflight_grippers(
         cls,
-        layout: BSplineActionLayout,
+        gripper_sides: tuple[str, ...],
         configs: dict[str, Any],
+        *,
+        policy_label: str,
     ) -> None:
-        for side in layout.gripper_sides:
+        for side in gripper_sides:
             config = configs.get(side)
             if (
                 config is None
@@ -650,8 +682,8 @@ class RolloutService:
                 or not cls._config_value(config, "gripper_model")
             ):
                 raise RuntimeError(
-                    "B-spline checkpoint predicts gripper width but no follower "
-                    f"gripper is configured for {side}"
+                    f"{policy_label} checkpoint predicts gripper width but no "
+                    f"follower gripper is configured for {side}"
                 )
 
     def _apply_n_action_steps(self, policy: Any, rollout_cfg: Any) -> None:

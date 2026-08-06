@@ -19,7 +19,10 @@ from flexivtrainer.rollout.executors.bspline import (
     BSplineInstallResult,
     parse_bspline_action_layout,
 )
-from flexivtrainer.rollout.executors.gripper import GripperExecutor
+from flexivtrainer.rollout.executors.gripper import (
+    GripperExecutor,
+    initialize_gripper_executor,
+)
 from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     build_action_layout,
@@ -33,6 +36,7 @@ __all__ = [
     "BSplineInstallResult",
     "parse_bspline_action_layout",
     "GripperExecutor",
+    "initialize_gripper_executor",
     "WaypointExecutor",
     "build_action_layout",
     "normalize_pose_quaternion",
