@@ -3799,7 +3799,8 @@ function renderGripperControl(teleopStatus) {
     }
 
     const teleop = teleopStatus?.teleop || {};
-    updateGripperInitButton(teleop);
+    const allInitialized = sides.every((side) => !!grippers[side]);
+    updateGripperInitButton(teleop, allInitialized);
     sides.forEach((side) =>
         updateGripperControlBlock(side, grippers[side], teleop),
     );
@@ -4006,7 +4007,7 @@ function updateGripperControlBlock(side, params, teleop) {
     hint.classList.toggle("gripper-control-warning", warn);
 }
 
-function updateGripperInitButton(teleop) {
+function updateGripperInitButton(teleop, grippersInitialized) {
     const button = byId("teleop-gripper-content")?.querySelector(".gripper-init");
     if (!button) {
         return;
@@ -4014,22 +4015,31 @@ function updateGripperInitButton(teleop) {
     const initialized = !!teleop.initialized;
     const started = !!teleop.started;
     const busy = !!state.ui.gripperInitBusy;
+    // Not while busy: params land mid-wait, before the hardware has settled.
+    const done = !busy && !!grippersInitialized;
 
     // Init must run after Connect but before Start (Tool.Switch is IDLE-only).
-    button.disabled = !initialized || started || busy;
+    button.disabled = !initialized || started || busy || done;
     button.classList.toggle("button--busy", busy);
-    setMarkupIfChanged(
-        button,
-        `gripper-init:${busy ? "busy" : "idle"}`,
-        busy
-            ? '<span class="button-spinner" aria-hidden="true"></span><span>Initializing …</span>'
-            : "Init",
-    );
+    button.classList.toggle("gripper-init--done", done);
+    let stateKey = "idle";
+    let markup = "Init";
+    if (busy) {
+        stateKey = "busy";
+        markup =
+            '<span class="button-spinner" aria-hidden="true"></span><span>Initializing …</span>';
+    } else if (done) {
+        stateKey = "done";
+        markup = "Initialized";
+    }
+    setMarkupIfChanged(button, `gripper-init:${stateKey}`, markup);
     button.title = !initialized
         ? "Connect teleoperation first"
-        : started
-            ? "Stop teleoperation before initializing grippers"
-            : "";
+        : done
+            ? "Grippers already initialized"
+            : started
+                ? "Stop teleoperation before initializing grippers"
+                : "";
 }
 
 async function initGrippers() {

@@ -38,8 +38,9 @@ dev = [
 #   pip install --no-deps 'pyorbbecsdk2>=2.1'
 #
 # Verified working against av 15.1.0. The wheel is published for CPython
-# 3.8-3.13 only (no sdist), so Orbbec cameras need a 3.12/3.13 environment;
-# elsewhere the app runs with Orbbec reported as unavailable.
+# 3.8-3.13 only (no sdist); this project supports 3.12 and 3.14, so Orbbec
+# cameras need a 3.12 environment. Elsewhere the app runs with Orbbec reported
+# as unavailable.
 orbbec = [
   "pyorbbecsdk2>=2.1; python_version < '3.14'",
 ]
