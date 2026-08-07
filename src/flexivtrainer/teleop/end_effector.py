@@ -30,6 +30,7 @@ The configuration is the per-side :class:`EndEffectorSideConfig` cached in
 
 from __future__ import annotations
 
+import math
 import threading
 from typing import Any
 
@@ -81,6 +82,7 @@ class EndEffectorController:
         controller: Any,
         sides: list[str],
         configs: dict[str, Any],
+        default_gripper_width_m: float | None = None,
     ) -> None:
         self._controller = controller
         # Arm sides and their config in pair-index order. The side name at index
@@ -90,6 +92,7 @@ class EndEffectorController:
         self._configs: list[EndEffectorSideConfig | None] = [
             _side_config(configs.get(side)) for side in self._sides
         ]
+        self._default_gripper_width_m = default_gripper_width_m
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         # Grippers enabled by initialize_grippers() (the panel's Init button) and
@@ -262,7 +265,13 @@ class EndEffectorController:
             # "not initialized" warning) so the rest of the mirror loop and teleop
             # keep running rather than raising on every tick.
             return
-        width = params.min_width if target == "close" else params.max_width
+        if target == "close":
+            width = params.min_width
+        else:
+            requested = self._default_gripper_width_m
+            width = params.max_width if requested is None else _clamp(
+                requested, params.min_width, params.max_width
+            )
         # Use the panel slider's velocity/force, falling back to the gripper's
         # own params-derived defaults until a slider sets them.
         velocity, force = self._move_params_for(index)
@@ -295,6 +304,52 @@ class EndEffectorController:
             force = _clamp(force, params.min_force, params.max_force)
         self._command_params[index] = (velocity, force)
         return velocity, force
+
+    def move_grippers_to_width(self, width: float) -> dict[str, Any]:
+        """Move every initialized gripper and make this the current Open width."""
+
+        requested = float(width)
+        if not math.isfinite(requested) or requested < 0:
+            raise ValueError("Gripper width must be finite and nonnegative")
+        self._default_gripper_width_m = requested
+        moved: dict[str, float] = {}
+        errors: dict[str, str] = {}
+        for index, cfg in enumerate(self._configs):
+            if cfg is None or cfg.follower != "gripper":
+                continue
+            gripper = self._grippers.get(index)
+            params = self._gripper_params.get(index)
+            side = self._sides[index]
+            if gripper is None or params is None:
+                errors[side] = "Gripper is not initialized"
+                continue
+            target = _clamp(requested, params.min_width, params.max_width)
+            if target != requested:
+                warn(
+                    f"Clamped gripper width for {side}",
+                    f"requested={requested:.4f} clamped={target:.4f} "
+                    f"range=[{params.min_width:.4f}, {params.max_width:.4f}]",
+                )
+            try:
+                velocity, force = self._move_params_for(index)
+                gripper.Move(target, velocity, force)
+                moved[side] = target
+                # A manual target may be between open and closed. Force the mirror
+                # loop to reassert its state on the next teleop start/tick.
+                self._last_gripper_target.pop(index, None)
+            except Exception as exc:  # pragma: no cover - hardware specific
+                message = describe_exception(exc)
+                warn(f"Failed to tune gripper width for {side}", message)
+                errors[side] = message
+        return {"widths": moved, "errors": errors}
+
+    def set_default_gripper_width(self, width: float | None) -> None:
+        """Refresh the Open target from the persisted global configuration."""
+
+        if width is not None and (not math.isfinite(width) or width < 0):
+            raise ValueError("Gripper width must be finite and nonnegative")
+        self._default_gripper_width_m = width
+        self._last_gripper_target.clear()
 
     @staticmethod
     def _follower_is_idle(follower: Any) -> bool:

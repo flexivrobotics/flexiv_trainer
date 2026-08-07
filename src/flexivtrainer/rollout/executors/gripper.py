@@ -22,6 +22,8 @@ import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any
 
+from flexivtrainer.observability import warn
+
 try:
     import flexivrdk
 except ImportError:  # pragma: no cover - environment-specific
@@ -39,6 +41,7 @@ class GripperExecutor:
     MAX_COMMAND_HZ = 30.0
     DUPLICATE_TOLERANCE_M = 0.0005
     FORCE_FRACTION = 0.25
+    INIT_SETTLE_S = 10.0
 
     def __init__(
         self,
@@ -53,6 +56,7 @@ class GripperExecutor:
         idle_mode: Any = None,
         target_source: Callable[[], Mapping[str, float]] | None = None,
         failure_event: threading.Event | None = None,
+        default_width_m: float | None = None,
         clock: Callable[[], float] = time.monotonic,
         wait: Callable[[threading.Event, float], bool] | None = None,
     ) -> None:
@@ -62,6 +66,10 @@ class GripperExecutor:
             raise ValueError(
                 f"command_hz must be in (0, {self.MAX_COMMAND_HZ:g}]"
             )
+        if default_width_m is not None and (
+            not math.isfinite(default_width_m) or default_width_m < 0
+        ):
+            raise ValueError("default_width_m must be finite and nonnegative")
 
         self._robots = dict(zip(sides, robots, strict=True))
         self._controlled_sides = tuple(dict.fromkeys(controlled_sides))
@@ -93,6 +101,7 @@ class GripperExecutor:
         self._idle_mode = default_idle_mode if idle_mode is None else idle_mode
         self._target_source = target_source
         self._failure_event = failure_event
+        self._default_width_m = default_width_m
         self._clock = clock
         self._wait = wait or (lambda event, timeout: event.wait(timeout))
         self._period = 1.0 / command_hz
@@ -148,6 +157,32 @@ class GripperExecutor:
             params = gripper.params()
             self._grippers[side] = gripper
             self._params[side] = params
+        if self._default_width_m is not None:
+            wait_event = self._failure_event or self._stop_event
+            if self._wait(wait_event, self.INIT_SETTLE_S):
+                raise RuntimeError("Gripper initialization was cancelled")
+            for side in self._controlled_sides:
+                params = self._params[side]
+                requested = float(self._default_width_m)
+                width = _clamp(
+                    requested, float(params.min_width), float(params.max_width)
+                )
+                if width != requested:
+                    warn(
+                        f"Clamped rollout gripper startup width for {side}",
+                        f"requested={requested:.4f} clamped={width:.4f} "
+                        f"range=[{float(params.min_width):.4f}, "
+                        f"{float(params.max_width):.4f}]",
+                    )
+                velocity = float(params.max_vel)
+                force = _clamp(
+                    float(params.max_force) * self.FORCE_FRACTION,
+                    float(params.min_force),
+                    float(params.max_force),
+                )
+                with self._io_locks[side]:
+                    self._grippers[side].Move(width, velocity, force)
+                self._last_sent[side] = width
         self._refresh_states()
 
     def measured_states(self) -> dict[str, dict[str, float]]:
@@ -266,3 +301,29 @@ class GripperExecutor:
             }
         with self._lock:
             self._measured = measured
+
+
+def initialize_gripper_executor(
+    robots: Sequence[Any],
+    sides: Sequence[str],
+    configs: Mapping[str, Any],
+    controlled_sides: Collection[str],
+    *,
+    failure_event: threading.Event,
+    default_width_m: float | None = None,
+    executor_factory: Callable[..., GripperExecutor] = GripperExecutor,
+) -> GripperExecutor | None:
+    """Create and initialize predicted grippers while their robots are IDLE."""
+
+    if not controlled_sides:
+        return None
+    kwargs: dict[str, Any] = {"failure_event": failure_event}
+    if default_width_m is not None:
+        kwargs["default_width_m"] = default_width_m
+    executor = executor_factory(robots, sides, configs, controlled_sides, **kwargs)
+    try:
+        executor.initialize()
+    except Exception:
+        executor.stop()
+        raise
+    return executor

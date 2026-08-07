@@ -51,6 +51,10 @@ class GripperParamsRequest(BaseModel):
     force: float = Field(gt=0)
 
 
+class GripperWidthRequest(BaseModel):
+    width: float = Field(ge=0, allow_inf_nan=False)
+
+
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
@@ -325,6 +329,25 @@ def set_gripper_params(
         raise HTTPException(
             status_code=409,
             detail=str(result.get("error") or "Failed to set gripper parameters"),
+        )
+    return result
+
+
+@router.post("/gripper/width")
+def set_gripper_width(
+    request: GripperWidthRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    result = runtime.teleop.set_gripper_width(request.width)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str(result.get("error") or "Failed to set gripper width"),
+        )
+    if result.get("errors"):
+        warn(
+            "Some grippers failed to move",
+            "; ".join(f"{side}={msg}" for side, msg in result["errors"].items()),
         )
     return result
 

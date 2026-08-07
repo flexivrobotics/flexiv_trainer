@@ -722,6 +722,36 @@ def test_bspline_gripper_contract_fails_before_robot_initialization(
     assert initialized == []
 
 
+def test_waypoint_gripper_contract_fails_before_robot_initialization(
+    tmp_path,
+) -> None:
+    names = [
+        *canonical_action_names(19, ["single_arm"]),
+        "single_arm.gripper.width",
+        "single_arm.gripper.force",
+    ]
+    checkpoint = _checkpoint_with_action_schema(tmp_path, names)
+    initialized: list[str] = []
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        _single_arm_pairs,
+        lambda: ["single_arm"],
+        get_end_effector_config=lambda: {
+            "single_arm": {"follower": "none"}
+        },
+        policy_loader=_fake_loader(_FakePolicy([0.0] * len(names))),
+        robot_factory=lambda serial: initialized.append(serial),
+        resolve_device=lambda configured: "cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="Waypoint.*no follower gripper"):
+        service.start(checkpoint)
+
+    assert initialized == []
+
+
 def test_robot_snapshot_includes_measured_gripper_telemetry(tmp_path) -> None:
     _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
 
@@ -761,6 +791,34 @@ def test_stop_releases_robot_when_gripper_shutdown_fails(tmp_path) -> None:
     assert service._robots == []
     assert status["status"] == "failed"
     assert "worker stuck" in status["error"]
+
+
+def test_waypoint_stop_releases_robot_when_gripper_shutdown_fails(
+    tmp_path,
+) -> None:
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
+
+    class FailingStop:
+        def stop(self) -> None:
+            raise RuntimeError("waypoint gripper worker stuck")
+
+    runner = object.__new__(WaypointRunner)
+    runner._robots = [robot]
+    runner._thread = None
+    runner._waypoint_executor = None
+    runner._gripper_executor = FailingStop()
+    runner._stop_robots = hardware.stop_robots
+
+    service._running = True
+    service._robots = [robot]
+    service._runner = runner
+
+    status = service.stop()
+
+    assert service._robots == []
+    assert status["status"] == "failed"
+    assert "waypoint gripper worker stuck" in status["error"]
 
 
 def _stub_cudagraph_state(monkeypatch) -> None:
@@ -938,6 +996,211 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
         "Waypoint action layout inferred" in entry
         for entry in service.status()["logs"]
     )
+
+
+def test_waypoint_rollout_schedules_gripper_width_and_observes_telemetry(
+    tmp_path, monkeypatch
+) -> None:
+    names = [
+        *canonical_action_names(19, ["single_arm"]),
+        "single_arm.gripper.width",
+        "single_arm.gripper.force",
+    ]
+    checkpoint = _checkpoint_with_action_schema(tmp_path, names)
+    action = [float(index) for index in range(19)] + [0.04, -3.0]
+    policy = _FakePolicy(action)
+    robot = _FakeRobot("F1")
+    instances = []
+
+    class FakeGripperExecutor:
+        def __init__(
+            self,
+            robots,
+            sides,
+            configs,
+            controlled_sides,
+            *,
+            failure_event,
+            default_width_m=None,
+        ) -> None:
+            self.robots = robots
+            self.sides = sides
+            self.configs = configs
+            self.controlled_sides = tuple(controlled_sides)
+            self.failure_event = failure_event
+            self.default_width_m = default_width_m
+            self.error = None
+            self.initialized_mode = object()
+            self.started = False
+            self.stopped = False
+            self.submissions: list[dict[str, float]] = []
+            instances.append(self)
+
+        def initialize(self) -> None:
+            self.initialized_mode = self.robots[0].mode
+
+        def measured_states(self) -> dict[str, dict[str, float]]:
+            return {"single_arm": {"width": 0.035, "force": -2.5}}
+
+        def submit(self, targets) -> None:
+            self.submissions.append(dict(targets))
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        _single_arm_pairs,
+        lambda: ["single_arm"],
+        get_end_effector_config=lambda: {
+            "single_arm": {
+                "follower": "gripper",
+                "gripper_model": "Flexiv-GN01",
+            }
+        },
+        get_gripper_default_width=lambda: 0.06,
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cpu",
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.runners.waypoint.GripperExecutor",
+        FakeGripperExecutor,
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+
+    service.start(checkpoint)
+    deadline = time.monotonic() + 2.0
+    while (
+        (not instances or not instances[0].submissions)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    status = service.stop()
+
+    assert len(instances) == 1
+    gripper = instances[0]
+    assert gripper.initialized_mode is None
+    assert gripper.default_width_m == pytest.approx(0.06)
+    assert gripper.started and gripper.stopped
+    assert gripper.submissions
+    assert gripper.submissions[0] == {"single_arm": pytest.approx(0.04)}
+    assert robot.mode == "cmf"
+    assert policy.batches
+    observed_state = policy.batches[0]["observation.state"]
+    assert observed_state[-2:] == pytest.approx([0.035, -2.5])
+    assert any(
+        "Waypoint gripper control enabled" in entry
+        and "force=device-limited" in entry
+        for entry in status["logs"]
+    )
+    assert any(
+        "cmd_gripper_width=0.0400" in entry
+        and "meas_gripper_width=0.0350" in entry
+        for entry in status["logs"]
+    )
+
+
+def test_waypoint_gripper_worker_failure_marks_rollout_failed(
+    tmp_path, monkeypatch
+) -> None:
+    names = [
+        *canonical_action_names(19, ["single_arm"]),
+        "single_arm.gripper.width",
+        "single_arm.gripper.force",
+    ]
+    checkpoint = _checkpoint_with_action_schema(tmp_path, names)
+    policy = _FakePolicy([float(index) for index in range(19)] + [0.04, -3.0])
+    robot = _FakeRobot("F1")
+
+    class FailingGripperExecutor:
+        def __init__(
+            self, robots, sides, configs, controlled_sides, *, failure_event
+        ) -> None:
+            self.failure_event = failure_event
+            self.error = None
+
+        def initialize(self) -> None:
+            pass
+
+        def measured_states(self) -> dict[str, dict[str, float]]:
+            return {"single_arm": {"width": 0.035, "force": -2.5}}
+
+        def submit(self, targets) -> None:
+            self.error = RuntimeError("Move failed")
+            self.failure_event.set()
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    service = RolloutService(
+        _settings(tmp_path),
+        _cameras(),
+        _teleop(initialized=False),
+        _single_arm_pairs,
+        lambda: ["single_arm"],
+        get_end_effector_config=lambda: {
+            "single_arm": {
+                "follower": "gripper",
+                "gripper_model": "Flexiv-GN01",
+            }
+        },
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot,
+        resolve_device=lambda configured: "cpu",
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.runners.waypoint.GripperExecutor",
+        FailingGripperExecutor,
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+
+    service.start(checkpoint)
+    deadline = time.monotonic() + 2.0
+    while (
+        service.status()["status"] == "running"
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    status = service.stop()
+
+    assert status["status"] == "failed"
+    assert "Waypoint gripper failed" in status["error"]
+    assert "Move failed" in status["error"]
 
 
 def test_dual_arm_act_without_wrench_uses_checkpoint_action_names(

@@ -72,6 +72,7 @@ class BSplineRunner:
         prepare_motion: Callable[[Any, str], None],
         image_resolutions: dict[str, tuple[int, int]] | None = None,
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
+        gripper_default_width_m: float | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -100,6 +101,7 @@ class BSplineRunner:
         self._release_robots = release_robots
         self._stop_robots = stop_robots
         self._prepare_motion = prepare_motion
+        self._gripper_default_width_m = gripper_default_width_m
 
         self._error: str | None = None
         self._stop_reason: str | None = None
@@ -175,15 +177,22 @@ class BSplineRunner:
                 handoff_max_accel=getattr(rollout_cfg, "handoff_max_accel", 2.0),
             )
             if self._bspline_layout.gripper_sides:
+                gripper_kwargs: dict[str, Any] = {
+                    "target_source": lambda: (
+                        bspline_executor.last_gripper_widths
+                    ),
+                    "failure_event": self._stop_event,
+                }
+                if self._gripper_default_width_m is not None:
+                    gripper_kwargs["default_width_m"] = (
+                        self._gripper_default_width_m
+                    )
                 gripper_executor = GripperExecutor(
                     robots,
                     self._sides,
                     self._end_effector_config,
                     self._bspline_layout.gripper_sides,
-                    target_source=lambda: (
-                        bspline_executor.last_gripper_widths
-                    ),
-                    failure_event=self._stop_event,
+                    **gripper_kwargs,
                 )
                 gripper_executor.initialize()
             for serial, robot in zip(self._followers, robots, strict=True):

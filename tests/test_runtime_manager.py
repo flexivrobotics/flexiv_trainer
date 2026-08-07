@@ -384,3 +384,15 @@ def test_saving_recording_preferences_does_not_bounce_services(tmp_path) -> None
     # A real hardware change still does restart them.
     manager.update_robot_config(RobotSerialConfig(arm_mode="single"))
     assert manager.shutdowns == ["recording", "teleop"]
+
+
+def test_gripper_default_width_persists_without_bouncing_services(tmp_path) -> None:
+    manager = _config_manager(tmp_path)
+    assert manager.get_gripper_default_width() is None
+
+    manager.update_robot_config(RobotSerialConfig(gripper_default_width_m=0.065))
+
+    assert manager.shutdowns == []
+    reloaded = _bare_manager(tmp_path)
+    reloaded._robot_config = reloaded._load_robot_config()
+    assert reloaded.get_gripper_default_width() == pytest.approx(0.065)

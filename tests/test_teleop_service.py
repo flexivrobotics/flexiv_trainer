@@ -641,6 +641,49 @@ def test_init_grippers_gated_and_cached(tmp_path, monkeypatch) -> None:
     service.stop()
 
 
+def test_global_gripper_width_moves_when_stopped_and_rejects_while_started(
+    tmp_path, monkeypatch
+) -> None:
+    import flexivtrainer.teleop.end_effector as ee
+    from flexivtrainer.config import EndEffectorSideConfig
+
+    monkeypatch.setattr(ee, "Gripper", _FakeGripper)
+    monkeypatch.setattr(ee, "Tool", _FakeTool)
+    monkeypatch.setattr(ee, "Mode", None)
+    service = TeleopService(
+        AppSettings(storage=StorageConfig(root=tmp_path)),
+        get_robot_pairs=lambda: [
+            TeleopRobotPair(
+                leader_serial="LEADER_A", follower_serial="FOLLOWER_A"
+            )
+        ],
+        get_active_sides=lambda: ["single_arm"],
+        get_end_effector_config=lambda: {
+            "single_arm": EndEffectorSideConfig(
+                leader="digital_input", follower="gripper"
+            )
+        },
+        get_gripper_default_width=lambda: 0.06,
+    )
+    service._controller = FakeEngageController()
+    service._initialized = True
+    assert service.init_grippers()["ok"] is True
+
+    result = service.set_gripper_width(0.07)
+    assert result == {
+        "ok": True,
+        "widths": {"single_arm": 0.07},
+        "errors": {},
+    }
+    assert service._end_effectors._grippers[0].moves[-1][0] == 0.07
+
+    service.start()
+    blocked = service.set_gripper_width(0.08)
+    assert blocked["ok"] is False
+    assert "Stop teleoperation" in blocked["error"]
+    service.stop()
+
+
 def test_engage_requires_started_control_loop(tmp_path) -> None:
     service = _configured_service(tmp_path)
     controller = service._controller

@@ -137,6 +137,7 @@ class RuntimeManager:
             self.get_teleop_robot_pairs,
             self.get_active_sides,
             self.get_end_effector_config,
+            self.get_gripper_default_width,
         )
         self.cameras = CameraService(settings)
         self.cameras.set_active_locations(
@@ -168,6 +169,7 @@ class RuntimeManager:
                 self.get_teleop_robot_pairs,
                 self.get_active_sides,
                 get_end_effector_config=self.get_end_effector_config,
+                get_gripper_default_width=self.get_gripper_default_width,
             )
         # Depth->color alignment starves the policy loop of the GIL, and the
         # rollout reads no depth, so forbid viewer-driven alignment while one
@@ -202,6 +204,9 @@ class RuntimeManager:
 
     def get_end_effector_config(self) -> dict[str, Any]:
         return self._robot_config.end_effector_config
+
+    def get_gripper_default_width(self) -> float | None:
+        return self._robot_config.gripper_default_width_m
 
     def _rollout_is_running(self) -> bool:
         try:
@@ -273,7 +278,11 @@ class RuntimeManager:
     def update_robot_config(self, payload: RobotSerialConfig) -> dict[str, Any]:
         normalized = payload.normalized()
         # These save on every toggle; they must not bounce the services.
-        ignored = {"recording_entries": [], "record_resolution": ""}
+        ignored = {
+            "recording_entries": [],
+            "record_resolution": "",
+            "gripper_default_width_m": None,
+        }
         changed = normalized.model_copy(update=ignored) != (
             self._robot_config.model_copy(update=ignored)
         )

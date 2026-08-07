@@ -33,7 +33,11 @@ from flexivtrainer.observability import (
     error,
     warn,
 )
-from flexivtrainer.rollout import _cudagraph_state, observations
+from flexivtrainer.rollout import _cudagraph_state, hardware, observations
+from flexivtrainer.rollout.executors.gripper import (
+    GripperExecutor,
+    initialize_gripper_executor,
+)
 from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     normalize_pose_quaternion,
@@ -51,6 +55,7 @@ class WaypointRunner:
         postprocessor: Any,
         robots: list[Any],
         sides: list[str],
+        followers: list[str],
         cameras: Any,
         rollout_cfg: Any,
         target_hz: float,
@@ -58,6 +63,8 @@ class WaypointRunner:
         task: str | None,
         action_layout: list[dict[str, Any]],
         action_dim: int,
+        gripper_sides: tuple[str, ...],
+        end_effector_config: dict[str, Any],
         motion_limits: tuple[float, float, float, float],
         planner_hz_fallback: float,
         expected_hz_fallback: float,
@@ -66,12 +73,15 @@ class WaypointRunner:
         append_log: Callable[..., None],
         append_metric: Callable[[dict[str, Any]], None],
         on_error: Callable[[str], None],
+        on_cleanup_error: Callable[[str], None],
         on_finished: Callable[[str | None, int], None],
         release_robots: Callable[[], None],
+        stop_robots: Callable[[list[Any]], None],
         prepare_policy: Callable[[Any], None] | None = None,
         uses_cuda_graphs: bool = False,
         image_resolutions: dict[str, tuple[int, int]] | None = None,
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
+        gripper_default_width_m: float | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -96,8 +106,10 @@ class WaypointRunner:
         self._append_wrench = append_wrench
         self._last_wrench_t = 0.0
         self._on_error = on_error
+        self._on_cleanup_error = on_cleanup_error
         self._on_finished = on_finished
         self._release_robots = release_robots
+        self._stop_robots = stop_robots
         self._prepare_policy = prepare_policy
         self._uses_cuda_graphs = uses_cuda_graphs
 
@@ -105,6 +117,30 @@ class WaypointRunner:
         self._stop_reason: str | None = None
         self._thread: threading.Thread | None = None
         self._waypoint_executor: WaypointExecutor | None = None
+        gripper: GripperExecutor | None = None
+        try:
+            gripper = initialize_gripper_executor(
+                robots,
+                sides,
+                end_effector_config,
+                gripper_sides,
+                failure_event=stop_event,
+                default_width_m=gripper_default_width_m,
+                executor_factory=GripperExecutor,
+            )
+            for serial, robot in zip(followers, robots, strict=True):
+                hardware.prepare_robot_motion(
+                    robot, serial, stop_event, append_log
+                )
+        except Exception as exc:
+            if gripper is not None:
+                gripper.stop()
+            stop_robots(robots)
+            raise RuntimeError(
+                "Failed to prepare waypoint rollout hardware: "
+                f"{describe_exception(exc)}"
+            ) from exc
+        self._gripper_executor = gripper
 
     def start(self) -> None:
         thread = threading.Thread(
@@ -121,6 +157,13 @@ class WaypointRunner:
         executor = self._waypoint_executor
         if executor is not None:
             executor.join()
+        gripper = self._gripper_executor
+        if gripper is not None:
+            try:
+                gripper.stop()
+            except Exception as exc:
+                self._stop_robots(list(self._robots))
+                cleanup_errors.append(describe_exception(exc))
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
@@ -128,6 +171,8 @@ class WaypointRunner:
                 cleanup_errors.append("Rollout planner did not stop cleanly")
         alive = thread is not None and thread.is_alive()
         self._thread = thread if alive else None
+        self._waypoint_executor = None
+        self._gripper_executor = None
         return cleanup_errors
 
     def is_alive(self) -> bool:
@@ -159,6 +204,7 @@ class WaypointRunner:
         max_steps = self._max_steps
         camera_names = resolve_recording_image_names(None, sides)
         layout = self._action_layout
+        gripper = self._gripper_executor
         # Off by default: _actions_to_lists already syncs the tensors it copies,
         # so this only shifts GPU wait out of infer_ms and into to_list.
         debug_timing = bool(getattr(rollout_cfg, "debug_timing", False))
@@ -195,10 +241,27 @@ class WaypointRunner:
                 self._stop_event,
                 self._motion_limits,
                 action_dim=self._action_dim,
+                submit_gripper=(gripper.submit if gripper is not None else None),
             )
             self._waypoint_executor = waypoint_executor
+            if gripper is not None:
+                gripper.start()
             waypoint_executor.start()
-            while not self._stop_event.is_set():
+            while True:
+                if self._stop_event.is_set():
+                    if waypoint_executor.error is not None:
+                        raise RuntimeError(waypoint_executor.error)
+                    if gripper is not None and gripper.error is not None:
+                        raise RuntimeError(
+                            "Waypoint gripper failed: "
+                            f"{describe_exception(gripper.error)}"
+                        )
+                    break
+                if gripper is not None and gripper.error is not None:
+                    raise RuntimeError(
+                        "Waypoint gripper failed: "
+                        f"{describe_exception(gripper.error)}"
+                    )
                 loop_start = time.monotonic()
                 loop_period = (
                     loop_start - previous_loop_start
@@ -223,7 +286,12 @@ class WaypointRunner:
                 stage_times["grab_images"].append(now - mark)
                 mark = now
 
-                snapshot = observations.read_robot_snapshot(robots)
+                gripper_states = (
+                    gripper.measured_states() if gripper is not None else None
+                )
+                snapshot = observations.read_robot_snapshot(
+                    robots, gripper_states, sides
+                )
                 now = time.monotonic()
                 stage_times["read_states"].append(now - mark)
                 mark = now
@@ -333,7 +401,16 @@ class WaypointRunner:
             if waypoint_executor is not None:
                 self._stop_event.set()
                 waypoint_executor.join()
+            if gripper is not None:
+                try:
+                    gripper.stop()
+                except Exception as exc:
+                    self._stop_robots(robots)
+                    detail = describe_exception(exc)
+                    warn("Waypoint gripper shutdown failed", detail)
+                    self._on_cleanup_error(detail)
             self._waypoint_executor = None
+            self._gripper_executor = None
             # Drop anything that can alias a CUDA-graph output buffer before
             # tearing the pool down, or its memory cannot be reclaimed.
             actions = None
@@ -421,10 +498,24 @@ class WaypointRunner:
                 list(action[twist_slice]) if twist_slice is not None else []
             )
             measured: list[float] = []
+            measured_gripper: dict[str, Any] = {}
             if index < len(payloads) and isinstance(payloads[index], dict):
                 states = payloads[index].get("states")
                 if isinstance(states, dict):
                     measured = list(states.get("tcp_pose") or [])
+                gripper_payload = payloads[index].get("gripper")
+                if isinstance(gripper_payload, dict):
+                    measured_gripper = gripper_payload
+            gripper_width_index = plan.get("gripper_width")
+            gripper_detail = ""
+            if isinstance(gripper_width_index, int):
+                gripper_detail = (
+                    f" cmd_gripper_width={float(action[gripper_width_index]):.4f}"
+                    " meas_gripper_width="
+                    f"{self._fmt_scalar(measured_gripper.get('width'))}"
+                    " meas_gripper_force="
+                    f"{self._fmt_scalar(measured_gripper.get('force'))}"
+                )
             self._append_log(
                 "INFO",
                 "ROLLOUT",
@@ -433,6 +524,7 @@ class WaypointRunner:
                     f"cmd_xyz={self._fmt_xyz(commanded)} "
                     f"meas_xyz={self._fmt_xyz(measured)} "
                     f"cmd_twist={self._fmt_vector(commanded_twist)}"
+                    f"{gripper_detail}"
                 ),
             )
 
@@ -447,3 +539,10 @@ class WaypointRunner:
         if not vector:
             return "n/a"
         return "[" + ", ".join(f"{value:.3f}" for value in vector) + "]"
+
+    @staticmethod
+    def _fmt_scalar(value: Any) -> str:
+        try:
+            return f"{float(value):.4f}"
+        except (TypeError, ValueError):
+            return "n/a"
