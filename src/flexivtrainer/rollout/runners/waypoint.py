@@ -42,6 +42,7 @@ from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     normalize_pose_quaternion,
 )
+from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
 
 class WaypointRunner:
@@ -82,6 +83,7 @@ class WaypointRunner:
         image_resolutions: dict[str, tuple[int, int]] | None = None,
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
         gripper_default_width_m: float | None = None,
+        gripper_initialization_registry: GripperInitializationRegistry | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -126,6 +128,9 @@ class WaypointRunner:
                 gripper_sides,
                 failure_event=stop_event,
                 default_width_m=gripper_default_width_m,
+                followers=followers,
+                initialization_registry=gripper_initialization_registry,
+                append_log=append_log,
                 executor_factory=GripperExecutor,
             )
             for serial, robot in zip(followers, robots, strict=True):

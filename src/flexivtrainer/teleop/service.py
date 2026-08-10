@@ -27,6 +27,11 @@ from flexivtrainer.config import (
     TeleopRobotPair,
 )
 from flexivtrainer.observability import describe_exception, info, warn
+from flexivtrainer.runtime.gripper_session import (
+    GripperIdentity,
+    GripperInitializationRegistry,
+    GripperInitializationState,
+)
 from flexivtrainer.teleop.end_effector import EndEffectorController
 
 try:
@@ -94,6 +99,8 @@ class TeleopService:
             Callable[[], dict[str, EndEffectorSideConfig]] | None
         ) = None,
         get_gripper_default_width: Callable[[], float | None] | None = None,
+        gripper_initialization_registry: GripperInitializationRegistry | None = None,
+        gripper_init_settle_s: float = EndEffectorController.INIT_SETTLE_S,
     ) -> None:
         self._settings = settings
         self._get_robot_pairs = get_robot_pairs or (lambda: settings.teleop_robot_pairs)
@@ -105,6 +112,8 @@ class TeleopService:
         )
         self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._get_gripper_default_width = get_gripper_default_width or (lambda: None)
+        self._gripper_initialization_registry = gripper_initialization_registry
+        self._gripper_init_settle_s = gripper_init_settle_s
         self._controller: Any | None = None
         self._error: str | None = None
         self._initialized = False
@@ -119,7 +128,31 @@ class TeleopService:
         # gated by engage -- it keeps mirroring across engage/disengage cycles.
         self._end_effectors: EndEffectorController | None = None
         self._gripper_initializing = False
+        self._gripper_init_lock = threading.Lock()
         self._gripper_move_lock = threading.Lock()
+
+    @staticmethod
+    def _config_value(config: Any, name: str) -> Any:
+        if isinstance(config, dict):
+            return config.get(name)
+        return getattr(config, name, None)
+
+    def _gripper_identities(self) -> dict[str, GripperIdentity]:
+        identities: dict[str, GripperIdentity] = {}
+        sides = self._get_active_sides()
+        pairs = self._get_robot_pairs()
+        configs = self._get_end_effector_config() or {}
+        for index, side in enumerate(sides):
+            if index >= len(pairs):
+                continue
+            config = configs.get(side)
+            if self._config_value(config, "follower") != "gripper":
+                continue
+            serial = str(pairs[index].follower_serial).strip()
+            model = str(self._config_value(config, "gripper_model") or "").strip()
+            if serial and model:
+                identities[side] = GripperIdentity(serial, model)
+        return identities
 
     def _configured_remote_serials(self) -> list[str]:
         serials: list[str] = []
@@ -464,15 +497,16 @@ class TeleopService:
                 self._get_active_sides(),
                 dict(self._get_end_effector_config() or {}),
                 self._get_gripper_default_width(),
+                gripper_identities=self._gripper_identities(),
+                initialization_registry=self._gripper_initialization_registry,
+                init_settle_s=self._gripper_init_settle_s,
             )
         except Exception:  # pragma: no cover - hardware specific
             self._end_effectors = None
 
-    def init_grippers(self) -> dict[str, Any]:
-        # Enable + tool-switch + Init + read params for every configured gripper.
-        # Run from the panel's Init button after connect but before Start, while
-        # the follower is IDLE (Tool.Switch() is IDLE-only). The enabled grippers
-        # and their params persist across teleop start/stop until disconnect.
+    def init_grippers(self, *, force: bool = False) -> dict[str, Any]:
+        # Prepare service-local handles for every configured gripper. The shared
+        # process registry decides whether to issue the physical Init() cycle.
         if self._controller is None:
             return {
                 "ok": False,
@@ -486,17 +520,31 @@ class TeleopService:
         self._ensure_end_effectors()
         if self._end_effectors is None or not self._end_effectors.has_grippers():
             return {"ok": False, "error": "No grippers configured"}
-        if self._gripper_initializing:
+        if not self._gripper_init_lock.acquire(blocking=False):
             return {"ok": False, "error": "Gripper initialization is already running"}
         self._gripper_initializing = True
         try:
-            errors = self._end_effectors.initialize_grippers()
+            preparation = self._end_effectors.initialize_grippers(force=force)
             snapshot = self._end_effectors.gripper_snapshot()
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
         finally:
             self._gripper_initializing = False
+            self._gripper_init_lock.release()
+        errors = preparation["errors"]
         if errors and not snapshot:
             return {"ok": False, "error": "; ".join(errors.values())}
-        return {"ok": True, "gripper": snapshot, "errors": errors}
+        return {
+            "ok": True,
+            "gripper": snapshot,
+            "errors": errors,
+            "initialized_now": preparation["initialized_now"],
+            "reused": preparation["reused"],
+            "widths": preparation["widths"],
+        }
+
+    def reinitialize_grippers(self) -> dict[str, Any]:
+        return self.init_grippers(force=True)
 
     def _teardown_end_effectors(self) -> None:
         if self._end_effectors is not None:
@@ -595,6 +643,24 @@ class TeleopService:
         if self._end_effectors is None:
             return {}
         return self._end_effectors.gripper_snapshot()
+
+    def gripper_session_snapshot(self) -> dict[str, str]:
+        """Process-lifetime initialization state for each configured gripper."""
+
+        registry = self._gripper_initialization_registry
+        local = self.gripper_snapshot()
+        return {
+            side: (
+                registry.state(identity).value
+                if registry is not None
+                else (
+                    GripperInitializationState.READY.value
+                    if side in local
+                    else GripperInitializationState.UNINITIALIZED.value
+                )
+            )
+            for side, identity in self._gripper_identities().items()
+        }
 
     def set_gripper_params(
         self, side: str, velocity: float, force: float

@@ -309,6 +309,46 @@ def test_gripper_moves_to_activated_state(monkeypatch) -> None:
     assert len(gripper.moves) == moves_before
 
 
+def test_cached_takeover_blocks_open_until_leader_requests_close(monkeypatch) -> None:
+    monkeypatch.setattr(ee, "Gripper", FakeGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+
+    follower = FakeFollower()
+    tdk = FakeTDK(follower, [False] * 18)
+    cfg = EndEffectorSideConfig(
+        leader="digital_input",
+        leader_channel=0,
+        follower="gripper",
+        gripper_activated_state="close",
+    )
+    ctl = ee.EndEffectorController(
+        tdk,
+        ["single_arm"],
+        {"single_arm": cfg},
+        default_gripper_width_m=0.06,
+    )
+    ctl._setup_gripper(0, ctl._configs[0], initialize=False)
+    ctl._takeover_pending.add(0)
+    gripper = ctl._grippers[0]
+
+    # The initial inactive input computes Open, but the cached handoff latch
+    # preserves the rollout grasp and sends no hardware command.
+    ctl._tick(0, ctl._configs[0])
+    assert gripper.moves == []
+    assert ctl.gripper_snapshot()["single_arm"]["takeover_pending"] is True
+
+    # Close is accepted without any preceding Open and arms normal mirroring.
+    tdk._leader_ports[0] = True
+    ctl._tick(0, ctl._configs[0])
+    assert gripper.moves == [(0.0, 0.5, 12.5)]
+    assert ctl.gripper_snapshot()["single_arm"]["takeover_pending"] is False
+
+    # Releasing after the deliberate Close now opens to the configured default.
+    tdk._leader_ports[0] = False
+    ctl._tick(0, ctl._configs[0])
+    assert gripper.moves[-1] == (0.06, 0.5, 12.5)
+
+
 def test_default_width_replaces_open_target_and_manual_tuning_clamps(
     monkeypatch,
 ) -> None:

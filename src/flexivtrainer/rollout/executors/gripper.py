@@ -22,7 +22,11 @@ import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any
 
-from flexivtrainer.observability import warn
+from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.runtime.gripper_session import (
+    GripperIdentity,
+    GripperInitializationRegistry,
+)
 
 try:
     import flexivrdk
@@ -57,11 +61,20 @@ class GripperExecutor:
         target_source: Callable[[], Mapping[str, float]] | None = None,
         failure_event: threading.Event | None = None,
         default_width_m: float | None = None,
+        followers: Sequence[str] | None = None,
+        initialization_registry: GripperInitializationRegistry | None = None,
+        append_log: Callable[..., None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         wait: Callable[[threading.Event, float], bool] | None = None,
     ) -> None:
         if len(robots) != len(sides):
             raise ValueError("Robot and side counts must match")
+        if followers is not None and len(followers) != len(sides):
+            raise ValueError("Follower serial and side counts must match")
+        if initialization_registry is not None and followers is None:
+            raise ValueError(
+                "Follower serials are required with an initialization registry"
+            )
         if not math.isfinite(command_hz) or not 0 < command_hz <= self.MAX_COMMAND_HZ:
             raise ValueError(
                 f"command_hz must be in (0, {self.MAX_COMMAND_HZ:g}]"
@@ -72,6 +85,9 @@ class GripperExecutor:
             raise ValueError("default_width_m must be finite and nonnegative")
 
         self._robots = dict(zip(sides, robots, strict=True))
+        self._followers = (
+            dict(zip(sides, followers, strict=True)) if followers is not None else {}
+        )
         self._controlled_sides = tuple(dict.fromkeys(controlled_sides))
         self._configs = {
             side: self._config_for_side(configs, side)
@@ -102,6 +118,8 @@ class GripperExecutor:
         self._target_source = target_source
         self._failure_event = failure_event
         self._default_width_m = default_width_m
+        self._initialization_registry = initialization_registry
+        self._append_log = append_log
         self._clock = clock
         self._wait = wait or (lambda event, timeout: event.wait(timeout))
         self._period = 1.0 / command_hz
@@ -135,7 +153,7 @@ class GripperExecutor:
             return self._error
 
     def initialize(self) -> None:
-        """Initialize every predicted gripper while its robot is idle."""
+        """Prepare every predicted gripper while its robot is idle."""
         if self._gripper_factory is None or self._tool_factory is None:
             raise RuntimeError("flexivrdk is unavailable; cannot control grippers")
         if self._idle_mode is None:
@@ -148,20 +166,90 @@ class GripperExecutor:
                 raise RuntimeError(
                     f"Follower robot must be IDLE to initialize gripper: {side}"
                 )
+
+        registry = self._initialization_registry
+        identities = {
+            side: GripperIdentity(
+                str(self._followers[side]).strip(),
+                str(
+                    self._config_value(self._configs[side], "gripper_model") or ""
+                ).strip(),
+            )
+            for side in self._controlled_sides
+            if registry is not None
+        }
+        claim = registry.claim(identities.values()) if registry is not None else None
+        claimed = set(claim.initialize) if claim else set()
+        reused = set(claim.reused) if claim else set()
+
+        prepared_sides: list[str] = []
+        initialized_sides: list[str] = []
+        initialized_identities: list[GripperIdentity] = []
+        errors: dict[str, str] = {}
+        for side in self._controlled_sides:
             config = self._configs[side]
-            gripper = self._gripper_factory(robot)
+            robot = self._robots[side]
             model = self._config_value(config, "gripper_model")
-            gripper.Enable(model)
-            self._tool_factory(robot).Switch(model)
-            gripper.Init()
-            params = gripper.params()
-            self._grippers[side] = gripper
-            self._params[side] = params
-        if self._default_width_m is not None:
+            identity = identities.get(side)
+            should_initialize = registry is None or identity in claimed
+            try:
+                gripper = self._gripper_factory(robot)
+                gripper.Enable(model)
+                self._tool_factory(robot).Switch(model)
+                if should_initialize:
+                    gripper.Init()
+                params = gripper.params()
+                self._grippers[side] = gripper
+                self._params[side] = params
+                prepared_sides.append(side)
+                if should_initialize:
+                    initialized_sides.append(side)
+                    if identity is not None:
+                        initialized_identities.append(identity)
+                elif identity in reused:
+                    self._log_session(
+                        "Preserved gripper width for session handoff",
+                        side,
+                        identity,
+                    )
+            except Exception as exc:
+                message = describe_exception(exc)
+                if identity in reused:
+                    message = self._with_reinitialize_instruction(message)
+                errors[side] = message
+                if registry is not None and identity in claimed:
+                    registry.fail([identity])
+
+        wait_for_initialization = bool(initialized_sides) and (
+            registry is not None or self._default_width_m is not None
+        )
+        if wait_for_initialization:
             wait_event = self._failure_event or self._stop_event
             if self._wait(wait_event, self.INIT_SETTLE_S):
-                raise RuntimeError("Gripper initialization was cancelled")
-            for side in self._controlled_sides:
+                if registry is not None:
+                    registry.fail(initialized_identities)
+                for side in initialized_sides:
+                    errors.setdefault(side, "Gripper initialization was cancelled")
+                    if side in prepared_sides:
+                        prepared_sides.remove(side)
+                initialized_sides = []
+                initialized_identities = []
+            elif registry is not None:
+                registry.complete(initialized_identities)
+                for side, identity in zip(
+                    initialized_sides, initialized_identities, strict=True
+                ):
+                    self._log_session(
+                        "Initialized gripper for backend session", side, identity
+                    )
+
+        # complete() has moved successful claims to READY; fail() deliberately
+        # leaves those entries intact while releasing partial failures.
+        if registry is not None:
+            registry.fail(claimed - set(initialized_identities))
+
+        if self._default_width_m is not None:
+            for side in initialized_sides:
                 params = self._params[side]
                 requested = float(self._default_width_m)
                 width = _clamp(
@@ -180,10 +268,52 @@ class GripperExecutor:
                     float(params.min_force),
                     float(params.max_force),
                 )
-                with self._io_locks[side]:
-                    self._grippers[side].Move(width, velocity, force)
-                self._last_sent[side] = width
-        self._refresh_states()
+                try:
+                    with self._io_locks[side]:
+                        self._grippers[side].Move(width, velocity, force)
+                    self._last_sent[side] = width
+                    self._log_session(
+                        "Moved gripper to session default width",
+                        side,
+                        identities.get(side),
+                        detail=f"width={width:.4f} m",
+                    )
+                except Exception as exc:
+                    message = describe_exception(exc)
+                    if identities.get(side) in reused:
+                        message = self._with_reinitialize_instruction(message)
+                    errors[side] = message
+
+        if errors:
+            detail = "; ".join(
+                f"{side}: {message}" for side, message in errors.items()
+            )
+            raise RuntimeError(f"Gripper preparation failed: {detail}")
+        try:
+            self._refresh_states()
+        except Exception as exc:
+            message = describe_exception(exc)
+            if reused:
+                message = self._with_reinitialize_instruction(message)
+            raise RuntimeError(message) from exc
+
+    @staticmethod
+    def _with_reinitialize_instruction(message: str) -> str:
+        return f"{message}. Reinitialize the gripper from teleop and retry rollout"
+
+    def _log_session(
+        self,
+        message: str,
+        side: str,
+        identity: GripperIdentity | None,
+        *,
+        detail: str = "",
+    ) -> None:
+        if self._append_log is None:
+            return
+        identity_detail = identity.describe() if identity is not None else ""
+        combined = " ".join(part for part in (identity_detail, detail) if part)
+        self._append_log("INFO", "GRIPPER", f"{message}: {side}", combined)
 
     def measured_states(self) -> dict[str, dict[str, float]]:
         """Return measured width and force keyed by arm side."""
@@ -311,6 +441,9 @@ def initialize_gripper_executor(
     *,
     failure_event: threading.Event,
     default_width_m: float | None = None,
+    followers: Sequence[str] | None = None,
+    initialization_registry: GripperInitializationRegistry | None = None,
+    append_log: Callable[..., None] | None = None,
     executor_factory: Callable[..., GripperExecutor] = GripperExecutor,
 ) -> GripperExecutor | None:
     """Create and initialize predicted grippers while their robots are IDLE."""
@@ -320,6 +453,12 @@ def initialize_gripper_executor(
     kwargs: dict[str, Any] = {"failure_event": failure_event}
     if default_width_m is not None:
         kwargs["default_width_m"] = default_width_m
+    if initialization_registry is not None:
+        kwargs.update(
+            followers=followers,
+            initialization_registry=initialization_registry,
+            append_log=append_log,
+        )
     executor = executor_factory(robots, sides, configs, controlled_sides, **kwargs)
     try:
         executor.initialize()

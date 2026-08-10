@@ -150,9 +150,10 @@ const state = {
         // only rebuilt when the set of gripper sides or their params change, so
         // velocity/force inputs aren't clobbered on every status poll.
         gripperPanelSignature: null,
-        // True while the Gripper Control Init request (and its post-Init wait)
-        // is in flight.
+        // True while the backend prepares or mechanically reinitializes the
+        // configured grippers. The backend owns the physical settling wait.
         gripperInitBusy: false,
+        gripperInitAction: null,
         serviceResetBusy: {
             teleop_service: false,
             cameras: false,
@@ -3766,10 +3767,6 @@ const GRIPPER_SIDE_LABELS = {
     single_arm: "",
 };
 
-// After Init triggers gripper.Init() on the backend, wait this long for the
-// gripper hardware to finish initializing before unblocking the panel.
-const GRIPPER_INIT_WAIT_MS = 10000;
-
 function gripperConfiguredSides() {
     const eec = state.summary?.robot_config?.end_effector_config || {};
     return getActiveSides().filter((side) => eec[side]?.follower === "gripper");
@@ -3799,6 +3796,7 @@ function renderGripperControl(teleopStatus) {
     }
 
     const grippers = teleopStatus?.gripper || {};
+    const gripperSession = teleopStatus?.gripper_session || {};
     // Rebuild the panel structure (and re-seed the sliders) only when the set of
     // sides or their params availability changes, so dragging a slider isn't
     // clobbered by the ~10Hz status poll.
@@ -3811,25 +3809,51 @@ function renderGripperControl(teleopStatus) {
     }
 
     const teleop = teleopStatus?.teleop || {};
-    const allInitialized = sides.every((side) => !!grippers[side]);
-    updateGripperInitButton(teleop, allInitialized);
-    updateGlobalGripperWidthControl(teleop, allInitialized);
+    const allPrepared = sides.every((side) => !!grippers[side]);
+    const allSessionReady = sides.every(
+        (side) => gripperSession[side] === "ready",
+    );
+    const anySessionReady = sides.some(
+        (side) => gripperSession[side] === "ready",
+    );
+    updateGripperInitButton(
+        teleop,
+        allPrepared,
+        allSessionReady,
+        anySessionReady,
+    );
+    updateGlobalGripperWidthControl(teleop, allPrepared);
     sides.forEach((side) =>
-        updateGripperControlBlock(side, grippers[side], teleop),
+        updateGripperControlBlock(
+            side,
+            grippers[side],
+            teleop,
+            gripperSession[side],
+        ),
     );
 }
 
 function buildGripperControlPanel(content, sides, grippers) {
     content.innerHTML = "";
 
-    // Panel-level Init button: enables/switches/inits/reads-params for all
-    // grippers. Only valid while teleop is not started (Tool.Switch is IDLE-only).
+    // Preparation always creates connection-local handles and reads parameters;
+    // the backend session registry decides whether mechanical Init is needed.
+    const actions = document.createElement("div");
+    actions.className = "gripper-init-actions";
     const initButton = document.createElement("button");
     initButton.type = "button";
     initButton.className = "secondary-button gripper-init";
-    initButton.textContent = "Init";
+    initButton.textContent = "Initialize";
     initButton.onclick = () => initGrippers();
-    content.appendChild(initButton);
+    actions.appendChild(initButton);
+
+    const reinitButton = document.createElement("button");
+    reinitButton.type = "button";
+    reinitButton.className = "secondary-button gripper-reinitialize hidden";
+    reinitButton.textContent = "Reinit";
+    reinitButton.onclick = () => reinitializeGrippers();
+    actions.appendChild(reinitButton);
+    content.appendChild(actions);
 
     buildGlobalGripperWidthControl(content, sides, grippers);
 
@@ -3923,7 +3947,7 @@ function buildGlobalGripperWidthControl(content, sides, grippers) {
         slider.disabled = true;
         setButton.disabled = true;
         block.querySelector(".gripper-width-note").textContent =
-            "Initialize all configured grippers to tune their shared width.";
+            "Prepare all configured grippers to tune their shared width.";
         return;
     }
 
@@ -4127,7 +4151,7 @@ async function sendGripperParams(side) {
     }
 }
 
-function updateGripperControlBlock(side, params, teleop) {
+function updateGripperControlBlock(side, params, teleop, sessionState) {
     const block = byId("teleop-gripper-content")?.querySelector(
         `.gripper-control-block[data-side="${side}"]`,
     );
@@ -4142,63 +4166,97 @@ function updateGripperControlBlock(side, params, teleop) {
     let warn = false;
     if (initializing) {
         message = "Initializing gripper …";
+    } else if (params?.takeover_pending) {
+        message = "Grasp preserved — request Close once to enable opening.";
     } else if (!params && started) {
-        // Configured but not initialized while teleop runs: the mirror thread
-        // skips it. Surface a warning -- Init requires stopping teleop first.
+        // Configured but not prepared on this teleop connection: the mirror
+        // thread skips it. Preparation requires stopping teleop first.
         message =
-            "Gripper not initialized — it cannot be controlled. Stop teleop, then click Init.";
+            "Gripper not prepared — it cannot be controlled. Stop teleop, then prepare it.";
         warn = true;
+    } else if (!params && sessionState === "ready") {
+        message = "Already initialized this session. Click Prepare to connect it.";
     } else if (!params) {
-        message = "Click Init to enable this gripper.";
+        message = "Click Initialize to bring up this gripper.";
     }
     hint.textContent = message;
     hint.classList.toggle("hidden", message === "");
     hint.classList.toggle("gripper-control-warning", warn);
 }
 
-function updateGripperInitButton(teleop, grippersInitialized) {
+function updateGripperInitButton(
+    teleop,
+    grippersPrepared,
+    sessionReady,
+    anySessionReady,
+) {
     const button = byId("teleop-gripper-content")?.querySelector(".gripper-init");
-    if (!button) {
+    const reinitButton = byId("teleop-gripper-content")?.querySelector(
+        ".gripper-reinitialize",
+    );
+    if (!button || !reinitButton) {
         return;
     }
     const initialized = !!teleop.initialized;
     const started = !!teleop.started;
     const busy = !!state.ui.gripperInitBusy;
-    // Not while busy: params land mid-wait, before the hardware has settled.
-    const done = !busy && !!grippersInitialized;
+    const done = !busy && !!grippersPrepared;
+    const reinitializing = state.ui.gripperInitAction === "reinitialize";
 
-    // Init must run after Connect but before Start (Tool.Switch is IDLE-only).
+    // Preparation must run after Connect but before Start (Tool.Switch is
+    // IDLE-only). A session-ready gripper uses the fast Prepare path.
     button.disabled = !initialized || started || busy || done;
     button.classList.toggle("button--busy", busy);
     button.classList.toggle("gripper-init--done", done);
     let stateKey = "idle";
-    let markup = "Init";
+    let markup = sessionReady ? "Prepare" : "Initialize";
     if (busy) {
         stateKey = "busy";
         markup =
-            '<span class="button-spinner" aria-hidden="true"></span><span>Initializing …</span>';
+            `<span class="button-spinner" aria-hidden="true"></span><span>${reinitializing ? "Reinitializing" : sessionReady ? "Preparing" : "Initializing"} …</span>`;
     } else if (done) {
         stateKey = "done";
-        markup = "Initialized";
+        markup = "Ready";
     }
     setMarkupIfChanged(button, `gripper-init:${stateKey}`, markup);
     button.title = !initialized
         ? "Connect teleoperation first"
         : done
-            ? "Grippers already initialized"
+            ? "Grippers are ready on this teleop connection"
             : started
-                ? "Stop teleoperation before initializing grippers"
-                : "";
+                ? "Stop teleoperation before preparing grippers"
+                : sessionReady
+                    ? "Use initialization cached by this backend session"
+                    : "Runs the gripper close/open initialization cycle";
+
+    const showReinitialize = done || anySessionReady;
+    reinitButton.classList.toggle("hidden", !showReinitialize);
+    reinitButton.disabled = !initialized || started || busy || !showReinitialize;
+    reinitButton.classList.toggle("button--busy", busy && reinitializing);
+    setMarkupIfChanged(
+        reinitButton,
+        `gripper-reinit:${busy && reinitializing ? "busy" : "idle"}`,
+        busy && reinitializing
+            ? '<span class="button-spinner" aria-hidden="true"></span><span>Reinitializing …</span>'
+            : "Reinit",
+    );
+    reinitButton.title = started
+        ? "Stop teleoperation before reinitializing grippers"
+        : "Force the gripper close/open initialization cycle again";
 }
 
-async function initGrippers() {
+async function initGrippers({ force = false } = {}) {
     if (state.ui.gripperInitBusy) {
         return;
     }
     state.ui.gripperInitBusy = true;
+    state.ui.gripperInitAction = force ? "reinitialize" : "prepare";
     renderTeleop();
     try {
-        await api("/teleop/gripper/init", { method: "POST" });
+        await api(
+            force ? "/teleop/gripper/reinitialize" : "/teleop/gripper/init",
+            { method: "POST" },
+        );
         // refreshTeleopStatus() rebuilds the panel and seeds the default
         // velocity/force; push those so the mirror loop uses them even before
         // the user touches a slider.
@@ -4206,15 +4264,8 @@ async function initGrippers() {
         await Promise.all(
             gripperConfiguredSides().map((side) => sendGripperParams(side)),
         );
-        // The backend triggered gripper.Init(); wait for it to physically finish
-        // before unblocking the panel (busy stays true, so the Init button keeps
-        // spinning throughout).
-        await new Promise((resolve) =>
-            window.setTimeout(resolve, GRIPPER_INIT_WAIT_MS),
-        );
         const savedWidth = configuredGripperDefaultWidth();
         if (savedWidth != null) {
-            await moveGrippersToWidth(savedWidth);
             state.gripperWidthControl.value = savedWidth;
             state.gripperWidthControl.dirty = false;
         }
@@ -4222,7 +4273,17 @@ async function initGrippers() {
         showToast(error.message, true);
     } finally {
         state.ui.gripperInitBusy = false;
+        state.ui.gripperInitAction = null;
         renderTeleop();
+    }
+}
+
+function reinitializeGrippers() {
+    const confirmed = window.confirm(
+        "Reinitialize all configured grippers? They will perform their close/open bring-up cycle.",
+    );
+    if (confirmed) {
+        initGrippers({ force: true });
     }
 }
 
