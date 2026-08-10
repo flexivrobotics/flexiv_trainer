@@ -1712,7 +1712,7 @@ def test_rollout_for_selects_per_policy_config_and_loop_runs_for_act(
         "flexivtrainer.rollout.observations._predict_action_chunk",
         lambda obs, pol, dev, pre, post, **kwargs: (
             np.tile(pol.select_action(obs), (8, 1)),
-            True,
+            bool(kwargs.get("force_refresh")),
         ),
     )
     monkeypatch.setattr(
