@@ -193,7 +193,6 @@ class EndEffectorController:
         reused = set(claim.reused) if claim else set()
 
         errors: dict[str, str] = {}
-        prepared_sides: list[str] = []
         initialized_identities: list[GripperIdentity] = []
         initialized_sides: list[str] = []
         reused_sides: list[str] = []
@@ -203,7 +202,6 @@ class EndEffectorController:
                 self._setup_gripper(index, cfg, initialize=should_initialize)
                 self._errors.pop(index, None)
                 side = self._sides[index]
-                prepared_sides.append(side)
                 if should_initialize:
                     self._takeover_pending.discard(index)
                     initialized_sides.append(side)
@@ -236,9 +234,6 @@ class EndEffectorController:
                 cancelled_sides = set(initialized_sides)
                 for side in cancelled_sides:
                     errors.setdefault(side, "Gripper initialization was cancelled")
-                prepared_sides = [
-                    side for side in prepared_sides if side not in cancelled_sides
-                ]
                 initialized_identities = []
                 initialized_sides = []
             else:
