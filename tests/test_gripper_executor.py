@@ -20,6 +20,10 @@ from types import SimpleNamespace
 import pytest
 
 from flexivtrainer.rollout.executors.gripper import GripperExecutor
+from flexivtrainer.runtime.gripper_session import (
+    GripperIdentity,
+    GripperInitializationRegistry,
+)
 
 
 class FakeRobot:
@@ -93,6 +97,9 @@ def _controller(
     target_source=None,
     failure_event=None,
     default_width_m=None,
+    followers=None,
+    initialization_registry=None,
+    append_log=None,
 ) -> tuple[GripperExecutor, list[FakeGripper], list[tuple[str, str]]]:
     robot = robot or FakeRobot()
     sides = sides or ["left_arm"]
@@ -119,6 +126,12 @@ def _controller(
         kwargs["clock"] = clock
     if default_width_m is not None:
         kwargs["default_width_m"] = default_width_m
+    if followers is not None:
+        kwargs["followers"] = followers
+    if initialization_registry is not None:
+        kwargs["initialization_registry"] = initialization_registry
+    if append_log is not None:
+        kwargs["append_log"] = append_log
     controller = GripperExecutor(
         [robot],
         sides,
@@ -172,6 +185,122 @@ def test_initializes_to_default_width_without_capping_policy_targets() -> None:
         (0.05, 0.4, 5.0),
         (0.08, 0.4, 5.0),
     ]
+
+
+def test_shared_registry_preserves_cached_width_until_policy_command() -> None:
+    registry = GripperInitializationRegistry()
+    waits: list[float] = []
+    logs: list[tuple[str, str, str, str]] = []
+
+    def wait(event: threading.Event, timeout: float) -> bool:
+        waits.append(timeout)
+        return False
+
+    first, first_grippers, first_events = _controller(
+        wait=wait,
+        default_width_m=0.05,
+        followers=["FOLLOWER_A"],
+        initialization_registry=registry,
+        append_log=lambda *args: logs.append(args),
+    )
+    first.initialize()
+
+    second, second_grippers, second_events = _controller(
+        wait=wait,
+        default_width_m=0.05,
+        followers=["FOLLOWER_A"],
+        initialization_registry=registry,
+        append_log=lambda *args: logs.append(args),
+    )
+    second.initialize()
+
+    identity = GripperIdentity("FOLLOWER_A", "Flexiv-GN01")
+    assert registry.state(identity).value == "ready"
+    assert ("init", "") in first_events
+    assert ("init", "") not in second_events
+    assert waits == [GripperExecutor.INIT_SETTLE_S]
+    assert first_grippers[0].moves == [(0.05, 0.4, 5.0)]
+    assert second_grippers[0].moves == []
+    second.submit({"left_arm": 0.07})
+    second._send_pending()
+    assert second_grippers[0].moves == [(0.07, 0.4, 5.0)]
+    second.stop()
+    assert second_grippers[0].moves == [(0.07, 0.4, 5.0)]
+    assert any("Initialized gripper" in entry[2] for entry in logs)
+    assert any("Preserved gripper width" in entry[2] for entry in logs)
+
+
+def test_mixed_dual_gripper_handoff_moves_only_newly_initialized_side() -> None:
+    registry = GripperInitializationRegistry()
+    events: list[tuple[str, str]] = []
+    waits: list[float] = []
+    grippers: list[FakeGripper] = []
+    left_identity = GripperIdentity("FOLLOWER_LEFT", "Flexiv-GN01")
+    registry.complete(registry.claim([left_identity]).initialize)
+
+    def make_gripper(robot: FakeRobot) -> FakeGripper:
+        gripper = FakeGripper(robot, events)
+        grippers.append(gripper)
+        return gripper
+
+    controller = GripperExecutor(
+        [FakeRobot(), FakeRobot()],
+        ["left_arm", "right_arm"],
+        {
+            "left_arm": {
+                "follower": "gripper",
+                "gripper_model": "Flexiv-GN01",
+            },
+            "right_arm": {
+                "follower": "gripper",
+                "gripper_model": "Flexiv-GN01",
+            },
+        },
+        ["left_arm", "right_arm"],
+        gripper_factory=make_gripper,
+        tool_factory=lambda robot: FakeTool(robot, events),
+        idle_mode="IDLE",
+        followers=["FOLLOWER_LEFT", "FOLLOWER_RIGHT"],
+        initialization_registry=registry,
+        default_width_m=0.05,
+        wait=lambda event, timeout: waits.append(timeout) or False,
+    )
+
+    controller.initialize()
+
+    assert events.count(("init", "")) == 1
+    assert waits == [GripperExecutor.INIT_SETTLE_S]
+    assert grippers[0].moves == []
+    assert grippers[1].moves == [(0.05, 0.4, 5.0)]
+    assert registry.state(
+        GripperIdentity("FOLLOWER_LEFT", "Flexiv-GN01")
+    ).value == "ready"
+    assert registry.state(
+        GripperIdentity("FOLLOWER_RIGHT", "Flexiv-GN01")
+    ).value == "ready"
+
+
+def test_cached_adoption_failure_preserves_ready_state_and_requests_reinit() -> None:
+    registry = GripperInitializationRegistry()
+    identity = GripperIdentity("FOLLOWER_A", "Flexiv-GN01")
+    claim = registry.claim([identity])
+    registry.complete(claim.initialize)
+
+    class FailingGripper(FakeGripper):
+        def Enable(self, model: str) -> None:
+            raise RuntimeError("device unavailable")
+
+    controller, _, events = _controller(
+        gripper_factory=lambda robot, captured: FailingGripper(robot, captured),
+        followers=["FOLLOWER_A"],
+        initialization_registry=registry,
+    )
+
+    with pytest.raises(RuntimeError, match="Reinitialize the gripper from teleop"):
+        controller.initialize()
+
+    assert ("init", "") not in events
+    assert registry.state(identity).value == "ready"
 
 
 def test_rejects_controlled_side_without_configured_follower_gripper() -> None:

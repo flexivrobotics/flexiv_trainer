@@ -35,7 +35,11 @@ import threading
 from typing import Any
 
 from flexivtrainer.config import EndEffectorSideConfig
-from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.observability import describe_exception, info, warn
+from flexivtrainer.runtime.gripper_session import (
+    GripperIdentity,
+    GripperInitializationRegistry,
+)
 
 try:
     import flexivrdk
@@ -76,6 +80,7 @@ class EndEffectorController:
     # Fraction of a gripper's max force used as the default grasping force until
     # the Gripper Control panel sets a value (matches the panel's own default).
     DEFAULT_FORCE_FRACTION = 0.25
+    INIT_SETTLE_S = 10.0
 
     def __init__(
         self,
@@ -83,7 +88,13 @@ class EndEffectorController:
         sides: list[str],
         configs: dict[str, Any],
         default_gripper_width_m: float | None = None,
+        *,
+        gripper_identities: dict[str, GripperIdentity] | None = None,
+        initialization_registry: GripperInitializationRegistry | None = None,
+        init_settle_s: float = INIT_SETTLE_S,
     ) -> None:
+        if not math.isfinite(init_settle_s) or init_settle_s < 0:
+            raise ValueError("init_settle_s must be finite and nonnegative")
         self._controller = controller
         # Arm sides and their config in pair-index order. The side name at index
         # i drives teleop pair i (instances(i)/digital_inputs(i)); a None config
@@ -93,8 +104,13 @@ class EndEffectorController:
             _side_config(configs.get(side)) for side in self._sides
         ]
         self._default_gripper_width_m = default_gripper_width_m
+        identities = gripper_identities or {}
+        self._gripper_identities = [identities.get(side) for side in self._sides]
+        self._initialization_registry = initialization_registry
+        self._init_settle_s = init_settle_s
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._setup_lock = threading.Lock()
         # Grippers enabled by initialize_grippers() (the panel's Init button) and
         # the last commands issued, keyed by pair index, so we only issue a
         # (blocking) command on an actual state change.
@@ -106,6 +122,10 @@ class EndEffectorController:
         self._command_params: dict[int, tuple[float, float]] = {}
         self._last_do: dict[int, bool] = {}
         self._last_gripper_target: dict[int, str] = {}
+        # A cached rollout -> teleop handoff must never open a held object. For
+        # each reused, digitally controlled gripper, ignore Open until the
+        # leader has requested Close once; then resume normal mirroring.
+        self._takeover_pending: set[int] = set()
         self._errors: dict[int, str] = {}
 
     @staticmethod
@@ -136,31 +156,134 @@ class EndEffectorController:
     def is_running(self) -> bool:
         return self._thread is not None
 
-    def initialize_grippers(self) -> dict[str, str]:
-        """Enable, tool-switch, init, and read params for every configured gripper.
+    def initialize_grippers(self, *, force: bool = False) -> dict[str, Any]:
+        """Prepare every configured gripper and initialize each device once.
 
-        Triggered by the Gripper Control panel's Init button while teleop is NOT
-        started (so the follower is IDLE and Tool.Switch() is valid). For each
-        gripper side: Enable() it as a device, Tool.Switch() to account for its
-        mass, Gripper.Init() to trigger the gripper's own initialization, and
-        read its params. The enabled grippers and their params stay cached across
-        teleop start/stop and are only released by shutdown() (disconnect); a
-        re-Init refreshes them. Returns a per-side map of error messages for
-        grippers that failed to set up (empty on full success).
+        RDK handles remain local to this teleop connection. The optional shared
+        registry decides whether this connection needs to issue the mechanical
+        ``Init()`` cycle or can reuse initialization performed by a rollout.
         """
+
+        with self._setup_lock:
+            return self._initialize_grippers_locked(force=force)
+
+    def _initialize_grippers_locked(self, *, force: bool) -> dict[str, Any]:
+        entries = [
+            (index, cfg, self._gripper_identities[index])
+            for index, cfg in enumerate(self._configs)
+            if cfg is not None and cfg.follower == "gripper"
+        ]
+        if force:
+            for index, _, _ in entries:
+                _, follower = self._controller.instances(index)
+                if not self._follower_is_idle(follower):
+                    side = self._sides[index]
+                    raise RuntimeError(
+                        f"Follower robot must be IDLE to reinitialize gripper: {side}"
+                    )
+
+        registry = self._initialization_registry
+        identities = [identity for _, _, identity in entries if identity is not None]
+        if registry is not None and len(identities) != len(entries):
+            raise RuntimeError(
+                "A configured gripper is missing its follower serial or model"
+            )
+        claim = registry.claim(identities, force=force) if registry else None
+        claimed = set(claim.initialize) if claim else set()
+        reused = set(claim.reused) if claim else set()
+
         errors: dict[str, str] = {}
-        for index, cfg in enumerate(self._configs):
-            if cfg is None or cfg.follower != "gripper":
-                continue
+        prepared_sides: list[str] = []
+        initialized_identities: list[GripperIdentity] = []
+        initialized_sides: list[str] = []
+        reused_sides: list[str] = []
+        for index, cfg, identity in entries:
+            should_initialize = registry is None or identity in claimed
             try:
-                self._setup_gripper(index, cfg)
+                self._setup_gripper(index, cfg, initialize=should_initialize)
                 self._errors.pop(index, None)
+                side = self._sides[index]
+                prepared_sides.append(side)
+                if should_initialize:
+                    self._takeover_pending.discard(index)
+                    initialized_sides.append(side)
+                    if identity is not None:
+                        initialized_identities.append(identity)
+                elif identity in reused:
+                    reused_sides.append(side)
+                    if self._should_mirror(cfg):
+                        self._takeover_pending.add(index)
+                    else:
+                        self._takeover_pending.discard(index)
+                    info(
+                        f"Preserved gripper width for session handoff: {side}",
+                        identity.describe() if identity is not None else "",
+                    )
             except Exception as exc:
                 message = describe_exception(exc)
+                if identity in reused:
+                    message = self._with_reinitialize_instruction(message)
                 warn(f"Gripper setup failed for pair {index}", message)
                 self._errors[index] = message
                 errors[self._sides[index]] = message
-        return errors
+                if registry is not None and identity in claimed:
+                    registry.fail([identity])
+
+        if registry is not None and initialized_identities:
+            self._stop_event.clear()
+            if self._stop_event.wait(self._init_settle_s):
+                registry.fail(initialized_identities)
+                cancelled_sides = set(initialized_sides)
+                for side in cancelled_sides:
+                    errors.setdefault(side, "Gripper initialization was cancelled")
+                prepared_sides = [
+                    side for side in prepared_sides if side not in cancelled_sides
+                ]
+                initialized_identities = []
+                initialized_sides = []
+            else:
+                registry.complete(initialized_identities)
+                for side, identity in zip(
+                    initialized_sides, initialized_identities, strict=True
+                ):
+                    info(
+                        f"Initialized gripper for backend session: {side}",
+                        identity.describe(),
+                    )
+
+        # Any claimed identity that did not reach Init() successfully must not
+        # remain stuck in INITIALIZING after a partial multi-gripper failure.
+        if registry is not None:
+            registry.fail(claimed - set(initialized_identities))
+
+        widths: dict[str, float] = {}
+        if self._default_gripper_width_m is not None and initialized_sides:
+            movement = self.move_grippers_to_width(
+                self._default_gripper_width_m, sides=initialized_sides
+            )
+            widths = movement["widths"]
+            for side, message in movement["errors"].items():
+                errors[side] = (
+                    self._with_reinitialize_instruction(message)
+                    if side in reused_sides
+                    else message
+                )
+            for side, width in widths.items():
+                info(
+                    f"Moved gripper to session default width: {side}",
+                    f"width={width:.4f} m",
+                )
+
+        return {
+            "errors": errors,
+            "initialized_now": initialized_sides,
+            "reused": reused_sides,
+            "widths": widths,
+        }
+
+    @staticmethod
+    def _with_reinitialize_instruction(message: str) -> str:
+        return f"{message}. Reinitialize the gripper and retry"
 
     def start(self) -> None:
         """Start the mirror thread (on teleop Start).
@@ -193,11 +316,13 @@ class EndEffectorController:
     def shutdown(self) -> None:
         """Stop the thread and release all gripper/command state (on disconnect)."""
         self.stop()
-        self._grippers.clear()
-        self._gripper_params.clear()
-        self._command_params.clear()
-        self._last_do.clear()
-        self._last_gripper_target.clear()
+        with self._setup_lock:
+            self._grippers.clear()
+            self._gripper_params.clear()
+            self._command_params.clear()
+            self._last_do.clear()
+            self._last_gripper_target.clear()
+            self._takeover_pending.clear()
 
     def _run(self) -> None:  # pragma: no cover - hardware specific
         period = 1.0 / self.POLL_HZ
@@ -253,7 +378,10 @@ class EndEffectorController:
             target = cfg.gripper_activated_state
         else:
             target = "open" if cfg.gripper_activated_state == "close" else "close"
-        if self._last_gripper_target.get(index) == target:
+        takeover_pending = index in self._takeover_pending
+        if takeover_pending and target != "close":
+            return
+        if not takeover_pending and self._last_gripper_target.get(index) == target:
             return
 
         gripper = self._grippers.get(index)
@@ -276,6 +404,8 @@ class EndEffectorController:
         # own params-derived defaults until a slider sets them.
         velocity, force = self._move_params_for(index)
         gripper.Move(width, velocity, force)
+        if takeover_pending:
+            self._takeover_pending.discard(index)
         self._last_gripper_target[index] = target
 
     def _move_params_for(self, index: int) -> tuple[float, float]:
@@ -305,13 +435,16 @@ class EndEffectorController:
         self._command_params[index] = (velocity, force)
         return velocity, force
 
-    def move_grippers_to_width(self, width: float) -> dict[str, Any]:
+    def move_grippers_to_width(
+        self, width: float, *, sides: list[str] | None = None
+    ) -> dict[str, Any]:
         """Move every initialized gripper and make this the current Open width."""
 
         requested = float(width)
         if not math.isfinite(requested) or requested < 0:
             raise ValueError("Gripper width must be finite and nonnegative")
         self._default_gripper_width_m = requested
+        selected = set(sides) if sides is not None else None
         moved: dict[str, float] = {}
         errors: dict[str, str] = {}
         for index, cfg in enumerate(self._configs):
@@ -320,6 +453,8 @@ class EndEffectorController:
             gripper = self._grippers.get(index)
             params = self._gripper_params.get(index)
             side = self._sides[index]
+            if selected is not None and side not in selected:
+                continue
             if gripper is None or params is None:
                 errors[side] = "Gripper is not initialized"
                 continue
@@ -365,14 +500,17 @@ class EndEffectorController:
         except Exception:  # pragma: no cover - hardware specific
             return False
 
-    def _setup_gripper(self, index: int, cfg: EndEffectorSideConfig) -> None:
+    def _setup_gripper(
+        self,
+        index: int,
+        cfg: EndEffectorSideConfig,
+        *,
+        initialize: bool = True,
+    ) -> None:
         # Enable the gripper as a device, switch its tool so the gripper's mass
-        # is accounted for in gravity compensation/TCP, trigger Gripper.Init(),
-        # and read its params. Tool.Switch() is IDLE-only; Init runs while teleop
-        # is not started (the panel gates the button), so the follower is IDLE.
-        # The IDLE check guards against a stray call when the mode can't be
-        # confirmed. Idempotent: a re-Init keeps the already-enabled gripper
-        # (Enable() would otherwise raise) and refreshes the switch/init/params.
+        # is accounted for in gravity compensation/TCP, optionally trigger the
+        # mechanical Init() cycle, and read its params. Cached session adoption
+        # performs every connection-local step but skips Init().
         if Gripper is None:
             raise RuntimeError("flexivrdk is not available; cannot control gripper")
         _, follower = self._controller.instances(index)
@@ -382,7 +520,8 @@ class EndEffectorController:
             self._grippers[index] = gripper
         if Tool is not None and self._follower_is_idle(follower):
             Tool(follower).Switch(cfg.gripper_model)
-        self._grippers[index].Init()
+        if initialize:
+            self._grippers[index].Init()
         self._gripper_params[index] = self._grippers[index].params()
 
     def gripper_states_by_index(self) -> dict[int, dict[str, float]]:
@@ -434,6 +573,7 @@ class EndEffectorController:
                 "max_force": params.max_force,
                 "min_width": params.min_width,
                 "max_width": params.max_width,
+                "takeover_pending": index in self._takeover_pending,
             }
             try:  # pragma: no cover - hardware specific
                 states = gripper.states()

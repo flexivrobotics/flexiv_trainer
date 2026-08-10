@@ -50,6 +50,7 @@ from flexivtrainer.rollout.executors.waypoint import (
 from flexivtrainer.rollout.hardware import _default_robot_factory
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
+from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
 _ROLLOUT_OVERRIDES = {
     "act": act_policy.apply_rollout_overrides,
@@ -90,6 +91,7 @@ class RolloutService:
         *,
         get_end_effector_config: Callable[[], dict[str, Any]] | None = None,
         get_gripper_default_width: Callable[[], float | None] | None = None,
+        gripper_initialization_registry: GripperInitializationRegistry | None = None,
         policy_loader: Callable[[str, str], Any] = _default_policy_loader,
         robot_factory: Callable[[str], Any] = _default_robot_factory,
         resolve_device: Callable[[str], str] | None = None,
@@ -101,6 +103,7 @@ class RolloutService:
         self._get_active_sides = get_active_sides
         self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._get_gripper_default_width = get_gripper_default_width or (lambda: None)
+        self._gripper_initialization_registry = gripper_initialization_registry
         self._policy_loader = policy_loader
         self._robot_factory = robot_factory
         if resolve_device is None:
@@ -332,6 +335,9 @@ class RolloutService:
                 stop_robots=hardware.stop_robots,
                 prepare_motion=self._prepare_motion,
                 gripper_default_width_m=gripper_default_width_m,
+                gripper_initialization_registry=(
+                    self._gripper_initialization_registry
+                ),
             )
         else:
             assert waypoint_layout is not None
@@ -373,6 +379,9 @@ class RolloutService:
                 ),
                 uses_cuda_graphs=uses_cuda_graphs,
                 gripper_default_width_m=gripper_default_width_m,
+                gripper_initialization_registry=(
+                    self._gripper_initialization_registry
+                ),
             )
 
         with self._lock:

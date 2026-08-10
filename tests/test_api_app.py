@@ -30,7 +30,7 @@ def test_root_serves_packaged_ui() -> None:
 
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "/static/app.js?v=20260730-03" in response.text
+    assert "/static/app.js?v=20260810-02" in response.text
 
 
 def test_docs_route_is_available() -> None:
@@ -129,6 +129,14 @@ def test_runtime_manager_blocks_alignment_and_fails_closed(tmp_path) -> None:
     settings.ensure_storage()
     manager = RuntimeManager(settings)
 
+    assert (
+        manager.teleop._gripper_initialization_registry
+        is manager.gripper_initialization
+    )
+    assert (
+        manager.rollout._gripper_initialization_registry
+        is manager.gripper_initialization
+    )
     assert manager._rollout_is_running() is False
     manager.cameras.renew_depth_alignment_lease("ego")
     assert manager.cameras.depth_alignment_active("ego") is True

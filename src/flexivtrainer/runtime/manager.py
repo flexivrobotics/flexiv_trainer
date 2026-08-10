@@ -30,6 +30,7 @@ from flexivtrainer.config import (
 from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.jobs.train_policy import TrainingService
 from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 from flexivtrainer.teleop.service import TeleopService
 
 
@@ -132,12 +133,14 @@ class RuntimeManager:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self._robot_config = self._load_robot_config()
+        self.gripper_initialization = GripperInitializationRegistry()
         self.teleop = TeleopService(
             settings,
             self.get_teleop_robot_pairs,
             self.get_active_sides,
             self.get_end_effector_config,
             self.get_gripper_default_width,
+            gripper_initialization_registry=self.gripper_initialization,
         )
         self.cameras = CameraService(settings)
         self.cameras.set_active_locations(
@@ -170,6 +173,7 @@ class RuntimeManager:
                 self.get_active_sides,
                 get_end_effector_config=self.get_end_effector_config,
                 get_gripper_default_width=self.get_gripper_default_width,
+                gripper_initialization_registry=self.gripper_initialization,
             )
         # Depth->color alignment starves the policy loop of the GIL, and the
         # rollout reads no depth, so forbid viewer-driven alignment while one

@@ -166,6 +166,7 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
         "teleop": runtime.teleop.snapshot().__dict__,
         "robot_data": runtime.teleop.robot_data_snapshot(),
         "gripper": runtime.teleop.gripper_snapshot(),
+        "gripper_session": runtime.teleop.gripper_session_snapshot(),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
@@ -312,8 +313,30 @@ def init_grippers(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dic
             "Some grippers failed to initialize",
             "; ".join(f"{side}={msg}" for side, msg in result["errors"].items()),
         )
-    else:
+    elif result.get("initialized_now"):
         ok("Grippers initialized")
+    else:
+        ok("Grippers prepared using session initialization")
+    return result
+
+
+@router.post("/gripper/reinitialize")
+def reinitialize_grippers(
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    result = runtime.teleop.reinitialize_grippers()
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=str(result.get("error") or "Gripper reinitialization failed"),
+        )
+    if result.get("errors"):
+        warn(
+            "Some grippers failed to reinitialize",
+            "; ".join(f"{side}={msg}" for side, msg in result["errors"].items()),
+        )
+    else:
+        ok("Grippers reinitialized")
     return result
 
 

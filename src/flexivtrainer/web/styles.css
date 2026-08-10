@@ -340,11 +340,20 @@ button:disabled {
     min-width: 0;
 }
 
-.gripper-init {
-    width: 100%;
+.gripper-init-actions {
+    display: flex;
+    gap: 0.55rem;
+    min-width: 0;
 }
 
-.gripper-init.button--busy {
+.gripper-init,
+.gripper-reinitialize {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.gripper-init.button--busy,
+.gripper-reinitialize.button--busy {
     display: inline-flex;
     align-items: center;
     justify-content: center;

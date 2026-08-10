@@ -684,6 +684,78 @@ def test_global_gripper_width_moves_when_stopped_and_rejects_while_started(
     service.stop()
 
 
+def test_gripper_initialization_survives_teleop_reconnect_and_can_be_forced(
+    tmp_path, monkeypatch
+) -> None:
+    import flexivtrainer.teleop.end_effector as ee
+    from flexivtrainer.config import EndEffectorSideConfig
+    from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
+
+    instances = []
+
+    class TrackingGripper(_FakeGripper):
+        def __init__(self, robot: object) -> None:
+            super().__init__(robot)
+            self.init_calls = 0
+            instances.append(self)
+
+        def Init(self) -> None:
+            self.init_calls += 1
+
+    monkeypatch.setattr(ee, "Gripper", TrackingGripper)
+    monkeypatch.setattr(ee, "Tool", _FakeTool)
+    monkeypatch.setattr(ee, "Mode", SimpleNamespace(IDLE="IDLE"))
+
+    registry = GripperInitializationRegistry()
+    service = TeleopService(
+        AppSettings(storage=StorageConfig(root=tmp_path)),
+        get_robot_pairs=lambda: [
+            TeleopRobotPair(
+                leader_serial="LEADER_A", follower_serial="FOLLOWER_A"
+            )
+        ],
+        get_active_sides=lambda: ["single_arm"],
+        get_end_effector_config=lambda: {
+            "single_arm": EndEffectorSideConfig(
+                leader="digital_input", follower="gripper"
+            )
+        },
+        get_gripper_default_width=lambda: 0.06,
+        gripper_initialization_registry=registry,
+        gripper_init_settle_s=0,
+    )
+
+    first_controller = FakeEngageController()
+    first_controller.follower.mode = lambda: "IDLE"  # type: ignore[attr-defined]
+    service._controller = first_controller
+    service._initialized = True
+    first = service.init_grippers()
+    assert first["initialized_now"] == ["single_arm"]
+    assert first["reused"] == []
+    assert instances[0].init_calls == 1
+    assert instances[0].moves[-1][0] == 0.06
+
+    service.shutdown()
+    second_controller = FakeEngageController()
+    second_controller.follower.mode = lambda: "IDLE"  # type: ignore[attr-defined]
+    service._controller = second_controller
+    service._initialized = True
+    second = service.init_grippers()
+    assert second["initialized_now"] == []
+    assert second["reused"] == ["single_arm"]
+    assert instances[1].init_calls == 0
+    assert instances[1].moves == []
+    assert service.gripper_snapshot()["single_arm"]["takeover_pending"] is True
+    assert service.gripper_session_snapshot() == {"single_arm": "ready"}
+
+    forced = service.reinitialize_grippers()
+    assert forced["initialized_now"] == ["single_arm"]
+    assert instances[1].init_calls == 1
+    assert instances[1].moves[-1][0] == 0.06
+    assert service.gripper_snapshot()["single_arm"]["takeover_pending"] is False
+    assert service.gripper_session_snapshot() == {"single_arm": "ready"}
+
+
 def test_engage_requires_started_control_loop(tmp_path) -> None:
     service = _configured_service(tmp_path)
     controller = service._controller

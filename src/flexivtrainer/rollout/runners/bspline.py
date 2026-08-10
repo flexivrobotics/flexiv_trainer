@@ -38,6 +38,7 @@ from flexivtrainer.rollout.executors.bspline import (
     BSplineInstallResult,
 )
 from flexivtrainer.rollout.executors.gripper import GripperExecutor
+from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
 
 class BSplineRunner:
@@ -73,6 +74,7 @@ class BSplineRunner:
         image_resolutions: dict[str, tuple[int, int]] | None = None,
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
         gripper_default_width_m: float | None = None,
+        gripper_initialization_registry: GripperInitializationRegistry | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -102,6 +104,7 @@ class BSplineRunner:
         self._stop_robots = stop_robots
         self._prepare_motion = prepare_motion
         self._gripper_default_width_m = gripper_default_width_m
+        self._gripper_initialization_registry = gripper_initialization_registry
 
         self._error: str | None = None
         self._stop_reason: str | None = None
@@ -186,6 +189,14 @@ class BSplineRunner:
                 if self._gripper_default_width_m is not None:
                     gripper_kwargs["default_width_m"] = (
                         self._gripper_default_width_m
+                    )
+                if self._gripper_initialization_registry is not None:
+                    gripper_kwargs.update(
+                        followers=self._followers,
+                        initialization_registry=(
+                            self._gripper_initialization_registry
+                        ),
+                        append_log=self._append_log,
                     )
                 gripper_executor = GripperExecutor(
                     robots,
