@@ -41,7 +41,9 @@ class _FakeRobot:
             self._stop_event.set()
 
 
-def _channels(sides: tuple[str, ...], gripper: bool = False) -> list[str]:
+def _channels(
+    sides: tuple[str, ...], gripper: bool = False, gripper_close: bool = False
+) -> list[str]:
     result = ["knot"]
     for side in sides:
         result.extend(f"{side}.tcp_pose.{axis}" for axis in ("x", "y", "z"))
@@ -50,6 +52,8 @@ def _channels(sides: tuple[str, ...], gripper: bool = False) -> list[str]:
         )
         if gripper:
             result.append(f"{side}.gripper.width")
+        elif gripper_close:
+            result.append(f"{side}.gripper.close")
     return result
 
 
@@ -57,8 +61,9 @@ def _feature_names(
     sides: tuple[str, ...] = ("arm",),
     *,
     gripper: bool = False,
+    gripper_close: bool = False,
 ) -> list[str]:
-    channels = _channels(sides, gripper)
+    channels = _channels(sides, gripper, gripper_close)
     return [
         f"bspline.row_{row:02d}.{channel}"
         for row in range(_ROWS)
@@ -132,6 +137,16 @@ def test_preflight_parses_authoritative_layout_without_robots() -> None:
     assert layout.flat_action_dim == 16 * 21
     assert layout.sides == ("left", "right")
     assert layout.gripper_sides == ("left", "right")
+    assert layout.gripper_target_mode == "width"
+
+
+def test_preflight_parses_gripper_close_layout() -> None:
+    layout = parse_bspline_action_layout(
+        _feature_names(("arm",), gripper_close=True)
+    )
+
+    assert layout.gripper_sides == ("arm",)
+    assert layout.gripper_target_mode == "close"
 
 
 @pytest.mark.parametrize(

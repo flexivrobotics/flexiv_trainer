@@ -65,6 +65,7 @@ class WaypointRunner:
         action_layout: list[dict[str, Any]],
         action_dim: int,
         gripper_sides: tuple[str, ...],
+        gripper_target_mode: str,
         end_effector_config: dict[str, Any],
         motion_limits: tuple[float, float, float, float],
         planner_hz_fallback: float,
@@ -131,6 +132,7 @@ class WaypointRunner:
                 followers=followers,
                 initialization_registry=gripper_initialization_registry,
                 append_log=append_log,
+                target_mode=gripper_target_mode,
                 executor_factory=GripperExecutor,
             )
             for serial, robot in zip(followers, robots, strict=True):
@@ -512,10 +514,26 @@ class WaypointRunner:
                 if isinstance(gripper_payload, dict):
                     measured_gripper = gripper_payload
             gripper_width_index = plan.get("gripper_width")
+            gripper_close_index = plan.get("gripper_close")
             gripper_detail = ""
             if isinstance(gripper_width_index, int):
                 gripper_detail = (
                     f" cmd_gripper_width={float(action[gripper_width_index]):.4f}"
+                    " meas_gripper_width="
+                    f"{self._fmt_scalar(measured_gripper.get('width'))}"
+                    " meas_gripper_force="
+                    f"{self._fmt_scalar(measured_gripper.get('force'))}"
+                )
+            elif isinstance(gripper_close_index, int):
+                raw_close = float(action[gripper_close_index])
+                decoded = (
+                    self._gripper_executor.describe_target(side, raw_close)
+                    if self._gripper_executor is not None
+                    else "unavailable"
+                )
+                gripper_detail = (
+                    f" cmd_gripper_close={raw_close:.4f}"
+                    f" decoded_gripper={decoded}"
                     " meas_gripper_width="
                     f"{self._fmt_scalar(measured_gripper.get('width'))}"
                     " meas_gripper_force="

@@ -182,10 +182,12 @@ class BSplineRunner:
             if self._bspline_layout.gripper_sides:
                 gripper_kwargs: dict[str, Any] = {
                     "target_source": lambda: (
-                        bspline_executor.last_gripper_widths
+                        bspline_executor.last_gripper_targets
                     ),
                     "failure_event": self._stop_event,
                 }
+                if self._bspline_layout.gripper_target_mode == "close":
+                    gripper_kwargs["target_mode"] = "close"
                 if self._gripper_default_width_m is not None:
                     gripper_kwargs["default_width_m"] = (
                         self._gripper_default_width_m

@@ -19,7 +19,7 @@ The representation follows the B-spline Policy data layout:
 ``[parameter_row, knot + control_channels]``
 
 The knot vector occupies column zero. Remaining columns contain Cartesian
-control points represented as XYZ plus rotation-6D and optional gripper width
+control points represented as XYZ plus rotation-6D and an optional gripper target
 for every selected arm. The fixed-size matrix can be flattened into a normal
 one-dimensional LeRobot ``action`` feature for training.
 """
@@ -49,6 +49,15 @@ class TCPActionLayout:
     side: str
     pose_indices: tuple[int, ...]
     gripper_width_index: int | None = None
+    gripper_close_index: int | None = None
+
+    @property
+    def gripper_target_mode(self) -> str | None:
+        if self.gripper_width_index is not None:
+            return "width"
+        if self.gripper_close_index is not None:
+            return "close"
+        return None
 
     @property
     def control_names(self) -> tuple[str, ...]:
@@ -59,7 +68,11 @@ class TCPActionLayout:
         gripper = (
             (f"{self.side}.gripper.width",)
             if self.gripper_width_index is not None
-            else ()
+            else (
+                (f"{self.side}.gripper.close",)
+                if self.gripper_close_index is not None
+                else ()
+            )
         )
         return position + rotation + gripper
 
@@ -120,13 +133,27 @@ def detect_tcp_action_layouts(
             raise ValueError(
                 f"Incomplete TCP pose action for side '{side}'; missing {missing}"
             )
+        width_index = name_to_index.get(f"{side}.gripper.width")
+        close_index = name_to_index.get(f"{side}.gripper.close")
+        if width_index is not None and close_index is not None:
+            raise ValueError(
+                f"Action schema cannot contain both gripper width and close for {side}"
+            )
         layouts.append(
             TCPActionLayout(
                 side=side,
                 pose_indices=tuple(name_to_index[name] for name in expected),
-                gripper_width_index=name_to_index.get(f"{side}.gripper.width"),
+                gripper_width_index=width_index,
+                gripper_close_index=close_index,
             )
         )
+    modes = {
+        layout.gripper_target_mode
+        for layout in layouts
+        if layout.gripper_target_mode is not None
+    }
+    if len(modes) > 1:
+        raise ValueError("Mixed gripper width/close action schemas are unsupported")
     return layouts
 
 
@@ -210,6 +237,8 @@ def extract_cartesian_controls(
         arm_controls = [position, rotation_6d]
         if layout.gripper_width_index is not None:
             arm_controls.append(actions[:, layout.gripper_width_index, None])
+        elif layout.gripper_close_index is not None:
+            arm_controls.append(actions[:, layout.gripper_close_index, None])
         controls.append(np.concatenate(arm_controls, axis=1))
     result = np.concatenate(controls, axis=1)
     if np.any(~np.isfinite(result)):

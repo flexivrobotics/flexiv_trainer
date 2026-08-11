@@ -121,6 +121,7 @@ class EndEffectorController:
         # to the gripper's own params-derived defaults until a slider sets one.
         self._command_params: dict[int, tuple[float, float]] = {}
         self._last_do: dict[int, bool] = {}
+        self._gripper_command_lock = threading.Lock()
         self._last_gripper_target: dict[int, str] = {}
         # A cached rollout -> teleop handoff must never open a held object. For
         # each reused, digitally controlled gripper, ignore Open until the
@@ -174,6 +175,9 @@ class EndEffectorController:
             if cfg is not None and cfg.follower == "gripper"
         ]
         if force:
+            with self._gripper_command_lock:
+                for index, _, _ in entries:
+                    self._last_gripper_target.pop(index, None)
             for index, _, _ in entries:
                 _, follower = self._controller.instances(index)
                 if not self._follower_is_idle(follower):
@@ -316,7 +320,8 @@ class EndEffectorController:
             self._gripper_params.clear()
             self._command_params.clear()
             self._last_do.clear()
-            self._last_gripper_target.clear()
+            with self._gripper_command_lock:
+                self._last_gripper_target.clear()
             self._takeover_pending.clear()
 
     def _run(self) -> None:  # pragma: no cover - hardware specific
@@ -376,8 +381,10 @@ class EndEffectorController:
         takeover_pending = index in self._takeover_pending
         if takeover_pending and target != "close":
             return
-        if not takeover_pending and self._last_gripper_target.get(index) == target:
-            return
+        if not takeover_pending:
+            with self._gripper_command_lock:
+                if self._last_gripper_target.get(index) == target:
+                    return
 
         gripper = self._grippers.get(index)
         params = self._gripper_params.get(index)
@@ -401,7 +408,8 @@ class EndEffectorController:
         gripper.Move(width, velocity, force)
         if takeover_pending:
             self._takeover_pending.discard(index)
-        self._last_gripper_target[index] = target
+        with self._gripper_command_lock:
+            self._last_gripper_target[index] = target
 
     def _move_params_for(self, index: int) -> tuple[float, float]:
         params = self._gripper_params[index]
@@ -466,7 +474,8 @@ class EndEffectorController:
                 moved[side] = target
                 # A manual target may be between open and closed. Force the mirror
                 # loop to reassert its state on the next teleop start/tick.
-                self._last_gripper_target.pop(index, None)
+                with self._gripper_command_lock:
+                    self._last_gripper_target.pop(index, None)
             except Exception as exc:  # pragma: no cover - hardware specific
                 message = describe_exception(exc)
                 warn(f"Failed to tune gripper width for {side}", message)
@@ -479,7 +488,8 @@ class EndEffectorController:
         if width is not None and (not math.isfinite(width) or width < 0):
             raise ValueError("Gripper width must be finite and nonnegative")
         self._default_gripper_width_m = width
-        self._last_gripper_target.clear()
+        with self._gripper_command_lock:
+            self._last_gripper_target.clear()
 
     @staticmethod
     def _follower_is_idle(follower: Any) -> bool:
@@ -544,6 +554,15 @@ class EndEffectorController:
             except Exception:  # pragma: no cover - hardware specific
                 continue
         return states_by_index
+
+    def gripper_commands_by_index(self) -> dict[int, dict[str, float]]:
+        """Accepted Open/Close commands keyed by teleop pair index."""
+
+        with self._gripper_command_lock:
+            return {
+                index: {"close": 1.0 if target == "close" else 0.0}
+                for index, target in self._last_gripper_target.items()
+            }
 
     def gripper_snapshot(self) -> dict[str, Any]:
         """Per-side gripper parameters/state, for sides with an enabled gripper.

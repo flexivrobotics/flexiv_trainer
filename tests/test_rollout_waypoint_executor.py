@@ -65,6 +65,7 @@ def test_build_action_layout_locates_command_runs() -> None:
     assert layout[0]["twist"] == slice(7, 13)
     assert layout[0]["wrench"] == slice(13, 19)
     assert layout[0]["gripper_width"] is None
+    assert layout[0]["gripper_close"] is None
 
 
 def test_named_layout_maps_gripper_width_and_requires_it_before_force() -> None:
@@ -94,6 +95,25 @@ def test_named_layout_maps_only_the_configured_gripper_side() -> None:
 
     assert layout[0]["gripper_width"] == 19
     assert layout[1]["gripper_width"] is None
+
+
+def test_named_layout_accepts_close_and_rejects_ambiguous_modes() -> None:
+    base = canonical_action_names(19, ["single_arm"])
+    layout = build_action_layout(
+        [*base, "single_arm.gripper.close"], ["single_arm"]
+    )
+
+    assert layout[0]["gripper_close"] == 19
+    assert layout[0]["gripper_width"] is None
+    with pytest.raises(ValueError, match="both"):
+        build_action_layout(
+            [
+                *base,
+                "single_arm.gripper.width",
+                "single_arm.gripper.close",
+            ],
+            ["single_arm"],
+        )
 
 
 @pytest.mark.parametrize(

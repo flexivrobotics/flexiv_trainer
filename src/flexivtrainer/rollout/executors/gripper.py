@@ -20,7 +20,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.runtime.gripper_session import (
@@ -39,13 +39,15 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 class GripperExecutor:
-    """Own configured follower grippers and execute latest-only width targets."""
+    """Own configured follower grippers and execute latest-only policy targets."""
 
     DEFAULT_COMMAND_HZ = 30.0
     MAX_COMMAND_HZ = 30.0
     DUPLICATE_TOLERANCE_M = 0.0005
     FORCE_FRACTION = 0.25
     INIT_SETTLE_S = 10.0
+    CLOSE_THRESHOLD = 0.6
+    OPEN_THRESHOLD = 0.4
 
     def __init__(
         self,
@@ -59,6 +61,7 @@ class GripperExecutor:
         tool_factory: Callable[[Any], Any] | None = None,
         idle_mode: Any = None,
         target_source: Callable[[], Mapping[str, float]] | None = None,
+        target_mode: Literal["width", "close"] = "width",
         failure_event: threading.Event | None = None,
         default_width_m: float | None = None,
         followers: Sequence[str] | None = None,
@@ -83,6 +86,8 @@ class GripperExecutor:
             not math.isfinite(default_width_m) or default_width_m < 0
         ):
             raise ValueError("default_width_m must be finite and nonnegative")
+        if target_mode not in {"width", "close"}:
+            raise ValueError(f"Unsupported gripper target mode: {target_mode}")
 
         self._robots = dict(zip(sides, robots, strict=True))
         self._followers = (
@@ -116,6 +121,7 @@ class GripperExecutor:
         self._tool_factory = tool_factory or default_tool_factory
         self._idle_mode = default_idle_mode if idle_mode is None else idle_mode
         self._target_source = target_source
+        self._target_mode = target_mode
         self._failure_event = failure_event
         self._default_width_m = default_width_m
         self._initialization_registry = initialization_registry
@@ -132,6 +138,7 @@ class GripperExecutor:
         self._params: dict[str, Any] = {}
         self._pending: dict[str, float] = {}
         self._last_sent: dict[str, float] = {}
+        self._last_close: dict[str, bool] = {}
         self._measured: dict[str, dict[str, float]] = {}
         self._error: Exception | None = None
         self._stop_event = threading.Event()
@@ -328,16 +335,16 @@ class GripperExecutor:
                 for side in self._controlled_sides
             }
 
-    def submit(self, widths: Mapping[str, float]) -> None:
-        """Replace pending targets without waiting for hardware I/O."""
+    def submit(self, targets: Mapping[str, float]) -> None:
+        """Replace pending policy targets without waiting for hardware I/O."""
         updates: dict[str, float] = {}
-        for side, value in widths.items():
+        for side, value in targets.items():
             if side not in self._configs:
                 raise ValueError(f"Unknown controlled gripper side: {side}")
-            width = float(value)
-            if not math.isfinite(width):
-                raise ValueError(f"Gripper width must be finite: {side}")
-            updates[side] = width
+            target = float(value)
+            if not math.isfinite(target):
+                raise ValueError(f"Gripper target must be finite: {side}")
+            updates[side] = target
         with self._lock:
             self._pending.update(updates)
 
@@ -395,8 +402,11 @@ class GripperExecutor:
             self._pending = {}
         if self._target_source is not None:
             pending.update(self._target_source())
-        for side, requested_width in pending.items():
+        for side, target in pending.items():
             params = self._params[side]
+            requested_width = self._decode_target(side, target, params)
+            if requested_width is None:
+                continue
             width = _clamp(
                 requested_width, float(params.min_width), float(params.max_width)
             )
@@ -416,6 +426,36 @@ class GripperExecutor:
                 self._grippers[side].Move(width, velocity, force)
             self._last_sent[side] = width
         self._refresh_states()
+
+    def _decode_target(self, side: str, target: float, params: Any) -> float | None:
+        if self._target_mode == "width":
+            return target
+        with self._lock:
+            close = self._last_close.get(side)
+            if target >= self.CLOSE_THRESHOLD:
+                close = True
+            elif target <= self.OPEN_THRESHOLD:
+                close = False
+            elif close is None:
+                return None
+            self._last_close[side] = close
+        if close:
+            return float(params.min_width)
+        requested = self._default_width_m
+        return float(params.max_width) if requested is None else float(requested)
+
+    def describe_target(self, side: str, target: float) -> str:
+        if self._target_mode == "width":
+            return f"width={target:.4f}"
+        with self._lock:
+            close = self._last_close.get(side)
+        if target >= self.CLOSE_THRESHOLD:
+            return "close"
+        if target <= self.OPEN_THRESHOLD:
+            return "open"
+        if close is None:
+            return "preserve"
+        return "close" if close else "open"
 
     def _refresh_states(self) -> None:
         measured: dict[str, dict[str, float]] = {}
@@ -444,6 +484,7 @@ def initialize_gripper_executor(
     followers: Sequence[str] | None = None,
     initialization_registry: GripperInitializationRegistry | None = None,
     append_log: Callable[..., None] | None = None,
+    target_mode: Literal["width", "close"] = "width",
     executor_factory: Callable[..., GripperExecutor] = GripperExecutor,
 ) -> GripperExecutor | None:
     """Create and initialize predicted grippers while their robots are IDLE."""
@@ -451,6 +492,8 @@ def initialize_gripper_executor(
     if not controlled_sides:
         return None
     kwargs: dict[str, Any] = {"failure_event": failure_event}
+    if target_mode != "width":
+        kwargs["target_mode"] = target_mode
     if default_width_m is not None:
         kwargs["default_width_m"] = default_width_m
     if initialization_registry is not None:

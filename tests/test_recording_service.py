@@ -120,7 +120,12 @@ def test_ensure_camera_streams_rejects_missing_selected_depth() -> None:
         service._ensure_camera_streams(["ego"], depth_names=["ego"])
 
 
-def _arm_snapshot_payload(base: float, *, gripper: dict | None = None) -> dict:
+def _arm_snapshot_payload(
+    base: float,
+    *,
+    gripper: dict | None = None,
+    gripper_command: dict | None = None,
+) -> dict:
     payload = {
         "connected": True,
         "states": {
@@ -136,6 +141,8 @@ def _arm_snapshot_payload(base: float, *, gripper: dict | None = None) -> dict:
     }
     if gripper is not None:
         payload["gripper"] = dict(gripper)
+    if gripper_command is not None:
+        payload["gripper_command"] = dict(gripper_command)
     return payload
 
 
@@ -146,11 +153,22 @@ class _FakeTeleop:
         return {
             "robots": {
                 "FOLLOWER_A": _arm_snapshot_payload(
-                    0.0, gripper={"width": 0.03, "force": -2.0}
+                    0.0,
+                    gripper={"width": 0.03, "force": -2.0},
+                    gripper_command={"close": 1.0},
                 ),
                 "FOLLOWER_B": _arm_snapshot_payload(100.0),
             }
         }
+
+
+class _FakeTeleopWithoutCommand(_FakeTeleop):
+    def robot_data_snapshot(self, *, include_states=True, include_actions=True):
+        snapshot = super().robot_data_snapshot(
+            include_states=include_states, include_actions=include_actions
+        )
+        snapshot["robots"]["FOLLOWER_A"].pop("gripper_command")
+        return snapshot
 
 
 def _drive_capture(service: RecordingService, frames: int) -> None:
@@ -164,11 +182,7 @@ def _drive_capture(service: RecordingService, frames: int) -> None:
         time.sleep(0.02)
 
 
-def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
-    # End-to-end: a follower configured as a gripper must land its measured
-    # width/force in the saved LeRobot dataset, in both observation.state and
-    # action, alongside the arm's TCP metrics. Exercises the recording loop and
-    # the real LeRobotDataset round-trip (skipped if lerobot isn't installed).
+def test_records_gripper_state_and_close_command_into_saved_episode(tmp_path) -> None:
     pytest.importorskip("lerobot")
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -204,18 +218,15 @@ def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
     )
     features = dataset.features
 
-    # Both the observation and action vectors carry the left arm's gripper
-    # width/force (right arm has no gripper, so no gripper axes for it).
     state_names = features["observation.state"]["names"]
     action_names = features["action"]["names"]
     assert "left_arm.gripper.width" in state_names
     assert "left_arm.gripper.force" in state_names
-    assert "left_arm.gripper.width" in action_names
-    assert "left_arm.gripper.force" in action_names
+    assert "left_arm.gripper.close" in action_names
+    assert "left_arm.gripper.width" not in action_names
+    assert "left_arm.gripper.force" not in action_names
     assert not any(name.startswith("right_arm.gripper") for name in state_names)
 
-    # The stored values match the snapshot's gripper states, identical in state
-    # and action (recording reuses gripper.states() for both).
     frame = dataset[0]
     # The provided task string is stamped into every recorded frame.
     assert frame["task"] == "gripper recording test"
@@ -223,8 +234,24 @@ def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
     action = np.asarray(frame["action"])
     assert state[state_names.index("left_arm.gripper.width")] == pytest.approx(0.03)
     assert state[state_names.index("left_arm.gripper.force")] == pytest.approx(-2.0)
-    assert action[action_names.index("left_arm.gripper.width")] == pytest.approx(0.03)
-    assert action[action_names.index("left_arm.gripper.force")] == pytest.approx(-2.0)
+    assert action[action_names.index("left_arm.gripper.close")] == pytest.approx(1.0)
+
+
+def test_recording_rejects_gripper_action_before_first_command(tmp_path) -> None:
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    service = RecordingService(
+        settings,
+        teleop=_FakeTeleopWithoutCommand(),
+        cameras=SimpleNamespace(),
+        get_active_sides=lambda: ["left_arm", "right_arm"],
+    )
+
+    with pytest.raises(RuntimeError, match="request Open or Close"):
+        service.start(
+            recording_entries=["action.left_arm.gripper"],
+            job_name="missing_command",
+        )
 
 
 @pytest.mark.parametrize(

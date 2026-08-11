@@ -33,5 +33,13 @@ def test_gripper_panel_uses_backend_session_lifecycle() -> None:
 def test_gripper_panel_asset_revision_is_current() -> None:
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
 
-    assert "/static/app.js?v=20260810-02" in index
+    assert "/static/app.js?v=20260811-01" in index
     assert "/static/styles.css?v=20260810-02" in index
+
+
+def test_recording_uses_accepted_gripper_close_command() -> None:
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'label: `${side}.gripper.close`' in source
+    assert 'payload: "gripper_command"' in source
+    assert 'verifyField: "close"' in source

@@ -25,7 +25,7 @@ def _load_manifest(root: Path) -> Any:
     return EpisodeManifest.from_path(root)
 
 
-def _feature_keys(root: Path) -> set[str]:
+def _features(root: Path) -> dict[str, Any]:
     info_path = root / "meta" / "info.json"
     try:
         payload = json.loads(info_path.read_text(encoding="utf-8"))
@@ -34,7 +34,18 @@ def _feature_keys(root: Path) -> set[str]:
     features = payload.get("features") if isinstance(payload, dict) else None
     if not isinstance(features, dict):
         raise ValueError(f"Dataset metadata has no features object: {info_path}")
-    return set(features)
+    return features
+
+
+def _feature_keys(root: Path) -> set[str]:
+    return set(_features(root))
+
+
+def _action_signature(root: Path) -> tuple[Any, Any]:
+    action = _features(root).get("action")
+    if not isinstance(action, dict):
+        raise ValueError(f"Dataset metadata has no action feature: {root}")
+    return action.get("shape"), action.get("names")
 
 
 def _validate_matching_feature_keys(episode_roots: list[Path]) -> None:
@@ -57,6 +68,20 @@ def _validate_matching_feature_keys(episode_roots: list[Path]) -> None:
             "Datasets cannot be merged because their feature keys differ. "
             "Depth-enabled and RGB-only recordings must be merged separately: "
             + "; ".join(mismatches)
+        )
+
+    expected_action = _action_signature(episode_roots[0])
+    action_mismatches = [
+        root.name
+        for root in episode_roots[1:]
+        if _action_signature(root) != expected_action
+    ]
+    if action_mismatches:
+        raise ValueError(
+            "Datasets cannot be merged because their action shapes or axis names "
+            "differ. Convert legacy gripper width/force datasets with "
+            "flexivtrainer-convert-gripper-actions before merging: "
+            + ", ".join(action_mismatches)
         )
 
 

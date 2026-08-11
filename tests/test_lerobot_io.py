@@ -195,15 +195,13 @@ def test_extract_recording_frame_values_concatenates_both_arms() -> None:
     ]
 
 
-def test_gripper_width_force_folds_into_state_and_action() -> None:
-    # A follower gripper's measured width/force is appended to BOTH the
-    # observation.state and action vectors, from the same gripper states, and
-    # trails the arm's robot-state/action metrics.
+def test_gripper_state_and_accepted_command_use_separate_vectors() -> None:
     snapshot = {
         "robots": {
             "FOLLOWER_A": {
                 **_arm_payload(0),
                 "gripper": {"width": 0.03, "force": -2.0},
+                "gripper_command": {"close": 1.0},
             }
         }
     }
@@ -217,10 +215,8 @@ def test_gripper_width_force_folds_into_state_and_action() -> None:
         ],
     )
 
-    # Pose (7) then gripper (width, force) in each vector; action uses the same
-    # gripper width/force values as state.
     assert values["observation.state"] == list(range(0, 7)) + [0.03, -2.0]
-    assert values["action"] == list(range(30, 37)) + [0.03, -2.0]
+    assert values["action"] == list(range(30, 37)) + [1.0]
 
 
 def test_gripper_entry_is_in_defaults_and_features_named() -> None:
@@ -235,6 +231,7 @@ def test_gripper_entry_is_in_defaults_and_features_named() -> None:
             "FOLLOWER_A": {
                 **_arm_payload(0),
                 "gripper": {"width": 0.03, "force": -2.0},
+                "gripper_command": {"close": 0.0},
             }
         }
     }
@@ -256,11 +253,26 @@ def test_gripper_entry_is_in_defaults_and_features_named() -> None:
         "left_arm.gripper.force",
     ]
     action_feature = features["action"]
-    assert action_feature["shape"] == (2,)
-    assert action_feature["names"] == [
-        "left_arm.gripper.width",
-        "left_arm.gripper.force",
-    ]
+    assert action_feature["shape"] == (1,)
+    assert action_feature["names"] == ["left_arm.gripper.close"]
+
+
+def test_gripper_action_requires_an_accepted_command() -> None:
+    snapshot = {
+        "robots": {
+            "FOLLOWER_A": {
+                **_arm_payload(0),
+                "gripper": {"width": 0.03, "force": -2.0},
+            }
+        }
+    }
+
+    with np.testing.assert_raises_regex(ValueError, "request Open or Close"):
+        extract_recording_frame_values(
+            snapshot,
+            ["action.left_arm.gripper"],
+            ["left_arm"],
+        )
 
 
 def test_gripper_entry_omitted_when_no_gripper_telemetry() -> None:

@@ -216,16 +216,9 @@ class TeleopService:
         snapshot_robots: dict[str, Any] = {}
         errors: dict[str, str] = {}
 
-        # Live width/force for any follower configured as a gripper, keyed by the
-        # same pair index used below. Folded into the follower payload so that
-        # recording can append it to both observation.state and action. Read once
-        # up front; absent for sides without an enabled gripper. Skip the read
-        # entirely when neither states nor actions are requested so a bare
-        # snapshot never touches the (hardware) gripper layer.
-        gripper_states = (
-            self._gripper_states_by_index()
-            if (include_states or include_actions)
-            else {}
+        gripper_states = self._gripper_states_by_index() if include_states else {}
+        gripper_commands = (
+            self._gripper_commands_by_index() if include_actions else {}
         )
 
         for index, serial in enumerate(configured_serials):
@@ -265,13 +258,14 @@ class TeleopService:
                         if actions:
                             payload["actions"] = actions
 
-                # A follower gripper's measured width/force feeds both the
-                # observation and the action, so attach it whenever either is
-                # requested; the recorder appends it to the matching vector(s).
-                if include_states or include_actions:
+                if include_states:
                     gripper = gripper_states.get(index)
                     if gripper is not None:
                         payload["gripper"] = dict(gripper)
+                if include_actions:
+                    command = gripper_commands.get(index)
+                    if command is not None:
+                        payload["gripper_command"] = dict(command)
             except Exception as exc:  # pragma: no cover - hardware specific
                 payload["connected"] = False
                 payload["error"] = describe_exception(exc)
@@ -289,6 +283,14 @@ class TeleopService:
             return {}
         try:
             return self._end_effectors.gripper_states_by_index()
+        except Exception:  # pragma: no cover - hardware specific
+            return {}
+
+    def _gripper_commands_by_index(self) -> dict[int, dict[str, float]]:
+        if self._end_effectors is None:
+            return {}
+        try:
+            return self._end_effectors.gripper_commands_by_index()
         except Exception:  # pragma: no cover - hardware specific
             return {}
 

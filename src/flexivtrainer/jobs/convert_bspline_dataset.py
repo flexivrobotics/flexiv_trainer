@@ -549,6 +549,11 @@ def convert_lerobot_tcp_actions_to_bspline(
             for layout in layouts
             if layout.gripper_width_index is not None
         ],
+        "gripper_close_sides": [
+            layout.side
+            for layout in layouts
+            if layout.gripper_close_index is not None
+        ],
         "rotation_representation": "rotation_6d_rows",
         "degree": degree,
         "chunk_size": chunk_size,

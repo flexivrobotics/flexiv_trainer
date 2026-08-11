@@ -263,9 +263,8 @@ function sideHasGripper(side) {
 // every arm are concatenated into the single `observation.state` / `action`
 // feature. Each row's label is the feature name-prefix it contributes (e.g.
 // `left_arm.tcp_pose`), matching the per-axis names in those features. A side
-// whose follower is a gripper also gets a `gripper` toggle (width + force);
-// the same measured gripper states feed both its state and action entries, so
-// both verify against the follower's `gripper` payload section.
+// whose follower is a gripper also gets measured state and accepted command
+// entries.
 function buildArmMetricRecordingOptions(sides) {
     const options = [];
     sides.forEach((side, index) => {
@@ -307,12 +306,12 @@ function buildArmMetricRecordingOptions(sides) {
         if (sideHasGripper(side)) {
             options.push({
                 id: `action.${side}.gripper`,
-                label: `${side}.gripper`,
+                label: `${side}.gripper.close`,
                 group: "action",
                 bucket: "action",
-                payload: "gripper",
+                payload: "gripper_command",
                 side: index,
-                verifyField: "width",
+                verifyField: "close",
             });
         }
     });

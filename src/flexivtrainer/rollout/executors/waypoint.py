@@ -118,12 +118,23 @@ def build_action_layout(
     layout: list[dict[str, Any]] = []
     for side in sides:
         gripper_width_name = f"{side}.gripper.width"
+        gripper_close_name = f"{side}.gripper.close"
         gripper_force_name = f"{side}.gripper.force"
         gripper_width = (
             action_names.index(gripper_width_name)
             if gripper_width_name in action_names
             else None
         )
+        gripper_close = (
+            action_names.index(gripper_close_name)
+            if gripper_close_name in action_names
+            else None
+        )
+        if gripper_width is not None and gripper_close is not None:
+            raise ValueError(
+                f"Action schema cannot contain both '{gripper_width_name}' and "
+                f"'{gripper_close_name}'"
+            )
         if gripper_force_name in action_names and gripper_width is None:
             raise ValueError(
                 f"Action schema has '{gripper_force_name}' without required "
@@ -154,8 +165,16 @@ def build_action_layout(
                 # measured feedback, not a hardware command: GripperExecutor
                 # derives a conservative Move() force from device limits.
                 "gripper_width": gripper_width,
+                "gripper_close": gripper_close,
             }
         )
+    modes = {
+        "width" if arm["gripper_width"] is not None else "close"
+        for arm in layout
+        if arm["gripper_width"] is not None or arm["gripper_close"] is not None
+    }
+    if len(modes) > 1:
+        raise ValueError("Mixed gripper width/close action schemas are unsupported")
     return layout
 
 
@@ -181,7 +200,7 @@ class _RobotCommand:
 class _TimedWaypoint:
     target_time: float
     commands: list[_RobotCommand | None]
-    gripper_widths: dict[str, float]
+    gripper_targets: dict[str, float]
 
 
 class WaypointExecutor:
@@ -211,6 +230,7 @@ class WaypointExecutor:
                     arm.get("twist"),
                     arm.get("wrench"),
                     arm.get("gripper_width"),
+                    arm.get("gripper_close"),
                 )
                 if (
                     isinstance(section, int)
@@ -250,14 +270,20 @@ class WaypointExecutor:
             if target_time <= now:
                 continue
             commands: list[_RobotCommand | None] = []
-            gripper_widths: dict[str, float] = {}
+            gripper_targets: dict[str, float] = {}
             for index, arm_plan in enumerate(self._layout):
                 if index >= len(self._robots):
                     break
                 gripper_width = arm_plan.get("gripper_width")
-                if isinstance(gripper_width, int):
-                    gripper_widths[str(arm_plan["side"])] = float(
-                        action[gripper_width]
+                gripper_close = arm_plan.get("gripper_close")
+                target_index = (
+                    gripper_width
+                    if isinstance(gripper_width, int)
+                    else gripper_close
+                )
+                if isinstance(target_index, int):
+                    gripper_targets[str(arm_plan["side"])] = float(
+                        action[target_index]
                     )
                 pose_slice = arm_plan["pose"]
                 if pose_slice is None:
@@ -281,7 +307,7 @@ class WaypointExecutor:
                     )
                 )
             waypoints.append(
-                _TimedWaypoint(float(target_time), commands, gripper_widths)
+                _TimedWaypoint(float(target_time), commands, gripper_targets)
             )
         if actions and not waypoints:
             # Every waypoint was already in the past, so the arm keeps holding its
@@ -312,13 +338,24 @@ class WaypointExecutor:
                 )
             for arm in self._layout:
                 gripper_width = arm.get("gripper_width")
+                gripper_close = arm.get("gripper_close")
+                target_index = (
+                    gripper_width
+                    if isinstance(gripper_width, int)
+                    else gripper_close
+                )
                 if (
-                    isinstance(gripper_width, int)
-                    and not math.isfinite(float(action[gripper_width]))
+                    isinstance(target_index, int)
+                    and not math.isfinite(float(action[target_index]))
                 ):
+                    target_name = (
+                        "gripper width"
+                        if isinstance(gripper_width, int)
+                        else "gripper close"
+                    )
                     raise ValueError(
                         "Waypoint action "
-                        f"{index} has non-finite gripper width for {arm['side']}"
+                        f"{index} has non-finite {target_name} for {arm['side']}"
                     )
 
     def _send_waypoint(self, waypoint: _TimedWaypoint) -> None:
@@ -335,8 +372,8 @@ class WaypointExecutor:
                 max_lin_acc,
                 max_ang_acc,
             )
-        if waypoint.gripper_widths and self._submit_gripper is not None:
-            self._submit_gripper(waypoint.gripper_widths)
+        if waypoint.gripper_targets and self._submit_gripper is not None:
+            self._submit_gripper(waypoint.gripper_targets)
 
     def _execute_loop(self) -> None:
         try:

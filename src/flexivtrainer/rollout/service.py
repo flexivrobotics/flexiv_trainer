@@ -240,6 +240,7 @@ class RolloutService:
         waypoint_action_dim: int | None = None
         waypoint_layout_inferred = False
         waypoint_gripper_sides: tuple[str, ...] = ()
+        waypoint_gripper_target_mode = "width"
         end_effector_config: dict[str, Any] = {}
         gripper_default_width_m = self._get_gripper_default_width()
         if is_bspline:
@@ -267,7 +268,13 @@ class RolloutService:
                 str(arm["side"])
                 for arm in waypoint_layout
                 if isinstance(arm.get("gripper_width"), int)
+                or isinstance(arm.get("gripper_close"), int)
             )
+            if any(
+                isinstance(arm.get("gripper_close"), int)
+                for arm in waypoint_layout
+            ):
+                waypoint_gripper_target_mode = "close"
             if waypoint_gripper_sides:
                 end_effector_config = dict(
                     self._get_end_effector_config() or {}
@@ -358,6 +365,7 @@ class RolloutService:
                 action_layout=waypoint_layout,
                 action_dim=waypoint_action_dim,
                 gripper_sides=waypoint_gripper_sides,
+                gripper_target_mode=waypoint_gripper_target_mode,
                 end_effector_config=end_effector_config,
                 motion_limits=motion_limits,
                 planner_hz_fallback=app_rollout.planner_hz,

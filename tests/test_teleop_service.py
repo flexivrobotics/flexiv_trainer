@@ -891,7 +891,8 @@ def test_robot_data_snapshot_folds_in_gripper_states(tmp_path) -> None:
     service = TeleopService(settings, get_robot_pairs=lambda: pairs)
     service._controller = FakeController((FakeRobot(), FakeRobot()))
     service._end_effectors = SimpleNamespace(
-        gripper_states_by_index=lambda: {0: {"width": 0.03, "force": -2.0}}
+        gripper_states_by_index=lambda: {0: {"width": 0.03, "force": -2.0}},
+        gripper_commands_by_index=lambda: {0: {"close": 1.0}},
     )
 
     snapshot = service.robot_data_snapshot()
@@ -901,6 +902,7 @@ def test_robot_data_snapshot_folds_in_gripper_states(tmp_path) -> None:
         "width": 0.03,
         "force": -2.0,
     }
+    assert snapshot["robots"]["FOLLOWER_A"]["gripper_command"] == {"close": 1.0}
     assert "gripper" not in snapshot["robots"]["FOLLOWER_B"]
 
 

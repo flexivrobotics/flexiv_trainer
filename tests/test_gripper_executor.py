@@ -100,6 +100,7 @@ def _controller(
     followers=None,
     initialization_registry=None,
     append_log=None,
+    target_mode="width",
 ) -> tuple[GripperExecutor, list[FakeGripper], list[tuple[str, str]]]:
     robot = robot or FakeRobot()
     sides = sides or ["left_arm"]
@@ -142,6 +143,7 @@ def _controller(
         idle_mode="IDLE",
         target_source=target_source,
         failure_event=failure_event,
+        target_mode=target_mode,
         **kwargs,
     )
     return controller, grippers, events
@@ -185,6 +187,31 @@ def test_initializes_to_default_width_without_capping_policy_targets() -> None:
         (0.05, 0.4, 5.0),
         (0.08, 0.4, 5.0),
     ]
+
+
+def test_close_targets_use_hysteresis_and_preserve_until_decisive() -> None:
+    controller, grippers, _ = _controller(
+        target_mode="close",
+        default_width_m=0.05,
+        wait=lambda event, timeout: False,
+    )
+    controller.initialize()
+
+    controller.submit({"left_arm": 0.5})
+    controller._send_pending()
+    controller.submit({"left_arm": 0.7})
+    controller._send_pending()
+    controller.submit({"left_arm": 0.5})
+    controller._send_pending()
+    controller.submit({"left_arm": 0.2})
+    controller._send_pending()
+
+    assert grippers[0].moves == [
+        (0.05, 0.4, 5.0),
+        (0.01, 0.4, 5.0),
+        (0.05, 0.4, 5.0),
+    ]
+    assert controller.describe_target("left_arm", 0.5) == "open"
 
 
 def test_shared_registry_preserves_cached_width_until_policy_command() -> None:
