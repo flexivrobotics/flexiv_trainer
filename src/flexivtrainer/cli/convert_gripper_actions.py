@@ -31,6 +31,22 @@ app = typer.Typer(add_completion=False)
 def run(
     source: Annotated[Path, typer.Argument(help="Source LeRobot dataset.")],
     output: Annotated[Path, typer.Argument(help="New converted dataset.")],
+    open_width_m: Annotated[
+        float,
+        typer.Option(min=0.0, help="Target width written for inferred Open states."),
+    ],
+    close_width_m: Annotated[
+        float,
+        typer.Option(min=0.0, help="Target width written for inferred Close states."),
+    ],
+    velocity_m_s: Annotated[
+        float,
+        typer.Option(min=1e-9, help="Gripper velocity bound to the dataset."),
+    ],
+    force_limit_n: Annotated[
+        float,
+        typer.Option(min=1e-9, help="Gripper force limit bound to the dataset."),
+    ],
     motion_threshold_m: Annotated[
         float,
         typer.Option(min=1e-9, help="Cumulative width movement for a transition."),
@@ -41,14 +57,16 @@ def run(
     ] = 5.0,
     initial_state_manifest: Annotated[
         Path | None,
-        typer.Option(
-            help="JSON mapping episode indices and sides to open/close."
-        ),
+        typer.Option(help="JSON mapping episode indices and sides to open/close."),
     ] = None,
 ) -> None:
     result = convert_legacy_gripper_actions(
         source,
         output,
+        open_width_m=open_width_m,
+        close_width_m=close_width_m,
+        velocity_m_s=velocity_m_s,
+        force_limit_n=force_limit_n,
         motion_threshold_m=motion_threshold_m,
         force_threshold_n=force_threshold_n,
         initial_state_manifest=initial_state_manifest,

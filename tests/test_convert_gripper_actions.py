@@ -9,6 +9,13 @@ from flexivtrainer.jobs.convert_gripper_actions import (
 
 lerobot = pytest.importorskip("lerobot")
 
+_COMMAND_ARGS = {
+    "open_width_m": 0.065,
+    "close_width_m": 0.0,
+    "velocity_m_s": 0.2,
+    "force_limit_n": 20.0,
+}
+
 
 def _make_source(root, sides=("left_arm", "right_arm")) -> None:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -16,12 +23,8 @@ def _make_source(root, sides=("left_arm", "right_arm")) -> None:
     state_names: list[str] = []
     action_names = ["task.progress"]
     for side in sides:
-        state_names.extend(
-            [f"{side}.gripper.width", f"{side}.gripper.force"]
-        )
-        action_names.extend(
-            [f"{side}.gripper.width", f"{side}.gripper.force"]
-        )
+        state_names.extend([f"{side}.gripper.width", f"{side}.gripper.force"])
+        action_names.extend([f"{side}.gripper.width", f"{side}.gripper.force"])
     dataset = LeRobotDataset.create(
         repo_id="local/legacy_gripper",
         root=root,
@@ -70,7 +73,7 @@ def test_conversion_replaces_legacy_actions_and_preserves_observation(
     _make_source(source)
     source_info_before = (source / "meta" / "info.json").read_bytes()
 
-    result = convert_legacy_gripper_actions(source, output)
+    result = convert_legacy_gripper_actions(source, output, **_COMMAND_ARGS)
 
     assert result["sides"] == ["left_arm", "right_arm"]
     assert result["action_dim"] == 3
@@ -84,8 +87,8 @@ def test_conversion_replaces_legacy_actions_and_preserves_observation(
     ]
     assert info["features"]["action"]["names"] == [
         "task.progress",
-        "left_arm.gripper.close",
-        "right_arm.gripper.close",
+        "left_arm.gripper.target_width",
+        "right_arm.gripper.target_width",
     ]
 
     datasets_config.HF_DATASETS_CACHE = str(tmp_path / "hf-cache")
@@ -93,14 +96,19 @@ def test_conversion_replaces_legacy_actions_and_preserves_observation(
         repo_id="local/converted_gripper", root=output, download_videos=False
     )
     commands = np.stack([np.asarray(converted[index]["action"]) for index in range(9)])
-    np.testing.assert_array_equal(commands[:, 1], [0, 0, 1, 1, 1, 1, 0, 0, 0])
+    np.testing.assert_allclose(
+        commands[:, 1], [0.065, 0.065, 0, 0, 0, 0, 0.065, 0.065, 0.065]
+    )
     np.testing.assert_array_equal(commands[:, 2], commands[:, 1])
     assert np.asarray(converted[0]["observation.state"]).shape == (4,)
 
-    audit = json.loads(
-        (output / "meta" / "gripper_action_conversion.json").read_text()
-    )
+    audit = json.loads((output / "meta" / "gripper_action_conversion.json").read_text())
     assert audit["motion_threshold_m"] == pytest.approx(0.0002)
+    assert json.loads((output / "meta" / "gripper_command.json").read_text()) == {
+        "format_version": 1,
+        "velocity_m_s": 0.2,
+        "force_limit_n": 20.0,
+    }
     assert audit["episodes"][0]["transitions"] == [
         {"frame_index": 2, "command": "close"},
         {"frame_index": 6, "command": "open"},
@@ -120,12 +128,10 @@ def test_initial_state_manifest_overrides_force_inference(tmp_path) -> None:
     )
 
     convert_legacy_gripper_actions(
-        source, output, initial_state_manifest=manifest
+        source, output, initial_state_manifest=manifest, **_COMMAND_ARGS
     )
 
-    audit = json.loads(
-        (output / "meta" / "gripper_action_conversion.json").read_text()
-    )
+    audit = json.loads((output / "meta" / "gripper_action_conversion.json").read_text())
     assert audit["episodes"][0]["initial_state"] == "close"
     assert audit["episodes"][0]["initial_source"] == "override"
 
@@ -137,6 +143,6 @@ def test_conversion_rejects_existing_output_without_touching_source(tmp_path) ->
     output.mkdir()
 
     with pytest.raises(FileExistsError):
-        convert_legacy_gripper_actions(source, output)
+        convert_legacy_gripper_actions(source, output, **_COMMAND_ARGS)
 
     assert (source / "meta" / "info.json").is_file()

@@ -67,8 +67,8 @@ def test_layout_includes_gripper_width_and_excludes_force() -> None:
     assert all("force" not in name for name in layouts[0].control_names)
 
 
-def test_layout_carries_gripper_close_control() -> None:
-    names = [*_pose_names("left_arm"), "left_arm.gripper.close"]
+def test_layout_carries_gripper_target_width_control() -> None:
+    names = [*_pose_names("left_arm"), "left_arm.gripper.target_width"]
     layouts = detect_tcp_action_layouts(names)
     actions = np.zeros((2, len(names)), dtype=np.float64)
     actions[:, 3] = 1.0
@@ -76,8 +76,8 @@ def test_layout_carries_gripper_close_control() -> None:
 
     controls = extract_cartesian_controls(actions, layouts)
 
-    assert layouts[0].gripper_target_mode == "close"
-    assert layouts[0].control_names[-1] == "left_arm.gripper.close"
+    assert layouts[0].gripper_target_mode == "target_width"
+    assert layouts[0].control_names[-1] == "left_arm.gripper.target_width"
     np.testing.assert_array_equal(controls[:, -1], [0.0, 1.0])
 
 

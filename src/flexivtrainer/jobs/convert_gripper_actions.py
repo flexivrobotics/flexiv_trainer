@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert measured legacy gripper actions to inferred Open/Close commands."""
+"""Convert measured legacy gripper actions to inferred target-width commands."""
 
 from __future__ import annotations
 
@@ -27,6 +27,10 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.data.gripper_command import (
+    GripperCommandMetadata,
+    write_gripper_command_metadata,
+)
 from flexivtrainer.jobs.convert_bspline_dataset import (
     _load_action_names,
     _load_recorded_frames,
@@ -142,12 +146,27 @@ def convert_legacy_gripper_actions(
     source_root: Path,
     output_root: Path,
     *,
+    open_width_m: float,
+    close_width_m: float,
+    velocity_m_s: float,
+    force_limit_n: float,
     motion_threshold_m: float = 0.0002,
     force_threshold_n: float = 5.0,
     initial_state_manifest: Path | None = None,
 ) -> dict[str, Any]:
-    """Create a validated copy with one inferred ``gripper.close`` per side."""
+    """Create a validated copy with inferred target widths for every side."""
 
+    for name, value in {
+        "open_width_m": open_width_m,
+        "close_width_m": close_width_m,
+    }.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+    metadata = GripperCommandMetadata(
+        velocity_m_s=velocity_m_s,
+        force_limit_n=force_limit_n,
+    )
+    metadata = GripperCommandMetadata.from_dict(metadata.to_dict())
     if not math.isfinite(motion_threshold_m) or motion_threshold_m <= 0:
         raise ValueError("motion_threshold_m must be finite and positive")
     if not math.isfinite(force_threshold_n) or force_threshold_n < 0:
@@ -173,7 +192,9 @@ def convert_legacy_gripper_actions(
         raise ValueError("Source action schema has no legacy gripper.width axes")
     for side in width_indices:
         if f"{side}.gripper.close" in action_names:
-            raise ValueError(f"Source contains both gripper width and close for {side}")
+            raise ValueError("Source already contains unsupported gripper.close axes")
+        if f"{side}.gripper.target_width" in action_names:
+            raise ValueError("Source already contains gripper.target_width axes")
     force_indices = {
         side: (
             action_names.index(f"{side}.gripper.force")
@@ -233,8 +254,8 @@ def convert_legacy_gripper_actions(
     for index, name in enumerate(action_names):
         side = name.removesuffix(".gripper.width")
         if side in width_indices and name.endswith(".gripper.width"):
-            output_names.append(f"{side}.gripper.close")
-            output_axes.append(("close", side))
+            output_names.append(f"{side}.gripper.target_width")
+            output_axes.append(("target_width", side))
         elif any(name == f"{item}.gripper.force" for item in width_indices):
             continue
         else:
@@ -247,7 +268,12 @@ def convert_legacy_gripper_actions(
             (
                 frame.action[int(source)]
                 if kind == "source"
-                else inferred[(frame.episode_index, frame.frame_index, str(source))]
+                else (
+                    close_width_m
+                    if inferred[(frame.episode_index, frame.frame_index, str(source))]
+                    >= 0.5
+                    else open_width_m
+                )
             )
             for kind, source in output_axes
         ]
@@ -268,6 +294,10 @@ def convert_legacy_gripper_actions(
         "sides": list(width_indices),
         "motion_threshold_m": motion_threshold_m,
         "force_threshold_n": force_threshold_n,
+        "open_width_m": open_width_m,
+        "close_width_m": close_width_m,
+        "velocity_m_s": metadata.velocity_m_s,
+        "force_limit_n": metadata.force_limit_n,
         "initial_state_manifest": (
             str(Path(initial_state_manifest).expanduser().resolve())
             if initial_state_manifest is not None
@@ -289,12 +319,11 @@ def convert_legacy_gripper_actions(
             json.dumps(converted_info, indent=4) + "\n", encoding="utf-8"
         )
         _replace_action_data(staging, targets, converted_info["features"])
-        _refresh_action_statistics(
-            staging, targets, action_feature, parameter_rows=1
-        )
+        _refresh_action_statistics(staging, targets, action_feature, parameter_rows=1)
         (staging / _AUDIT_PATH).write_text(
             json.dumps(audit, indent=4) + "\n", encoding="utf-8"
         )
+        write_gripper_command_metadata(staging, metadata)
         _validate_output(staging, len(frames), len(output_names))
         staging.replace(output)
     except Exception:

@@ -339,9 +339,7 @@ def test_initialize_warns_when_handle_has_no_enable(tmp_path, monkeypatch) -> No
 
     messages = _connect_with_controller(tmp_path, monkeypatch, controller, pairs)
 
-    assert any(
-        kind == "warn" and "has no Enable()" in msg for kind, msg in messages
-    )
+    assert any(kind == "warn" and "has no Enable()" in msg for kind, msg in messages)
 
 
 def test_initialize_rejects_controller_without_instances(tmp_path, monkeypatch) -> None:
@@ -609,9 +607,7 @@ def test_init_grippers_gated_and_cached(tmp_path, monkeypatch) -> None:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     pairs = [TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")]
     configs = {
-        "single_arm": EndEffectorSideConfig(
-            leader="digital_input", follower="gripper"
-        )
+        "single_arm": EndEffectorSideConfig(leader="digital_input", follower="gripper")
     }
     service = TeleopService(
         settings,
@@ -653,9 +649,7 @@ def test_global_gripper_width_moves_when_stopped_and_rejects_while_started(
     service = TeleopService(
         AppSettings(storage=StorageConfig(root=tmp_path)),
         get_robot_pairs=lambda: [
-            TeleopRobotPair(
-                leader_serial="LEADER_A", follower_serial="FOLLOWER_A"
-            )
+            TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")
         ],
         get_active_sides=lambda: ["single_arm"],
         get_end_effector_config=lambda: {
@@ -710,9 +704,7 @@ def test_gripper_initialization_survives_teleop_reconnect_and_can_be_forced(
     service = TeleopService(
         AppSettings(storage=StorageConfig(root=tmp_path)),
         get_robot_pairs=lambda: [
-            TeleopRobotPair(
-                leader_serial="LEADER_A", follower_serial="FOLLOWER_A"
-            )
+            TeleopRobotPair(leader_serial="LEADER_A", follower_serial="FOLLOWER_A")
         ],
         get_active_sides=lambda: ["single_arm"],
         get_end_effector_config=lambda: {
@@ -892,7 +884,7 @@ def test_robot_data_snapshot_folds_in_gripper_states(tmp_path) -> None:
     service._controller = FakeController((FakeRobot(), FakeRobot()))
     service._end_effectors = SimpleNamespace(
         gripper_states_by_index=lambda: {0: {"width": 0.03, "force": -2.0}},
-        gripper_commands_by_index=lambda: {0: {"close": 1.0}},
+        gripper_commands_by_index=lambda: {0: {"target_width": 0.01}},
     )
 
     snapshot = service.robot_data_snapshot()
@@ -902,7 +894,7 @@ def test_robot_data_snapshot_folds_in_gripper_states(tmp_path) -> None:
         "width": 0.03,
         "force": -2.0,
     }
-    assert snapshot["robots"]["FOLLOWER_A"]["gripper_command"] == {"close": 1.0}
+    assert snapshot["robots"]["FOLLOWER_A"]["gripper_command"] == {"target_width": 0.01}
     assert "gripper" not in snapshot["robots"]["FOLLOWER_B"]
 
 
@@ -922,13 +914,9 @@ def test_robot_data_snapshot_skips_gripper_read_without_states_or_actions(
         calls["count"] += 1
         return {0: {"width": 0.03, "force": -2.0}}
 
-    service._end_effectors = SimpleNamespace(
-        gripper_states_by_index=_gripper_states
-    )
+    service._end_effectors = SimpleNamespace(gripper_states_by_index=_gripper_states)
 
-    snapshot = service.robot_data_snapshot(
-        include_states=False, include_actions=False
-    )
+    snapshot = service.robot_data_snapshot(include_states=False, include_actions=False)
 
     assert calls["count"] == 0
     assert "gripper" not in snapshot["robots"]["FOLLOWER_A"]

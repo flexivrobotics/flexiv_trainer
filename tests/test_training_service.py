@@ -25,6 +25,10 @@ import pytest
 psutil = pytest.importorskip("psutil")
 
 from flexivtrainer.config import AppSettings, StorageConfig  # noqa: E402
+from flexivtrainer.data.gripper_command import (  # noqa: E402
+    GripperCommandMetadata,
+    write_gripper_command_metadata,
+)
 from flexivtrainer.jobs import train_policy  # noqa: E402
 from flexivtrainer.jobs.train_policy import TrainingJob, TrainingService  # noqa: E402
 
@@ -139,6 +143,30 @@ def make_checkpoint(
     (model / "config.json").write_text(json.dumps(config), encoding="utf-8")
     (model / "model.safetensors").write_bytes(b"weights")
     return step
+
+
+def add_target_width_metadata(
+    root: Path,
+    *,
+    velocity: float = 0.2,
+    force: float = 20.0,
+    checkpoint: bool = False,
+) -> GripperCommandMetadata:
+    metadata = GripperCommandMetadata(
+        velocity_m_s=velocity,
+        force_limit_n=force,
+    )
+    if checkpoint:
+        write_gripper_command_metadata(root, metadata, checkpoint=True)
+        return metadata
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["features"]["action"]["names"][-1] = (
+        "single_arm.gripper.target_width"
+    )
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    write_gripper_command_metadata(root, metadata)
+    return metadata
 
 
 class _FakeProcess:
@@ -312,6 +340,30 @@ def test_inspect_checkpoint_accepts_step_and_model_dirs(tmp_path: Path) -> None:
     assert fields["optimizer_lr"]["default"] == 3e-5
 
 
+def test_checkpoint_gripper_metadata_is_inspected_and_synced(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    step = make_checkpoint(tmp_path)
+    expected = add_target_width_metadata(
+        step / "pretrained_model", checkpoint=True
+    )
+
+    assert service.inspect_checkpoint(step)["gripper_command_metadata"] == expected
+
+    job = make_job(tmp_path)
+    job.gripper_command_metadata = expected
+    model = job.output_dir / "checkpoints" / "001000" / "pretrained_model"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text("{}", encoding="utf-8")
+    (model / "model.safetensors").write_bytes(b"weights")
+    service._sync_gripper_command_metadata(job)
+
+    assert json.loads((model / "gripper_command.json").read_text()) == {
+        "format_version": 1,
+        "velocity_m_s": 0.2,
+        "force_limit_n": 20.0,
+    }
+
+
 @pytest.mark.parametrize(
     ("policy_type", "policy_fields"),
     [
@@ -428,6 +480,38 @@ def test_fine_tune_dataset_feature_validation(tmp_path: Path) -> None:
     info_path.write_text(json.dumps(info), encoding="utf-8")
     with pytest.raises(ValueError, match="missing action"):
         service._validate_checkpoint_dataset(checkpoint, missing_action)
+
+
+def test_fine_tune_requires_matching_gripper_command_metadata(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    step = make_checkpoint(tmp_path)
+    add_target_width_metadata(step / "pretrained_model", checkpoint=True)
+    checkpoint = service.inspect_checkpoint(step)
+    dataset = make_dataset(tmp_path)
+    add_target_width_metadata(dataset)
+
+    service._validate_checkpoint_dataset(checkpoint, dataset)
+
+    write_gripper_command_metadata(
+        dataset,
+        GripperCommandMetadata(velocity_m_s=0.1, force_limit_n=20.0),
+    )
+    with pytest.raises(ValueError, match="differs from the source checkpoint"):
+        service._validate_checkpoint_dataset(checkpoint, dataset)
+
+
+def test_target_width_dataset_requires_command_metadata(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    dataset = make_dataset(tmp_path)
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["features"]["action"]["names"][-1] = (
+        "single_arm.gripper.target_width"
+    )
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="gripper command metadata"):
+        service._dataset_gripper_command_metadata(dataset)
 
 
 def test_bspline_fine_tune_rejects_incompatible_flat_action_width(

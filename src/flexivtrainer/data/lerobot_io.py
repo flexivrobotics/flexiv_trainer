@@ -134,8 +134,8 @@ _TCP_WRENCH_AXES = [
 _GRIPPER_LABEL = "gripper"
 _GRIPPER_STATE_AXES = ["gripper.width", "gripper.force"]
 _GRIPPER_STATE_FIELDS = ["width", "force"]
-_GRIPPER_ACTION_AXES = ["gripper.close"]
-_GRIPPER_ACTION_FIELDS = ["close"]
+_GRIPPER_ACTION_AXES = ["gripper.target_width"]
+_GRIPPER_ACTION_FIELDS = ["target_width"]
 
 # Each metric: (label, state snapshot field, action snapshot field, axis names).
 # The label appears in entry keys and axis names (e.g. "tcp_pose"). State and
@@ -326,7 +326,9 @@ def _collect_arm_group(
             continue
         for index, value in enumerate(vector):
             values.append(float(value))
-            names.append(axis_names[index] if index < len(axis_names) else f"{label}.{index}")
+            names.append(
+                axis_names[index] if index < len(axis_names) else f"{label}.{index}"
+            )
     return values, names
 
 
@@ -336,7 +338,7 @@ def _collect_arm_gripper(
     kind: str,
     enabled_entries: set[str],
 ) -> tuple[list[float], list[str]]:
-    """Append measured gripper state or the accepted Open/Close command."""
+    """Append measured gripper state or the accepted movement command."""
     feature_ns = "observation.state" if kind == "state" else "action"
     if f"{feature_ns}.{side}.{_GRIPPER_LABEL}" not in enabled_entries:
         return [], []
@@ -348,10 +350,10 @@ def _collect_arm_gripper(
         gripper = payload.get("gripper_command")
         fields = _GRIPPER_ACTION_FIELDS
         axes = _GRIPPER_ACTION_AXES
-        if not isinstance(gripper, dict) or gripper.get("close") is None:
+        if not isinstance(gripper, dict) or gripper.get("target_width") is None:
             raise ValueError(
-                f"Gripper command is unavailable for {side}; request Open or "
-                "Close before recording"
+                f"Gripper command is unavailable for {side}; send a leader "
+                "command before recording"
             )
     if not isinstance(gripper, dict):
         return [], []

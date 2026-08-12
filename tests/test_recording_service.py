@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig
+from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.data.recording_service import (
     DEFAULT_JOB_NAME,
     RecordingService,
@@ -155,11 +156,14 @@ class _FakeTeleop:
                 "FOLLOWER_A": _arm_snapshot_payload(
                     0.0,
                     gripper={"width": 0.03, "force": -2.0},
-                    gripper_command={"close": 1.0},
+                    gripper_command={"target_width": 0.01},
                 ),
                 "FOLLOWER_B": _arm_snapshot_payload(100.0),
             }
         }
+
+    def gripper_command_metadata(self):
+        return GripperCommandMetadata(velocity_m_s=0.2, force_limit_n=20.0)
 
 
 class _FakeTeleopWithoutCommand(_FakeTeleop):
@@ -182,7 +186,7 @@ def _drive_capture(service: RecordingService, frames: int) -> None:
         time.sleep(0.02)
 
 
-def test_records_gripper_state_and_close_command_into_saved_episode(tmp_path) -> None:
+def test_records_gripper_state_and_target_command_into_saved_episode(tmp_path) -> None:
     pytest.importorskip("lerobot")
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -213,16 +217,14 @@ def test_records_gripper_state_and_close_command_into_saved_episode(tmp_path) ->
         service.stop()
     result = service.save()
 
-    dataset = LeRobotDataset(
-        f"local/{result['episode_name']}", root=result["path"]
-    )
+    dataset = LeRobotDataset(f"local/{result['episode_name']}", root=result["path"])
     features = dataset.features
 
     state_names = features["observation.state"]["names"]
     action_names = features["action"]["names"]
     assert "left_arm.gripper.width" in state_names
     assert "left_arm.gripper.force" in state_names
-    assert "left_arm.gripper.close" in action_names
+    assert "left_arm.gripper.target_width" in action_names
     assert "left_arm.gripper.width" not in action_names
     assert "left_arm.gripper.force" not in action_names
     assert not any(name.startswith("right_arm.gripper") for name in state_names)
@@ -234,7 +236,16 @@ def test_records_gripper_state_and_close_command_into_saved_episode(tmp_path) ->
     action = np.asarray(frame["action"])
     assert state[state_names.index("left_arm.gripper.width")] == pytest.approx(0.03)
     assert state[state_names.index("left_arm.gripper.force")] == pytest.approx(-2.0)
-    assert action[action_names.index("left_arm.gripper.close")] == pytest.approx(1.0)
+    assert action[action_names.index("left_arm.gripper.target_width")] == pytest.approx(
+        0.01
+    )
+    assert json.loads(
+        (Path(result["path"]) / "meta" / "gripper_command.json").read_text()
+    ) == {
+        "format_version": 1,
+        "velocity_m_s": 0.2,
+        "force_limit_n": 20.0,
+    }
 
 
 def test_recording_rejects_gripper_action_before_first_command(tmp_path) -> None:
@@ -247,7 +258,7 @@ def test_recording_rejects_gripper_action_before_first_command(tmp_path) -> None
         get_active_sides=lambda: ["left_arm", "right_arm"],
     )
 
-    with pytest.raises(RuntimeError, match="request Open or Close"):
+    with pytest.raises(RuntimeError, match="send a leader command"):
         service.start(
             recording_entries=["action.left_arm.gripper"],
             job_name="missing_command",

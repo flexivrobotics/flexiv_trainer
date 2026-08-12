@@ -202,32 +202,34 @@ def _parse_layout(
     layouts: list[_ArmLayout] = []
     for side in sides:
         position = tuple(f"{side}.tcp_pose.{axis}" for axis in _POSITION_AXES)
-        rotation = tuple(
-            f"{side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_AXES
-        )
+        rotation = tuple(f"{side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_AXES)
         gripper = f"{side}.gripper.width"
+        gripper_target_width = f"{side}.gripper.target_width"
         gripper_close = f"{side}.gripper.close"
-        missing = [
-            name for name in (*position, *rotation) if name not in name_to_index
-        ]
+        missing = [name for name in (*position, *rotation) if name not in name_to_index]
         if missing:
             raise ValueError(
                 f"Incomplete B-spline controls for side '{side}'; missing {missing}"
             )
         expected_names.update((*position, *rotation))
         gripper_index = name_to_index.get(gripper)
-        close_index = name_to_index.get(gripper_close)
-        if gripper_index is not None and close_index is not None:
+        target_width_index = name_to_index.get(gripper_target_width)
+        if gripper_close in name_to_index:
             raise ValueError(
-                f"B-spline controls cannot contain both width and close for {side}"
+                "Boolean gripper.close B-spline controls are unsupported; "
+                "convert them to gripper.target_width"
+            )
+        if gripper_index is not None and target_width_index is not None:
+            raise ValueError(
+                f"B-spline controls cannot contain both width modes for {side}"
             )
         if gripper_index is not None:
             expected_names.add(gripper)
             target_mode = "width"
-        elif close_index is not None:
-            gripper_index = close_index
-            expected_names.add(gripper_close)
-            target_mode = "close"
+        elif target_width_index is not None:
+            gripper_index = target_width_index
+            expected_names.add(gripper_target_width)
+            target_mode = "target_width"
         else:
             target_mode = None
         layouts.append(
@@ -249,7 +251,10 @@ def _parse_layout(
         if layout.gripper_target_mode is not None
     }
     if len(target_modes) > 1:
-        raise ValueError("Mixed gripper width/close B-spline controls are unsupported")
+        raise ValueError(
+            "Mixed legacy gripper.width and gripper.target_width B-spline "
+            "controls are unsupported"
+        )
     public_layout = BSplineActionLayout(
         rows=len(rows),
         channels=channels,
@@ -408,9 +413,7 @@ class BSplineExecutor:
 
     def _sample(self, plan: _Plan, now: float) -> np.ndarray:
         """Commanded pose for a plan, including any active handoff correction."""
-        out = np.asarray(
-            plan.spline(self._spline_time(plan, now)), dtype=np.float64
-        )
+        out = np.asarray(plan.spline(self._spline_time(plan, now)), dtype=np.float64)
         if plan.blend_s <= 0.0:
             return out
         u = (now - plan.installed_at) / plan.blend_s
@@ -431,9 +434,7 @@ class BSplineExecutor:
             velocity = np.zeros(len(self._channels) - 1, dtype=np.float64)
         else:
             velocity = (
-                np.asarray(
-                    plan.deriv(self._spline_time(plan, now)), dtype=np.float64
-                )
+                np.asarray(plan.deriv(self._spline_time(plan, now)), dtype=np.float64)
                 * self._source_rate
             )
             # Outside the domain the pose is held, so it is not moving at all.
@@ -445,9 +446,7 @@ class BSplineExecutor:
         if u >= 1.0:
             return velocity
         if plan.offset is not None:
-            velocity = velocity + plan.offset * (
-                _handoff_decay_rate(u) / plan.blend_s
-            )
+            velocity = velocity + plan.offset * (_handoff_decay_rate(u) / plan.blend_s)
         if plan.velocity_offset is not None:
             velocity = velocity + plan.velocity_offset * (
                 _handoff_velocity_decay_rate(u)
@@ -462,9 +461,7 @@ class BSplineExecutor:
     ) -> tuple[float, float, bool, bool, float]:
         min_time = float(spline.t[self._degree])
         max_time = float(spline.t[-self._degree - 1])
-        max_allowed = min_time + (
-            max_time - min_time
-        ) * self._alignment_max_fraction
+        max_allowed = min_time + (max_time - min_time) * self._alignment_max_fraction
         initial_max = float(
             np.clip(
                 min_time + max(0.0, observation_age_s) * self._source_rate,

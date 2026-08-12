@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.rollout.executors.gripper import GripperExecutor
 from flexivtrainer.runtime.gripper_session import (
     GripperIdentity,
@@ -101,6 +102,7 @@ def _controller(
     initialization_registry=None,
     append_log=None,
     target_mode="width",
+    command_parameters=None,
 ) -> tuple[GripperExecutor, list[FakeGripper], list[tuple[str, str]]]:
     robot = robot or FakeRobot()
     sides = sides or ["left_arm"]
@@ -133,6 +135,8 @@ def _controller(
         kwargs["initialization_registry"] = initialization_registry
     if append_log is not None:
         kwargs["append_log"] = append_log
+    if command_parameters is not None:
+        kwargs["command_parameters"] = command_parameters
     controller = GripperExecutor(
         [robot],
         sides,
@@ -161,9 +165,7 @@ def test_initializes_in_order_and_reports_measured_state() -> None:
         ("params", ""),
     ]
     assert grippers[0].robot.current_mode == "IDLE"
-    assert controller.measured_states() == {
-        "left_arm": {"width": 0.04, "force": -2.5}
-    }
+    assert controller.measured_states() == {"left_arm": {"width": 0.04, "force": -2.5}}
 
 
 def test_initializes_to_default_width_without_capping_policy_targets() -> None:
@@ -189,29 +191,44 @@ def test_initializes_to_default_width_without_capping_policy_targets() -> None:
     ]
 
 
-def test_close_targets_use_hysteresis_and_preserve_until_decisive() -> None:
+def test_target_width_uses_checkpoint_bound_velocity_and_force() -> None:
     controller, grippers, _ = _controller(
-        target_mode="close",
+        target_mode="target_width",
+        command_parameters=GripperCommandMetadata(
+            velocity_m_s=0.2,
+            force_limit_n=8.0,
+        ),
         default_width_m=0.05,
         wait=lambda event, timeout: False,
     )
     controller.initialize()
 
-    controller.submit({"left_arm": 0.5})
-    controller._send_pending()
-    controller.submit({"left_arm": 0.7})
-    controller._send_pending()
-    controller.submit({"left_arm": 0.5})
-    controller._send_pending()
-    controller.submit({"left_arm": 0.2})
+    controller.submit({"left_arm": 0.02})
     controller._send_pending()
 
     assert grippers[0].moves == [
-        (0.05, 0.4, 5.0),
-        (0.01, 0.4, 5.0),
-        (0.05, 0.4, 5.0),
+        (0.05, 0.2, 8.0),
+        (0.02, 0.2, 8.0),
     ]
-    assert controller.describe_target("left_arm", 0.5) == "open"
+    assert controller.describe_target("left_arm", 0.02) == "width=0.0200"
+
+
+def test_target_width_requires_checkpoint_command_parameters() -> None:
+    with pytest.raises(ValueError, match="requires gripper command metadata"):
+        _controller(target_mode="target_width")
+
+
+def test_target_width_rejects_out_of_range_checkpoint_parameters() -> None:
+    controller, _, _ = _controller(
+        target_mode="target_width",
+        command_parameters=GripperCommandMetadata(
+            velocity_m_s=0.5,
+            force_limit_n=8.0,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="incompatible.*velocity"):
+        controller.initialize()
 
 
 def test_shared_registry_preserves_cached_width_until_policy_command() -> None:
@@ -299,12 +316,13 @@ def test_mixed_dual_gripper_handoff_moves_only_newly_initialized_side() -> None:
     assert waits == [GripperExecutor.INIT_SETTLE_S]
     assert grippers[0].moves == []
     assert grippers[1].moves == [(0.05, 0.4, 5.0)]
-    assert registry.state(
-        GripperIdentity("FOLLOWER_LEFT", "Flexiv-GN01")
-    ).value == "ready"
-    assert registry.state(
-        GripperIdentity("FOLLOWER_RIGHT", "Flexiv-GN01")
-    ).value == "ready"
+    assert (
+        registry.state(GripperIdentity("FOLLOWER_LEFT", "Flexiv-GN01")).value == "ready"
+    )
+    assert (
+        registry.state(GripperIdentity("FOLLOWER_RIGHT", "Flexiv-GN01")).value
+        == "ready"
+    )
 
 
 def test_cached_adoption_failure_preserves_ready_state_and_requests_reinit() -> None:
@@ -336,9 +354,7 @@ def test_rejects_controlled_side_without_configured_follower_gripper() -> None:
         match="Controlled gripper side has no configured follower gripper: left_arm",
     ):
         _controller(
-            configs={
-                "left_arm": {"follower": "none", "gripper_model": "Flexiv-GN01"}
-            }
+            configs={"left_arm": {"follower": "none", "gripper_model": "Flexiv-GN01"}}
         )
 
 
@@ -400,9 +416,7 @@ def test_submit_is_latest_only_while_move_is_blocked() -> None:
 
 
 def test_worker_samples_nonblocking_spline_target_source() -> None:
-    controller, grippers, _ = _controller(
-        target_source=lambda: {"left_arm": 0.06}
-    )
+    controller, grippers, _ = _controller(target_source=lambda: {"left_arm": 0.06})
     controller.initialize()
 
     controller._send_pending()

@@ -344,14 +344,14 @@ def test_cached_takeover_blocks_open_until_leader_requests_close(monkeypatch) ->
     tdk._leader_ports[0] = True
     ctl._tick(0, ctl._configs[0])
     assert gripper.moves == [(0.0, 0.5, 12.5)]
-    assert ctl.gripper_commands_by_index() == {0: {"close": 1.0}}
+    assert ctl.gripper_commands_by_index() == {0: {"target_width": 0.0}}
     assert ctl.gripper_snapshot()["single_arm"]["takeover_pending"] is False
 
     # Releasing after the deliberate Close now opens to the configured default.
     tdk._leader_ports[0] = False
     ctl._tick(0, ctl._configs[0])
     assert gripper.moves[-1] == (0.06, 0.5, 12.5)
-    assert ctl.gripper_commands_by_index() == {0: {"close": 0.0}}
+    assert ctl.gripper_commands_by_index() == {0: {"target_width": 0.06}}
 
 
 def test_failed_gripper_move_does_not_publish_a_command(monkeypatch) -> None:
@@ -469,9 +469,7 @@ def test_gripper_states_by_index_reports_width_and_force(monkeypatch) -> None:
     follower = FakeFollower()
     tdk = FakeTDK(follower, [False] * 18)
     cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
-    ctl = ee.EndEffectorController(
-        tdk, ["left_arm", "right_arm"], {"left_arm": cfg}
-    )
+    ctl = ee.EndEffectorController(tdk, ["left_arm", "right_arm"], {"left_arm": cfg})
 
     # Nothing before the gripper is enabled.
     assert ctl.gripper_states_by_index() == {}
@@ -482,8 +480,8 @@ def test_gripper_states_by_index_reports_width_and_force(monkeypatch) -> None:
     assert states == {0: {"width": 0.042, "force": -3.5}}
 
 
-def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:
-    # The panel sliders' velocity/force (set_command_params) must drive the
+def test_global_command_params_apply_to_mirror_loop(monkeypatch) -> None:
+    # The panel's global velocity/force (set_command_params) must drive the
     # mirror loop's Move() calls.
     monkeypatch.setattr(ee, "Gripper", FakeGripper)
     monkeypatch.setattr(ee, "Tool", FakeTool)
@@ -502,7 +500,7 @@ def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:
     gripper = ctl._grippers[0]
 
     # Panel sets velocity/force (clamped into [0.01,0.5] / [1,50]).
-    stored = ctl.set_command_params("single_arm", velocity=0.3, force=12.0)
+    stored = ctl.set_command_params(velocity=0.3, force=12.0)
     assert stored == (0.3, 12.0)
 
     # Mirror tick: leader triggered -> close, using the panel velocity/force.

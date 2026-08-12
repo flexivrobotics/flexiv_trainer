@@ -42,18 +42,16 @@ class _FakeRobot:
 
 
 def _channels(
-    sides: tuple[str, ...], gripper: bool = False, gripper_close: bool = False
+    sides: tuple[str, ...], gripper: bool = False, gripper_target: bool = False
 ) -> list[str]:
     result = ["knot"]
     for side in sides:
         result.extend(f"{side}.tcp_pose.{axis}" for axis in ("x", "y", "z"))
-        result.extend(
-            f"{side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_NAMES
-        )
+        result.extend(f"{side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_NAMES)
         if gripper:
             result.append(f"{side}.gripper.width")
-        elif gripper_close:
-            result.append(f"{side}.gripper.close")
+        elif gripper_target:
+            result.append(f"{side}.gripper.target_width")
     return result
 
 
@@ -61,9 +59,9 @@ def _feature_names(
     sides: tuple[str, ...] = ("arm",),
     *,
     gripper: bool = False,
-    gripper_close: bool = False,
+    gripper_target: bool = False,
 ) -> list[str]:
-    channels = _channels(sides, gripper, gripper_close)
+    channels = _channels(sides, gripper, gripper_target)
     return [
         f"bspline.row_{row:02d}.{channel}"
         for row in range(_ROWS)
@@ -91,9 +89,7 @@ def _action(
     )
     for side_index, side in enumerate(sides):
         x_index = channels.index(f"{side}.tcp_pose.x")
-        matrix[:active_controls, x_index] = (
-            greville + position_offset + side_index
-        )
+        matrix[:active_controls, x_index] = greville + position_offset + side_index
         rotation_start = channels.index(f"{side}.tcp_rotation_6d.r1_x")
         matrix[:, rotation_start : rotation_start + 6] = [1, 0, 0, 0, 1, 0]
         if gripper:
@@ -140,13 +136,11 @@ def test_preflight_parses_authoritative_layout_without_robots() -> None:
     assert layout.gripper_target_mode == "width"
 
 
-def test_preflight_parses_gripper_close_layout() -> None:
-    layout = parse_bspline_action_layout(
-        _feature_names(("arm",), gripper_close=True)
-    )
+def test_preflight_parses_gripper_target_width_layout() -> None:
+    layout = parse_bspline_action_layout(_feature_names(("arm",), gripper_target=True))
 
     assert layout.gripper_sides == ("arm",)
-    assert layout.gripper_target_mode == "close"
+    assert layout.gripper_target_mode == "target_width"
 
 
 @pytest.mark.parametrize(
@@ -387,9 +381,7 @@ def test_handoff_preserves_commanded_velocity() -> None:
         now += period
     before = abs(xs[-1] - xs[-2]) / period
 
-    executor.install(
-        _scale_x(_action(), 1.1), observation_age_s=0.02, now=_HANDOFF_AT
-    )
+    executor.install(_scale_x(_action(), 1.1), observation_age_s=0.02, now=_HANDOFF_AT)
 
     after = []
     now = _HANDOFF_AT

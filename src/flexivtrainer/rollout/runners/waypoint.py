@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.data.lerobot_io import (
     resolve_recording_image_names,
 )
@@ -85,6 +86,7 @@ class WaypointRunner:
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
         gripper_default_width_m: float | None = None,
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
+        gripper_command_parameters: GripperCommandMetadata | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -133,12 +135,11 @@ class WaypointRunner:
                 initialization_registry=gripper_initialization_registry,
                 append_log=append_log,
                 target_mode=gripper_target_mode,
+                command_parameters=gripper_command_parameters,
                 executor_factory=GripperExecutor,
             )
             for serial, robot in zip(followers, robots, strict=True):
-                hardware.prepare_robot_motion(
-                    robot, serial, stop_event, append_log
-                )
+                hardware.prepare_robot_motion(robot, serial, stop_event, append_log)
         except Exception as exc:
             if gripper is not None:
                 gripper.stop()
@@ -219,8 +220,13 @@ class WaypointRunner:
         stage_times: dict[str, deque[float]] = {
             name: deque(maxlen=10)
             for name in (
-                "fault_check", "grab_images", "read_states",
-                "build_obs", "inference", "to_list", "dispatch",
+                "fault_check",
+                "grab_images",
+                "read_states",
+                "build_obs",
+                "inference",
+                "to_list",
+                "dispatch",
             )
         }
         infer_raw: deque[float] = deque(maxlen=log_every)
@@ -266,8 +272,7 @@ class WaypointRunner:
                     break
                 if gripper is not None and gripper.error is not None:
                     raise RuntimeError(
-                        "Waypoint gripper failed: "
-                        f"{describe_exception(gripper.error)}"
+                        f"Waypoint gripper failed: {describe_exception(gripper.error)}"
                     )
                 loop_start = time.monotonic()
                 loop_period = (
@@ -353,8 +358,7 @@ class WaypointRunner:
                     # while inference is faster than dt. Anchoring later (or raising
                     # anchor) pushes it past the next replan and it never fires.
                     target_times = [
-                        loop_start + (k + anchor) * dt
-                        for k in range(len(action_lists))
+                        loop_start + (k + anchor) * dt for k in range(len(action_lists))
                     ]
                     waypoint_executor.replace_waypoints(
                         action_lists, target_times, now=time.monotonic()
@@ -363,13 +367,15 @@ class WaypointRunner:
                     raise RuntimeError(waypoint_executor.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
 
-                self._append_metric({
-                    "t": round(loop_start, 3),
-                    "step": step,
-                    "hz": round(actual_hz, 2),
-                    "infer_ms": round(infer_seconds * 1000.0, 1),
-                    "fresh": bool(fresh),
-                })
+                self._append_metric(
+                    {
+                        "t": round(loop_start, 3),
+                        "step": step,
+                        "hz": round(actual_hz, 2),
+                        "infer_ms": round(infer_seconds * 1000.0, 1),
+                        "fresh": bool(fresh),
+                    }
+                )
                 self._last_wrench_t = observations.sample_wrench(
                     self._append_wrench,
                     snapshot,
@@ -385,8 +391,14 @@ class WaypointRunner:
                         waypoint_executor.scheduled_count,
                     )
                     self._log_step(
-                        step, snapshot, action_lists[0], layout, sides,
-                        images, camera_names, actual_hz,
+                        step,
+                        snapshot,
+                        action_lists[0],
+                        layout,
+                        sides,
+                        images,
+                        camera_names,
+                        actual_hz,
                     )
 
                 step += 1
@@ -481,7 +493,9 @@ class WaypointRunner:
             if image is None:
                 cam_parts.append(f"{name}=MISSING")
             else:
-                cam_parts.append(f"{name}=ok(mean={float(np.asarray(image).mean()):.1f})")
+                cam_parts.append(
+                    f"{name}=ok(mean={float(np.asarray(image).mean()):.1f})"
+                )
         expected_hz = float(self._target_hz or self._expected_hz_fallback)
         cam_parts.append(f"freq={actual_hz:.1f}/{expected_hz:.1f}Hz")
         self._append_log("INFO", "ROLLOUT", f"step={step} obs", " ".join(cam_parts))
@@ -514,26 +528,16 @@ class WaypointRunner:
                 if isinstance(gripper_payload, dict):
                     measured_gripper = gripper_payload
             gripper_width_index = plan.get("gripper_width")
-            gripper_close_index = plan.get("gripper_close")
             gripper_detail = ""
             if isinstance(gripper_width_index, int):
-                gripper_detail = (
-                    f" cmd_gripper_width={float(action[gripper_width_index]):.4f}"
-                    " meas_gripper_width="
-                    f"{self._fmt_scalar(measured_gripper.get('width'))}"
-                    " meas_gripper_force="
-                    f"{self._fmt_scalar(measured_gripper.get('force'))}"
-                )
-            elif isinstance(gripper_close_index, int):
-                raw_close = float(action[gripper_close_index])
-                decoded = (
-                    self._gripper_executor.describe_target(side, raw_close)
-                    if self._gripper_executor is not None
-                    else "unavailable"
+                label = (
+                    "target_width"
+                    if plan.get("gripper_target_mode") == "target_width"
+                    else "width"
                 )
                 gripper_detail = (
-                    f" cmd_gripper_close={raw_close:.4f}"
-                    f" decoded_gripper={decoded}"
+                    f" cmd_gripper_{label}="
+                    f"{float(action[gripper_width_index]):.4f}"
                     " meas_gripper_width="
                     f"{self._fmt_scalar(measured_gripper.get('width'))}"
                     " meas_gripper_force="

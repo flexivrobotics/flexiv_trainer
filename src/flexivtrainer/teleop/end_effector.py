@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from flexivtrainer.config import EndEffectorSideConfig
@@ -71,6 +72,13 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+@dataclass(frozen=True)
+class GripperMoveCommand:
+    target_width_m: float
+    velocity_m_s: float
+    force_limit_n: float
+
+
 class EndEffectorController:
     """Background thread that mirrors leader DIs onto follower end effectors."""
 
@@ -88,6 +96,8 @@ class EndEffectorController:
         sides: list[str],
         configs: dict[str, Any],
         default_gripper_width_m: float | None = None,
+        gripper_velocity_m_s: float | None = None,
+        gripper_force_limit_n: float | None = None,
         *,
         gripper_identities: dict[str, GripperIdentity] | None = None,
         initialization_registry: GripperInitializationRegistry | None = None,
@@ -104,6 +114,8 @@ class EndEffectorController:
             _side_config(configs.get(side)) for side in self._sides
         ]
         self._default_gripper_width_m = default_gripper_width_m
+        self._configured_velocity_m_s = gripper_velocity_m_s
+        self._configured_force_limit_n = gripper_force_limit_n
         identities = gripper_identities or {}
         self._gripper_identities = [identities.get(side) for side in self._sides]
         self._initialization_registry = initialization_registry
@@ -116,13 +128,10 @@ class EndEffectorController:
         # (blocking) command on an actual state change.
         self._grippers: dict[int, Any] = {}
         self._gripper_params: dict[int, Any] = {}
-        # User-set (velocity, force) per pair index from the Gripper Control
-        # panel's sliders, applied to the mirror loop's Move() calls. Falls back
-        # to the gripper's own params-derived defaults until a slider sets one.
-        self._command_params: dict[int, tuple[float, float]] = {}
         self._last_do: dict[int, bool] = {}
+        self._command_parameter_lock = threading.RLock()
         self._gripper_command_lock = threading.Lock()
-        self._last_gripper_target: dict[int, str] = {}
+        self._last_gripper_command: dict[int, GripperMoveCommand] = {}
         # A cached rollout -> teleop handoff must never open a held object. For
         # each reused, digitally controlled gripper, ignore Open until the
         # leader has requested Close once; then resume normal mirroring.
@@ -134,10 +143,15 @@ class EndEffectorController:
         # Mirroring needs a leader trigger to read and a follower effector to
         # drive. A gripper without a leader trigger is still enabled (for manual
         # control) but is not mirrored.
-        return cfg is not None and cfg.leader == "digital_input" and cfg.follower in {
-            "digital_output",
-            "gripper",
-        }
+        return (
+            cfg is not None
+            and cfg.leader == "digital_input"
+            and cfg.follower
+            in {
+                "digital_output",
+                "gripper",
+            }
+        )
 
     def has_work(self) -> bool:
         # "Work" for the background thread is the set of mirrored pairs.
@@ -177,7 +191,7 @@ class EndEffectorController:
         if force:
             with self._gripper_command_lock:
                 for index, _, _ in entries:
-                    self._last_gripper_target.pop(index, None)
+                    self._last_gripper_command.pop(index, None)
             for index, _, _ in entries:
                 _, follower = self._controller.instances(index)
                 if not self._follower_is_idle(follower):
@@ -318,10 +332,9 @@ class EndEffectorController:
         with self._setup_lock:
             self._grippers.clear()
             self._gripper_params.clear()
-            self._command_params.clear()
             self._last_do.clear()
             with self._gripper_command_lock:
-                self._last_gripper_target.clear()
+                self._last_gripper_command.clear()
             self._takeover_pending.clear()
 
     def _run(self) -> None:  # pragma: no cover - hardware specific
@@ -381,11 +394,6 @@ class EndEffectorController:
         takeover_pending = index in self._takeover_pending
         if takeover_pending and target != "close":
             return
-        if not takeover_pending:
-            with self._gripper_command_lock:
-                if self._last_gripper_target.get(index) == target:
-                    return
-
         gripper = self._grippers.get(index)
         params = self._gripper_params.get(index)
         if gripper is None or params is None:
@@ -399,44 +407,89 @@ class EndEffectorController:
             width = params.min_width
         else:
             requested = self._default_gripper_width_m
-            width = params.max_width if requested is None else _clamp(
-                requested, params.min_width, params.max_width
+            width = (
+                params.max_width
+                if requested is None
+                else _clamp(requested, params.min_width, params.max_width)
             )
-        # Use the panel slider's velocity/force, falling back to the gripper's
-        # own params-derived defaults until a slider sets them.
         velocity, force = self._move_params_for(index)
-        gripper.Move(width, velocity, force)
+        command = GripperMoveCommand(
+            target_width_m=float(width),
+            velocity_m_s=velocity,
+            force_limit_n=force,
+        )
+        if not takeover_pending:
+            with self._gripper_command_lock:
+                if self._last_gripper_command.get(index) == command:
+                    return
+        gripper.Move(
+            command.target_width_m,
+            command.velocity_m_s,
+            command.force_limit_n,
+        )
         if takeover_pending:
             self._takeover_pending.discard(index)
         with self._gripper_command_lock:
-            self._last_gripper_target[index] = target
+            self._last_gripper_command[index] = command
 
     def _move_params_for(self, index: int) -> tuple[float, float]:
         params = self._gripper_params[index]
-        # Until the panel sets a value, default to the gripper's own max velocity
-        # (Move() rejects 0) and a fraction of its max force.
-        velocity, force = self._command_params.get(
-            index, (params.max_vel, params.max_force * self.DEFAULT_FORCE_FRACTION)
-        )
+        resolved = self.command_parameter_snapshot()
+        velocity = float(resolved["velocity_m_s"])
+        force = float(resolved["force_limit_n"])
         velocity = _clamp(velocity, params.min_vel, params.max_vel)
         force = _clamp(force, params.min_force, params.max_force)
         return velocity, force
 
-    def set_command_params(
-        self, side: str, velocity: float, force: float
-    ) -> tuple[float, float]:
-        """Store the (velocity, force) the panel set for this side's gripper.
+    def command_parameter_snapshot(self) -> dict[str, float]:
+        with self._command_parameter_lock:
+            params = list(self._gripper_params.values())
+            if not params:
+                raise RuntimeError(
+                    "Initialize the gripper before setting its parameters"
+                )
+            min_velocity = max(float(item.min_vel) for item in params)
+            max_velocity = min(float(item.max_vel) for item in params)
+            min_force = max(float(item.min_force) for item in params)
+            max_force = min(float(item.max_force) for item in params)
+            if min_velocity > max_velocity or min_force > max_force:
+                raise RuntimeError("Configured grippers have no shared command range")
+            velocity = (
+                max_velocity
+                if self._configured_velocity_m_s is None
+                else _clamp(self._configured_velocity_m_s, min_velocity, max_velocity)
+            )
+            default_force = _clamp(
+                max_force * self.DEFAULT_FORCE_FRACTION, min_force, max_force
+            )
+            force = (
+                default_force
+                if self._configured_force_limit_n is None
+                else _clamp(self._configured_force_limit_n, min_force, max_force)
+            )
+            return {
+                "velocity_m_s": velocity,
+                "force_limit_n": force,
+                "min_velocity_m_s": min_velocity,
+                "max_velocity_m_s": max_velocity,
+                "min_force_limit_n": min_force,
+                "max_force_limit_n": max_force,
+            }
 
-        Used by the mirror loop's Move() calls. Clamped into the gripper's range
-        when known. Returns the stored values.
-        """
-        index = self._index_for_side(side)
-        params = self._gripper_params.get(index)
-        if params is not None:
-            velocity = _clamp(velocity, params.min_vel, params.max_vel)
-            force = _clamp(force, params.min_force, params.max_force)
-        self._command_params[index] = (velocity, force)
-        return velocity, force
+    def set_command_params(self, velocity: float, force: float) -> tuple[float, float]:
+        if not math.isfinite(velocity) or velocity <= 0:
+            raise ValueError("Gripper velocity must be finite and positive")
+        if not math.isfinite(force) or force <= 0:
+            raise ValueError("Gripper force limit must be finite and positive")
+        with self._command_parameter_lock:
+            self._configured_velocity_m_s = velocity
+            self._configured_force_limit_n = force
+            resolved = self.command_parameter_snapshot()
+            self._configured_velocity_m_s = float(resolved["velocity_m_s"])
+            self._configured_force_limit_n = float(resolved["force_limit_n"])
+        with self._gripper_command_lock:
+            self._last_gripper_command.clear()
+        return self._configured_velocity_m_s, self._configured_force_limit_n
 
     def move_grippers_to_width(
         self, width: float, *, sides: list[str] | None = None
@@ -448,6 +501,12 @@ class EndEffectorController:
             raise ValueError("Gripper width must be finite and nonnegative")
         self._default_gripper_width_m = requested
         selected = set(sides) if sides is not None else None
+        with self._gripper_command_lock:
+            for index, cfg in enumerate(self._configs):
+                if cfg is None or cfg.follower != "gripper":
+                    continue
+                if selected is None or self._sides[index] in selected:
+                    self._last_gripper_command.pop(index, None)
         moved: dict[str, float] = {}
         errors: dict[str, str] = {}
         for index, cfg in enumerate(self._configs):
@@ -472,10 +531,6 @@ class EndEffectorController:
                 velocity, force = self._move_params_for(index)
                 gripper.Move(target, velocity, force)
                 moved[side] = target
-                # A manual target may be between open and closed. Force the mirror
-                # loop to reassert its state on the next teleop start/tick.
-                with self._gripper_command_lock:
-                    self._last_gripper_target.pop(index, None)
             except Exception as exc:  # pragma: no cover - hardware specific
                 message = describe_exception(exc)
                 warn(f"Failed to tune gripper width for {side}", message)
@@ -489,7 +544,7 @@ class EndEffectorController:
             raise ValueError("Gripper width must be finite and nonnegative")
         self._default_gripper_width_m = width
         with self._gripper_command_lock:
-            self._last_gripper_target.clear()
+            self._last_gripper_command.clear()
 
     @staticmethod
     def _follower_is_idle(follower: Any) -> bool:
@@ -556,12 +611,12 @@ class EndEffectorController:
         return states_by_index
 
     def gripper_commands_by_index(self) -> dict[int, dict[str, float]]:
-        """Accepted Open/Close commands keyed by teleop pair index."""
+        """Accepted movement commands keyed by teleop pair index."""
 
         with self._gripper_command_lock:
             return {
-                index: {"close": 1.0 if target == "close" else 0.0}
-                for index, target in self._last_gripper_target.items()
+                index: {"target_width": command.target_width_m}
+                for index, command in self._last_gripper_command.items()
             }
 
     def gripper_snapshot(self) -> dict[str, Any]:
