@@ -170,8 +170,63 @@ def hub_token(settings: AppSettings | None = None) -> str | None:
     return None
 
 
+def _safe_str(exc: BaseException) -> str:
+    """Stringify an exception that may raise from its own ``__str__``.
+
+    ``HfHubHTTPError.__str__`` dereferences ``response.headers``, which blows up
+    when the error was constructed without a response. Reporting that secondary
+    failure would bury the original cause.
+    """
+    try:
+        text = str(exc)
+    except Exception:  # noqa: BLE001 - diagnostics must never raise
+        return type(exc).__name__
+    return text or type(exc).__name__
+
+
+def _status_code(exc: BaseException) -> int | None:
+    """HTTP status behind an exception, tolerating attributes that raise."""
+    try:
+        return getattr(getattr(exc, "response", None), "status_code", None)
+    except Exception:  # noqa: BLE001 - diagnostics must never raise
+        return None
+
+
+def _describe_untagged_dataset(exc: BaseException) -> str | None:
+    """Detect LeRobot's "dataset has no version tag" failure.
+
+    LeRobot requires a codebase-version git tag on dataset repos. When one is
+    missing it raises RevisionNotFoundError, but on huggingface_hub>=1.0 that
+    constructor needs a keyword-only ``response`` it does not pass, so the real
+    cause surfaces as an unrelated TypeError. Recognise both shapes.
+    """
+    text = _safe_str(exc)
+    chain: list[BaseException] = []
+    cursor: BaseException | None = exc
+    while cursor is not None and len(chain) < 6:
+        chain.append(cursor)
+        cursor = cursor.__cause__ or cursor.__context__
+    blames_tagging = any(
+        "tagged with a codebase version" in _safe_str(item) for item in chain
+    )
+    hf_constructor_bug = isinstance(exc, TypeError) and (
+        "HfHubHTTPError.__init__" in text or "RevisionNotFound" in text
+    )
+    if not blames_tagging and not hf_constructor_bug:
+        return None
+    return (
+        "This Hub dataset has no codebase-version tag, which LeRobot requires. "
+        "Tag the repo to match the codebase_version in its meta/info.json, for "
+        'example: HfApi().create_tag("<owner>/<name>", tag="v3.0", '
+        'repo_type="dataset")'
+    )
+
+
 def describe_hub_error(exc: BaseException) -> str:
     """Human-readable, actionable message for a Hub failure."""
+    untagged = _describe_untagged_dataset(exc)
+    if untagged is not None:
+        return untagged
     name = type(exc).__name__
     if name == "RepositoryNotFoundError":
         return (
@@ -187,7 +242,7 @@ def describe_hub_error(exc: BaseException) -> str:
         )
     if name in {"LocalEntryNotFoundError", "OfflineModeIsEnabled"}:
         return "Cannot reach the HuggingFace Hub (offline or network unavailable)."
-    status = getattr(getattr(exc, "response", None), "status_code", None)
+    status = _status_code(exc)
     if status in {401, 403}:
         return (
             "Hub authentication failed. Set FLEXIV_TRAINER_HUB__TOKEN or HF_TOKEN "
@@ -197,13 +252,21 @@ def describe_hub_error(exc: BaseException) -> str:
         return "Hub repository or revision not found."
     if isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
         return "Not enough disk space to download from the HuggingFace Hub."
-    return f"HuggingFace Hub request failed: {exc}"
+    return f"HuggingFace Hub request failed: {_safe_str(exc)}"
+
+
+class HubDatasetNotTaggedError(HubError):
+    """The repo exists but carries no codebase-version tag LeRobot can use."""
 
 
 def _classify_hub_error(exc: BaseException) -> HubError:
     name = type(exc).__name__
     message = describe_hub_error(exc)
-    status = getattr(getattr(exc, "response", None), "status_code", None)
+    status = _status_code(exc)
+    if _describe_untagged_dataset(exc) is not None:
+        # The repo is reachable; the operator has to tag it. That is a bad
+        # request, not an upstream gateway failure.
+        return HubDatasetNotTaggedError(message)
     if name in {"RepositoryNotFoundError", "RevisionNotFoundError"} or status == 404:
         return HubNotFoundError(message)
     if name == "GatedRepoError" or status in {401, 403}:

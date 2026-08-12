@@ -455,6 +455,47 @@ class TestRequestModelValidation:
             StartRolloutRequest()
 
 
+class TestLayoutWarning:
+    """The warning must state a real blocker, not a hypothetical about grippers."""
+
+    def test_silent_when_names_are_known(self):
+        from flexivtrainer.api.routes.rollout import _layout_warning
+
+        # A gripper-bearing layout is fine when the axis names are recorded.
+        assert _layout_warning(["a"] * 14, 14, ["single_arm"]) is None
+
+    def test_silent_when_width_is_inferable(self):
+        from flexivtrainer.api.routes.rollout import _layout_warning
+
+        assert _layout_warning(None, 13, ["single_arm"]) is None
+        assert _layout_warning(None, 26, ["left_arm", "right_arm"]) is None
+
+    def test_warns_on_arm_count_mismatch(self):
+        from flexivtrainer.api.routes.rollout import _layout_warning
+
+        # A dual-arm policy under single-arm config: the real cause is the arm
+        # count, so the message must name it rather than blaming a gripper.
+        message = _layout_warning(None, 26, ["single_arm"])
+        assert message is not None
+        assert "width 26" in message
+        assert "1 arm(s)" in message
+        assert "arm mode" in message
+        assert "gripper" not in message.lower()
+
+    def test_warns_on_unknown_gripper_width(self):
+        from flexivtrainer.api.routes.rollout import _layout_warning
+
+        message = _layout_warning(None, 15, ["single_arm"])
+        assert message is not None
+        assert "action_names" in message
+
+    def test_tolerates_missing_inputs(self):
+        from flexivtrainer.api.routes.rollout import _layout_warning
+
+        assert _layout_warning(None, None, ["single_arm"]) is None
+        assert _layout_warning(None, 26, []) is None
+
+
 class TestHubFineTuneCheckpoint:
     def test_requires_weights(self, tmp_path, monkeypatch):
         service = TrainingService(make_settings(tmp_path))

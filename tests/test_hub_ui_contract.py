@@ -38,6 +38,61 @@ def test_rollout_render_key_tracks_hub_source() -> None:
 
     assert "state.rolloutCheckpointSource" in render_key
     assert "state.rolloutActionNamesWarning" in render_key
+    # Without this the button never repaints from Load to Downloading.
+    assert "state.rolloutHubLoadState" in render_key
+
+
+def test_hub_load_button_reports_download_progress() -> None:
+    # The Hub fetch is synchronous and can run for minutes, so the button must
+    # show it is working rather than looking unresponsive.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert '"Downloading…"' in source
+    assert '"Loaded"' in source
+    assert 'state.rolloutHubLoadState = "loading"' in source
+    assert 'state.rolloutHubLoadState = "loaded"' in source
+    assert 'state.rolloutHubLoadState = "error"' in source
+
+
+def test_hub_load_button_disabled_while_downloading() -> None:
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'const hubLoading = state.rolloutHubLoadState === "loading"' in source
+    assert "isRunning || hubLoading ? \"disabled\" : \"\"" in source
+    # Starting a rollout mid-download would race the same cache directory.
+    assert "canStart = hasCheckpointSelection && !isRunning && !hubLoading" in source
+
+
+def test_loading_state_renders_before_the_request() -> None:
+    # renderRollout() must run between setting "loading" and awaiting the fetch,
+    # or the spinner state is never painted.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    start = source.index("async function loadHubCheckpointInfo()")
+    body = source[start : source.index("async function startRolloutRun()", start)]
+
+    loading = body.index('state.rolloutHubLoadState = "loading"')
+    render = body.index("renderRollout();", loading)
+    request = body.index("await api(")
+    assert loading < render < request
+
+
+def test_ui_uses_server_layout_verdict() -> None:
+    # The server knows the action width and the arm count, so the UI must not
+    # re-derive a vague "if it has a gripper" caveat of its own.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "info.layout_warning" in source
+    assert "If its layout" not in source
+    assert "includes a gripper, the rollout will refuse" not in source
+
+
+def test_editing_repo_id_clears_loaded_label() -> None:
+    # "Loaded" refers to one specific repo; typing a different one must not keep
+    # claiming the new id is already downloaded.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "state.rolloutHubLoadedRepoId" in source
+    assert 'loadBtn.textContent = "Load"' in source
 
 
 def test_rollout_render_key_excludes_free_text_inputs() -> None:
@@ -76,6 +131,34 @@ def test_rollout_start_sends_source_discriminator() -> None:
 
     assert '{ source: "hub", repo_id: repoId, task,' in source
     assert '{ source: "local", checkpoint_path: checkpoint, task }' in source
+
+
+def test_output_dir_is_named_from_the_hub_repo() -> None:
+    # A Hub dataset has no local path, so mergedDatasetPath is empty. Without a
+    # name the output falls back to the bare training root, which the backend
+    # rejects with "output must be within training root".
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    start = source.index("function getTrainingOutputDir()")
+    body = source[start : source.index("\n}", start)]
+
+    assert 'state.trainingDatasetSource === "hub"' in body
+    assert "state.trainingDatasetRepoId" in body
+    # The repo id contains "/", which must not become a path separator.
+    assert "replace(/[^A-Za-z0-9._-]+/g" in body
+
+
+def test_hub_dataset_skips_the_preview_step() -> None:
+    # Only meta/ is fetched for a Hub dataset, so there are no frames to show;
+    # the preview page would sit empty forever.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "const usingHubDataset = state.trainingDatasetSource === \"hub\"" in source
+    assert (
+        "stepAfterDataset = usingHubDataset ? previewStep + 1 : previewStep" in source
+    )
+    assert "state.trainingStep = stepAfterDataset" in source
+    # And Back from policy selection must not land on the skipped page.
+    assert "usingHubDataset ? datasetStep : previewStep" in source
 
 
 def test_training_dataset_hub_controls_exist() -> None:

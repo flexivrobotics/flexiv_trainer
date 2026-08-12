@@ -152,21 +152,48 @@ def rollout_checkpoint_info(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     resolved_path = str(checkpoint_path)
-    # Surfaced so the UI can warn before Start that a layout must be supplied.
     try:
         action_names = checkpoint_action_names(
             resolved_path, runtime.settings.storage.root, settings=runtime.settings
         )
     except ValueError:
         action_names = None
+    action_dim = checkpoint_action_output_dim(resolved_path)
     return {
         "task": _checkpoint_task(resolved_path),
         "policy_type": _checkpoint_policy_type(resolved_path),
         "requires_task": _checkpoint_requires_task(resolved_path),
         "repo_id": repo_id if source == "hub" else None,
         "action_names": action_names,
-        "action_dim": checkpoint_action_output_dim(resolved_path),
+        "action_dim": action_dim,
+        # Decide here rather than making the operator reason about whether an
+        # unknown layout happens to be inferable for their arm count.
+        "layout_warning": _layout_warning(
+            action_names, action_dim, runtime.get_active_sides()
+        ),
     }
+
+
+def _layout_warning(
+    action_names: list[str] | None, action_dim: int | None, sides: list[str]
+) -> str | None:
+    """Explain up front why a rollout would refuse to start, or return None."""
+    if action_names is not None or action_dim is None or not sides:
+        return None
+
+    from flexivtrainer.rollout.executors.waypoint import canonical_action_names
+
+    try:
+        canonical_action_names(action_dim, sides)
+    except ValueError as exc:
+        return (
+            f"{exc}. This checkpoint does not record its action-axis names, so "
+            f"the layout cannot be inferred for the {len(sides)} arm(s) "
+            "currently configured. Check the arm mode matches the policy, or "
+            "supply action_names when starting the rollout."
+        )
+    # Inferable, so it will start; say so rather than leaving a vague caveat.
+    return None
 
 
 @router.post("/stop")

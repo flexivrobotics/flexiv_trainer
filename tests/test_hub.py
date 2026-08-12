@@ -217,6 +217,43 @@ class TestErrorMapping:
         exc = type("RepositoryNotFoundError", (Exception,), {})("x")
         assert "token" in describe_hub_error(exc).lower()
 
+    def test_self_raising_str_does_not_break_reporting(self) -> None:
+        # HfHubHTTPError.__str__ dereferences response.headers and can raise.
+        # The diagnostic path must never fail, or it buries the real cause.
+        class Nasty(Exception):
+            def __str__(self) -> str:
+                raise RuntimeError("boom")
+
+        assert "Nasty" in describe_hub_error(Nasty())
+        assert isinstance(hub._classify_hub_error(Nasty()), HubError)
+
+    def test_self_raising_response_property(self) -> None:
+        class NastyResponse(Exception):
+            @property
+            def response(self):
+                raise RuntimeError("boom")
+
+        assert hub._status_code(NastyResponse()) is None
+
+    def test_untagged_dataset_is_recognised(self) -> None:
+        # LeRobot raises RevisionNotFoundError without the keyword-only
+        # 'response' huggingface_hub>=1.0 requires, so the real cause arrives
+        # as an unrelated TypeError.
+        exc = TypeError(
+            "HfHubHTTPError.__init__() missing 1 required "
+            "keyword-only argument: 'response'"
+        )
+        message = describe_hub_error(exc)
+        assert "codebase-version tag" in message
+        assert "create_tag" in message
+        assert isinstance(
+            hub._classify_hub_error(exc), hub.HubDatasetNotTaggedError
+        )
+
+    def test_untagged_detected_from_lerobot_message(self) -> None:
+        exc = RuntimeError("Your dataset must be tagged with a codebase version.")
+        assert "codebase-version tag" in describe_hub_error(exc)
+
 
 def write_fake_dataset_meta(root: Path) -> None:
     (root / "meta").mkdir(parents=True, exist_ok=True)

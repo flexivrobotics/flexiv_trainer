@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from flexivtrainer.data.hub import (
     HubAuthError,
+    HubDatasetNotTaggedError,
     HubError,
     HubNotFoundError,
     HubUnavailableError,
@@ -187,6 +188,8 @@ def start_training(
             checkpoint_revision=request.checkpoint_revision,
         )
     # Hub errors subclass RuntimeError, so they must precede the 409 handler.
+    except HubDatasetNotTaggedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HubNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except HubAuthError as exc:

@@ -42,6 +42,11 @@ const state = {
     // Set when a checkpoint carries no recoverable action layout, so the user
     // is warned before starting rather than at the failure.
     rolloutActionNamesWarning: "",
+    // "idle" | "loading" | "loaded" | "error". The Hub fetch is synchronous and
+    // a policy can be gigabytes, so the button has to show it is working.
+    rolloutHubLoadState: "idle",
+    // Repo the current "loaded" state belongs to, so editing the id resets it.
+    rolloutHubLoadedRepoId: "",
     rolloutTaskText: "",
     rolloutRequiresTask: true,
     rolloutStatus: null,
@@ -5023,6 +5028,10 @@ function renderTraining() {
     const checkpointStep = isFineTune ? 1 : null;
     const datasetStep = isFineTune ? 2 : 1;
     const previewStep = isFineTune ? 3 : 2;
+    // A Hub dataset has only its metadata locally, so there are no frames to
+    // preview. Step over that page instead of showing an empty viewer.
+    const usingHubDataset = state.trainingDatasetSource === "hub";
+    const stepAfterDataset = usingHubDataset ? previewStep + 1 : previewStep;
     const configStep = isFineTune ? 4 : 3;
     const runStep = isFineTune ? 5 : 4;
     // The playback bar (and its bottom-padding reservation) only appears on
@@ -5142,7 +5151,7 @@ function renderTraining() {
                 renderTraining();
             };
             byId("training-flow-next").onclick = () => {
-                state.trainingStep = previewStep;
+                state.trainingStep = stepAfterDataset;
                 renderTraining();
             };
             return;
@@ -5293,7 +5302,7 @@ function renderTraining() {
             renderPolicyConfigPanel(catalog.policies[state.selectedPolicy]);
         }
         byId("policy-prev").onclick = () => {
-            state.trainingStep = previewStep;
+            state.trainingStep = usingHubDataset ? datasetStep : previewStep;
             renderTraining();
         };
         byId("policy-start").onclick = () => {
@@ -5800,7 +5809,11 @@ function applyMergedDatasetToTraining() {
 
 function getTrainingOutputDir() {
     const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
-    const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
+    // A Hub dataset has no local path, so name the run after the repo id. The
+    // "/" and any other separator must not survive into a directory name.
+    const datasetName = state.trainingDatasetSource === "hub"
+        ? (state.trainingDatasetRepoId || "").trim().replace(/[^A-Za-z0-9._-]+/g, "_")
+        : (state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "");
     const policyType = state.trainingMode === "fine_tune"
         ? state.trainingCheckpointInfo?.policy_type
         : state.selectedPolicy;
@@ -6909,9 +6922,11 @@ function openCheckpointBrowser() {
                 const info = await api(`/rollout/checkpoint-info?path=${encodeURIComponent(path)}`);
                 state.rolloutTaskText = (info && info.task) || "";
                 state.rolloutRequiresTask = !(info && info.requires_task === false);
+                state.rolloutActionNamesWarning = (info && info.layout_warning) || "";
             } catch (error) {
                 state.rolloutTaskText = "";
                 state.rolloutRequiresTask = true;
+                state.rolloutActionNamesWarning = "";
             }
             closeBrowser();
             renderRollout();
@@ -6963,18 +6978,24 @@ async function loadHubCheckpointInfo() {
     if (revision) {
         params.set("revision", revision);
     }
+    // The checkpoint is downloaded into the local cache before it can be
+    // inspected, so this request can run for minutes on a large policy.
+    state.rolloutHubLoadState = "loading";
+    state.rolloutHubLoadedRepoId = "";
+    renderRollout();
     try {
         const info = await api(`/rollout/checkpoint-info?${params.toString()}`);
         state.rolloutTaskText = (info && info.task) || "";
         state.rolloutRequiresTask = !(info && info.requires_task === false);
-        state.rolloutActionNamesWarning =
-            info && !info.action_names
-                ? "This checkpoint has no action-name metadata. If its layout "
-                  + "includes a gripper, the rollout will refuse to start."
-                : "";
+        // The server compares the checkpoint's action width against the active
+        // arm count, so it reports a real blocker rather than a hypothetical.
+        state.rolloutActionNamesWarning = (info && info.layout_warning) || "";
+        state.rolloutHubLoadState = "loaded";
+        state.rolloutHubLoadedRepoId = repoId;
         showToast(`Loaded ${repoId}`);
     } catch (error) {
         state.rolloutActionNamesWarning = "";
+        state.rolloutHubLoadState = "error";
         showToast(error.message, true);
     }
     renderRollout();
@@ -7074,7 +7095,13 @@ function renderRollout() {
     const hasCheckpointSelection = state.rolloutCheckpointSource === "hub"
         ? !!(state.rolloutCheckpointRepoId || "").trim()
         : !!checkpoint;
-    const canStart = hasCheckpointSelection && !isRunning;
+    const hubLoading = state.rolloutHubLoadState === "loading";
+    const hubLoadLabel = hubLoading
+        ? "Downloading…"
+        : state.rolloutHubLoadState === "loaded"
+            ? "Loaded"
+            : "Load";
+    const canStart = hasCheckpointSelection && !isRunning && !hubLoading;
 
     const devices = state.rolloutDevices || { configured: "auto", resolved: "cpu", devices: [] };
     const configuredDevice = devices.configured || "auto";
@@ -7117,6 +7144,7 @@ function renderRollout() {
         // Without these the local/Hub toggle changes state but the guard above
         // returns early, so the panel never redraws and the click looks dead.
         state.rolloutCheckpointSource, state.rolloutActionNamesWarning || "",
+        state.rolloutHubLoadState,
     ].join("|");
     if (container.dataset.renderKey === renderKey) {
         renderRolloutCameras();
@@ -7184,7 +7212,9 @@ function renderRollout() {
                                 <input class="rollout-hub-input" id="rollout-hub-revision" type="text"
                                     placeholder="revision (optional)"
                                     autocomplete="off" spellcheck="false" ${isRunning ? "disabled" : ""}>
-                                <button class="secondary-button" id="rollout-hub-load" type="button" ${isRunning ? "disabled" : ""}>Load</button>
+                                <button class="secondary-button" id="rollout-hub-load" type="button" ${
+                                    isRunning || hubLoading ? "disabled" : ""
+                                }>${escapeHtml(hubLoadLabel)}</button>
                             </div>`
                             : ""
                     }
@@ -7234,6 +7264,8 @@ function renderRollout() {
             state.rolloutCheckpointSource =
                 state.rolloutCheckpointSource === "hub" ? "local" : "hub";
             state.rolloutActionNamesWarning = "";
+            state.rolloutHubLoadState = "idle";
+            state.rolloutHubLoadedRepoId = "";
             renderRollout();
         };
     }
@@ -7248,6 +7280,20 @@ function renderRollout() {
             const primary = byId("rollout-primary-action");
             if (primary && state.rolloutStatus?.status !== "running") {
                 primary.disabled = !state.rolloutCheckpointRepoId;
+            }
+            // "Loaded" refers to one specific repo; editing the id invalidates
+            // it. Update the label in place rather than via a rebuild, which
+            // would steal focus mid-typing.
+            if (
+                state.rolloutHubLoadState === "loaded"
+                && state.rolloutCheckpointRepoId !== state.rolloutHubLoadedRepoId
+            ) {
+                state.rolloutHubLoadState = "idle";
+                state.rolloutHubLoadedRepoId = "";
+                const loadBtn = byId("rollout-hub-load");
+                if (loadBtn) {
+                    loadBtn.textContent = "Load";
+                }
             }
         };
     }

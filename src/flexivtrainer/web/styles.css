@@ -2759,6 +2759,13 @@ button:active {
     opacity: 0.6;
 }
 
+/* The Hub fetch is synchronous and can run for minutes on a large policy, so
+   the button doubles as the progress indicator. */
+#rollout-hub-load {
+    min-width: 8.5rem;
+    white-space: nowrap;
+}
+
 .rollout-error {
     color: #c0392b;
 }
