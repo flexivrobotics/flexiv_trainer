@@ -95,6 +95,8 @@ def _resize_frame(array: np.ndarray, resolution: tuple[int, int]) -> np.ndarray:
 
 
 class RecordingService:
+    CAPTURE_OVERRUN_WARNING_INTERVAL_S = 1.0
+
     def __init__(
         self,
         settings: AppSettings,
@@ -628,6 +630,9 @@ class RecordingService:
 
     def _capture_loop(self) -> None:
         interval = 1.0 / (self._fps or 30)
+        last_overrun_warning_at = 0.0
+        overruns_since_warning = 0
+        max_delay_since_warning_s = 0.0
         entries = list(self._recording_entries or [])
         sides = self._recording_sides
         image_names = resolve_recording_image_names(entries, sides)
@@ -714,6 +719,27 @@ class RecordingService:
             sleep_time = interval - elapsed
             if sleep_time > 0:
                 self._stop_event.wait(timeout=sleep_time)
+            elif sleep_time < 0:
+                delay_s = -sleep_time
+                overruns_since_warning += 1
+                max_delay_since_warning_s = max(
+                    max_delay_since_warning_s, delay_s
+                )
+                finished_at = loop_start + elapsed
+                if (
+                    finished_at - last_overrun_warning_at
+                    >= self.CAPTURE_OVERRUN_WARNING_INTERVAL_S
+                ):
+                    warn(
+                        "Recording capture loop missed its deadline",
+                        f"latest_delay_s={delay_s:.6f} "
+                        f"max_delay_s={max_delay_since_warning_s:.6f} "
+                        f"overruns={overruns_since_warning} "
+                        f"target_period_s={interval:.6f}",
+                    )
+                    last_overrun_warning_at = finished_at
+                    overruns_since_warning = 0
+                    max_delay_since_warning_s = 0.0
 
     def _set_save_progress(self, progress: int) -> None:
         clamped = max(0, min(int(progress), 100))

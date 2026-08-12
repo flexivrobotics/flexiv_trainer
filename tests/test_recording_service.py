@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,56 @@ from flexivtrainer.data.recording_service import (
     RecordingService,
     sanitize_job_name,
 )
+
+
+def test_capture_loop_warns_with_deadline_delay(monkeypatch) -> None:
+    import flexivtrainer.data.recording_service as recording_module
+
+    class OneIterationStopEvent:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def is_set(self) -> bool:
+            self.checks += 1
+            return self.checks > 1
+
+        def wait(self, timeout=None) -> bool:
+            raise AssertionError(f"unexpected wait: {timeout}")
+
+    frames = []
+    warnings = []
+    service = RecordingService.__new__(RecordingService)
+    service._fps = 30
+    service._recording_entries = []
+    service._recording_sides = []
+    service._stop_event = OneIterationStopEvent()
+    service._task = "test"
+    service._dataset = SimpleNamespace(add_frame=frames.append)
+    service._lock = threading.Lock()
+    service._frames_captured = 0
+    service._grab_camera_data = lambda *args, **kwargs: ({}, {})
+    monkeypatch.setattr(
+        recording_module.time,
+        "monotonic",
+        lambda: next(iterations),
+    )
+    monkeypatch.setattr(
+        recording_module,
+        "warn",
+        lambda message, detail=None: warnings.append((message, detail)),
+    )
+    iterations = iter([100.0, 100.05])
+
+    service._capture_loop()
+
+    assert len(frames) == 1
+    assert warnings == [
+        (
+            "Recording capture loop missed its deadline",
+            "latest_delay_s=0.016667 max_delay_s=0.016667 "
+            "overruns=1 target_period_s=0.033333",
+        )
+    ]
 
 
 def test_grab_images_converts_bgr_capture_to_rgb() -> None:
