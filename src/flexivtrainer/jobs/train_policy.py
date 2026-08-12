@@ -29,6 +29,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from flexivtrainer.config import TRAIN_LOAD_DEPTH_ENV, AppSettings
+from flexivtrainer.data.gripper_command import (
+    GRIPPER_COMMAND_FILENAME,
+    GRIPPER_COMMAND_RELATIVE_PATH,
+    GripperCommandMetadata,
+    action_gripper_mode,
+    read_gripper_command_metadata,
+    write_gripper_command_metadata,
+)
 from flexivtrainer.observability import (
     Pulse,
     error,
@@ -214,6 +222,7 @@ class TrainingJob:
     checkpoint_path: Path | None = None
     source_dataset_root: Path | None = None
     converted_dataset_root: Path | None = None
+    gripper_command_metadata: GripperCommandMetadata | None = None
     phase: str = "training"
     process: subprocess.Popen[str] | None = None
     logs: list[str] = field(default_factory=list)
@@ -603,6 +612,7 @@ class TrainingService:
         if policy_type not in POLICY_CATALOG:
             raise ValueError(f"Unsupported checkpoint policy type: {policy_type!r}")
         catalog_entry = POLICY_CATALOG[policy_type]
+        gripper_metadata_path = model_dir / GRIPPER_COMMAND_FILENAME
         return {
             "checkpoint_path": str(checkpoint_dir),
             "model_path": str(model_dir),
@@ -610,7 +620,32 @@ class TrainingService:
             "policy_label": catalog_entry["label"],
             "fields": self._fine_tune_fields(policy_type, policy_config),
             "policy_config": policy_config,
+            "gripper_command_metadata": (
+                read_gripper_command_metadata(gripper_metadata_path)
+                if gripper_metadata_path.is_file()
+                else None
+            ),
         }
+
+    def _dataset_gripper_command_metadata(
+        self, dataset_root: Path
+    ) -> GripperCommandMetadata | None:
+        info = self._read_json(dataset_root / "meta" / "info.json")
+        features = info.get("features")
+        action = features.get("action") if isinstance(features, dict) else None
+        if action is None:
+            return None
+        names = action.get("names") if isinstance(action, dict) else None
+        if not isinstance(names, list) or not all(
+            isinstance(name, str) for name in names
+        ):
+            raise ValueError("Dataset action feature has no valid named axes")
+        mode = action_gripper_mode(names)
+        if mode != "target_width":
+            return None
+        return read_gripper_command_metadata(
+            dataset_root / GRIPPER_COMMAND_RELATIVE_PATH
+        )
 
     @staticmethod
     def _dataset_policy_features(info: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -650,9 +685,7 @@ class TrainingService:
         info = self._read_json(dataset_root / "meta" / "info.json")
         metadata_path = dataset_root / "meta" / "bspline.json"
         if not metadata_path.is_file():
-            raise ValueError(
-                "B-spline Diffusion requires format-v2 meta/bspline.json"
-            )
+            raise ValueError("B-spline Diffusion requires format-v2 meta/bspline.json")
         metadata = self._read_json(metadata_path)
         # v3 carries real lookahead control points in the tail rows; v2 held a
         # repeated constant there, so its targets are not comparable.
@@ -676,9 +709,7 @@ class TrainingService:
             not isinstance(shape, list)
             or len(shape) != 2
             or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 1
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
                 for value in shape
             )
         ):
@@ -693,9 +724,7 @@ class TrainingService:
             or chunk_size < 1
             or horizon != chunk_size + 2 * degree
         ):
-            raise ValueError(
-                "B-spline horizon must equal chunk_size + 2 * degree"
-            )
+            raise ValueError("B-spline horizon must equal chunk_size + 2 * degree")
         if metadata.get("active_control_rows") != horizon - degree - 1:
             raise ValueError("B-spline active_control_rows is inconsistent")
         if metadata.get("knot_units") != "source_frames":
@@ -760,9 +789,7 @@ class TrainingService:
         """
 
         env = dict(os.environ)
-        env[TRAIN_LOAD_DEPTH_ENV] = (
-            "1" if self._settings.training.load_depth else "0"
-        )
+        env[TRAIN_LOAD_DEPTH_ENV] = "1" if self._settings.training.load_depth else "0"
         return env
 
     def _rgb_only_policy_input_features(
@@ -789,6 +816,12 @@ class TrainingService:
         self, checkpoint_info: dict[str, Any], dataset_root: Path
     ) -> None:
         dataset_info = self._read_json(dataset_root / "meta" / "info.json")
+        dataset_gripper = self._dataset_gripper_command_metadata(dataset_root)
+        checkpoint_gripper = checkpoint_info.get("gripper_command_metadata")
+        if dataset_gripper != checkpoint_gripper:
+            raise ValueError(
+                "Dataset gripper command metadata differs from the source checkpoint"
+            )
         actual = self._dataset_policy_features(dataset_info)
         policy_config = checkpoint_info["policy_config"]
         if checkpoint_info["policy_type"] == "bspline_diffusion":
@@ -1036,19 +1069,14 @@ class TrainingService:
                 command.extend(extra_args)
             else:
                 command.extend(
-                    self._fine_tune_extra_args(
-                        extra_args, checkpoint_info["fields"]
-                    )
+                    self._fine_tune_extra_args(extra_args, checkpoint_info["fields"])
                 )
         if bspline_contract is not None:
             command.extend(
                 [
                     f"--policy.horizon={bspline_contract['horizon']}",
                     f"--policy.spline_degree={bspline_contract['degree']}",
-                    (
-                        "--policy.knot_rate_hz="
-                        f"{bspline_contract['knot_rate_hz']:g}"
-                    ),
+                    (f"--policy.knot_rate_hz={bspline_contract['knot_rate_hz']:g}"),
                     "--policy.action_feature_names="
                     + json.dumps(
                         bspline_contract["action_feature_names"],
@@ -1086,6 +1114,9 @@ class TrainingService:
             if training_mode not in {"new", "fine_tune"}:
                 raise ValueError(f"Unsupported training mode: {training_mode}")
             _, resolved_root = self._resolve_dataset(dataset_root)
+            gripper_command_metadata = self._dataset_gripper_command_metadata(
+                resolved_root
+            )
             output_dir = self._resolve_output_dir(output_dir)
             normalized_extra_args = list(extra_args or [])
             checkpoint_info: dict[str, Any] | None = None
@@ -1096,9 +1127,9 @@ class TrainingService:
                 checkpoint_info = self.inspect_checkpoint(checkpoint_path)
                 policy_type = checkpoint_info["policy_type"]
             is_bspline = policy_type == "bspline_diffusion"
-            requires_conversion = is_bspline and not (
-                resolved_root / "meta" / "bspline.json"
-            ).is_file()
+            requires_conversion = (
+                is_bspline and not (resolved_root / "meta" / "bspline.json").is_file()
+            )
             if checkpoint_info is not None and not requires_conversion:
                 self._validate_checkpoint_dataset(checkpoint_info, resolved_root)
             elif is_bspline and not requires_conversion:
@@ -1170,6 +1201,7 @@ class TrainingService:
                 ),
                 source_dataset_root=resolved_root if requires_conversion else None,
                 converted_dataset_root=effective_root if requires_conversion else None,
+                gripper_command_metadata=gripper_command_metadata,
                 phase=phase,
                 status="running",
                 last_event=(
@@ -1360,6 +1392,19 @@ class TrainingService:
                 job.error,
             )
 
+    @staticmethod
+    def _sync_gripper_command_metadata(job: TrainingJob) -> None:
+        metadata = job.gripper_command_metadata
+        if metadata is None or not job.output_dir.is_dir():
+            return
+        model_dirs = {
+            path.parent
+            for path in job.output_dir.rglob("config.json")
+            if (path.parent / "model.safetensors").is_file()
+        }
+        for model_dir in model_dirs:
+            write_gripper_command_metadata(model_dir, metadata, checkpoint=True)
+
     def _collect_logs(self, job: TrainingJob) -> None:
         assert job.process is not None
         try:
@@ -1377,6 +1422,8 @@ class TrainingService:
                     f"job_id={job.job_id}",
                 )
                 self._update_job_from_log(job, text)
+                if job.last_event == "checkpoint_saved":
+                    self._sync_gripper_command_metadata(job)
                 stream("TRAIN", text, detail=f"job_id={job.job_id}")
             job.return_code = job.process.wait()
             if job.status == "stopped":
@@ -1411,14 +1458,15 @@ class TrainingService:
                 )
                 return
 
+            self._sync_gripper_command_metadata(job)
+
             if job.pulse is not None:
                 elapsed = format_elapsed(time.monotonic() - job.started_at)
                 job.pulse.stop(
                     level="OK",
                     message="Training job completed",
                     detail=(
-                        f"job_id={job.job_id} elapsed={elapsed} "
-                        f"output={job.output_dir}"
+                        f"job_id={job.job_id} elapsed={elapsed} output={job.output_dir}"
                     ),
                 )
                 job.pulse = None
@@ -1446,10 +1494,7 @@ class TrainingService:
                 job.pulse.stop(
                     level="ERROR",
                     message="Training job failed",
-                    detail=(
-                        f"job_id={job.job_id} elapsed={elapsed} "
-                        f"error={job.error}"
-                    ),
+                    detail=(f"job_id={job.job_id} elapsed={elapsed} error={job.error}"),
                 )
                 job.pulse = None
             section("Training Failed", f"job_id={job.job_id}", style="red")
@@ -1566,8 +1611,7 @@ class TrainingService:
                     level="WARN",
                     message="Training job stopped",
                     detail=(
-                        f"job_id={job.job_id} elapsed={elapsed} "
-                        "reason=user request"
+                        f"job_id={job.job_id} elapsed={elapsed} reason=user request"
                     ),
                 )
                 job.pulse = None

@@ -29,6 +29,10 @@ from typing import Any
 import numpy as np
 
 from flexivtrainer.config import AppSettings
+from flexivtrainer.data.gripper_command import (
+    GripperCommandMetadata,
+    write_gripper_command_metadata,
+)
 from flexivtrainer.data.lerobot_io import (
     build_features_from_sample,
     extract_recording_depths,
@@ -91,6 +95,8 @@ def _resize_frame(array: np.ndarray, resolution: tuple[int, int]) -> np.ndarray:
 
 
 class RecordingService:
+    CAPTURE_OVERRUN_WARNING_INTERVAL_S = 1.0
+
     def __init__(
         self,
         settings: AppSettings,
@@ -117,6 +123,7 @@ class RecordingService:
         self._aligned_cameras: list[str] = []
         self._resolution: tuple[int, int] | None = None
         self._recording_sides: list[str] | None = None
+        self._gripper_command_metadata: GripperCommandMetadata | None = None
         self._staging_path: Path | None = None
         self._dataset: Any = None
         self._capture_thread: threading.Thread | None = None
@@ -169,6 +176,10 @@ class RecordingService:
         )
         includes_action_values = any(entry.startswith("action.") for entry in entries)
         requires_robot_values = includes_observation_values or includes_action_values
+        records_gripper_action = any(
+            entry.startswith("action.") and entry.endswith(".gripper")
+            for entry in entries
+        )
         target_fps = fps or 30
         resolved_job_name = sanitize_job_name(job_name)
         # Set before the first grab below: that grab defines the stored frame
@@ -206,6 +217,11 @@ class RecordingService:
                 raise RuntimeError(
                     "No recording features resolved for the selected entries"
                 )
+            gripper_command_metadata = (
+                self._teleop.gripper_command_metadata()
+                if records_gripper_action
+                else None
+            )
 
             from lerobot.configs.video import DepthEncoderConfig, RGBEncoderConfig
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -247,6 +263,7 @@ class RecordingService:
             self._task = task
             self._recording_entries = entries
             self._recording_sides = sides
+            self._gripper_command_metadata = gripper_command_metadata
             self._staging_path = staging_path
             self._dataset = dataset
             self._error = None
@@ -297,6 +314,7 @@ class RecordingService:
             frames_captured = self._frames_captured
             job_name = self._job_name or DEFAULT_JOB_NAME
             task = self._task
+            gripper_command_metadata = self._gripper_command_metadata
             self._save_in_progress = True
             self._save_progress = 0
             self._error = None
@@ -313,6 +331,10 @@ class RecordingService:
                 self._set_save_progress(50)
                 self._run_with_terminal_progress(dataset.finalize, base=50, span=45)
                 self._set_save_progress(95)
+                if gripper_command_metadata is not None:
+                    write_gripper_command_metadata(
+                        staging_path, gripper_command_metadata
+                    )
             except Exception as exc:
                 with self._lock:
                     self._error = f"Failed to finalize dataset: {exc}"
@@ -335,6 +357,7 @@ class RecordingService:
                 self._awaiting_save = False
                 self._dataset = None
                 self._staging_path = None
+                self._gripper_command_metadata = None
                 self._save_progress = 100
                 self._started_at_monotonic = None
                 self._elapsed_s = 0.0
@@ -363,6 +386,7 @@ class RecordingService:
             self._awaiting_save = False
             self._dataset = None
             self._staging_path = None
+            self._gripper_command_metadata = None
             self._save_in_progress = False
             self._save_progress = 0
             self._started_at_monotonic = None
@@ -407,6 +431,7 @@ class RecordingService:
             self._awaiting_save = False
             self._dataset = None
             self._staging_path = None
+            self._gripper_command_metadata = None
             self._episode_name = None
             self._job_name = None
             self._frames_captured = 0
@@ -605,6 +630,9 @@ class RecordingService:
 
     def _capture_loop(self) -> None:
         interval = 1.0 / (self._fps or 30)
+        last_overrun_warning_at = 0.0
+        overruns_since_warning = 0
+        max_delay_since_warning_s = 0.0
         entries = list(self._recording_entries or [])
         sides = self._recording_sides
         image_names = resolve_recording_image_names(entries, sides)
@@ -618,6 +646,8 @@ class RecordingService:
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
+            with self._lock:
+                frame_index = self._frames_captured
             try:
                 images, depths = self._grab_camera_data(
                     image_names,
@@ -691,6 +721,28 @@ class RecordingService:
             sleep_time = interval - elapsed
             if sleep_time > 0:
                 self._stop_event.wait(timeout=sleep_time)
+            elif sleep_time < 0:
+                delay_s = -sleep_time
+                overruns_since_warning += 1
+                max_delay_since_warning_s = max(
+                    max_delay_since_warning_s, delay_s
+                )
+                finished_at = loop_start + elapsed
+                if (
+                    finished_at - last_overrun_warning_at
+                    >= self.CAPTURE_OVERRUN_WARNING_INTERVAL_S
+                ):
+                    warn(
+                        "Recording capture loop missed its deadline",
+                        f"frame_index={frame_index} "
+                        f"latest_delay_s={delay_s:.6f} "
+                        f"max_delay_s={max_delay_since_warning_s:.6f} "
+                        f"overruns={overruns_since_warning} "
+                        f"target_period_s={interval:.6f}",
+                    )
+                    last_overrun_warning_at = finished_at
+                    overruns_since_warning = 0
+                    max_delay_since_warning_s = 0.0
 
     def _set_save_progress(self, progress: int) -> None:
         clamped = max(0, min(int(progress), 100))

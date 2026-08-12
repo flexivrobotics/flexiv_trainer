@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from flexivtrainer.data.lerobot_io import (
+    default_recording_entry_keys,
     extract_recording_frame_values,
     extract_recording_images,
 )
@@ -277,7 +278,12 @@ def build_observation(
     selected = extract_recording_images(images, None, sides)
     for name, image in selected.items():
         observation[f"observation.images.{name}"] = image
-    frame_values = extract_recording_frame_values(snapshot, None, sides)
+    state_entries = [
+        entry
+        for entry in default_recording_entry_keys(sides)
+        if entry.startswith("observation.state.")
+    ]
+    frame_values = extract_recording_frame_values(snapshot, state_entries, sides)
     for key, vector in frame_values.items():
         if key.startswith("observation"):
             observation[key] = np.asarray(vector, dtype=np.float32)

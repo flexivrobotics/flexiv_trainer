@@ -21,6 +21,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from flexivtrainer.data.gripper_command import (
+    GRIPPER_COMMAND_FILENAME,
+    GripperCommandMetadata,
+    read_gripper_command_metadata,
+)
 from flexivtrainer.data.lerobot_io import first_dataset_task
 
 _LANGUAGE_POLICY_TYPES = {"multi_task_dit", "smolvla", "pi0", "pi05"}
@@ -157,8 +162,7 @@ def _checkpoint_dataset_candidates(
 
     return list(
         dict.fromkeys(
-            candidate.expanduser().resolve(strict=False)
-            for candidate in candidates
+            candidate.expanduser().resolve(strict=False) for candidate in candidates
         )
     )
 
@@ -170,9 +174,7 @@ def checkpoint_action_output_dim(checkpoint_path: str) -> int | None:
     config = _read_json(model_dir / "config.json") or {}
     output_features = config.get("output_features")
     action = (
-        output_features.get("action")
-        if isinstance(output_features, dict)
-        else None
+        output_features.get("action") if isinstance(output_features, dict) else None
     )
     shape = action.get("shape") if isinstance(action, dict) else None
     if (
@@ -206,8 +208,10 @@ def checkpoint_action_names(
         if action is None:
             continue
         names = action.get("names") if isinstance(action, dict) else None
-        if not isinstance(names, list) or not names or not all(
-            isinstance(name, str) and name for name in names
+        if (
+            not isinstance(names, list)
+            or not names
+            or not all(isinstance(name, str) and name for name in names)
         ):
             raise ValueError(
                 f"Training dataset action feature has no valid named axes: {info_path}"
@@ -228,6 +232,15 @@ def checkpoint_action_names(
             )
         return list(names)
     return None
+
+
+def checkpoint_gripper_command_metadata(
+    checkpoint_path: str,
+) -> GripperCommandMetadata | None:
+    path = _checkpoint_model_dir(checkpoint_path) / GRIPPER_COMMAND_FILENAME
+    if not path.is_file():
+        return None
+    return read_gripper_command_metadata(path)
 
 
 def _checkpoint_target_hz(checkpoint_path: str) -> float | None:

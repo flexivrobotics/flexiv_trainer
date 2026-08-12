@@ -19,7 +19,7 @@ The representation follows the B-spline Policy data layout:
 ``[parameter_row, knot + control_channels]``
 
 The knot vector occupies column zero. Remaining columns contain Cartesian
-control points represented as XYZ plus rotation-6D and optional gripper width
+control points represented as XYZ plus rotation-6D and an optional gripper target
 for every selected arm. The fixed-size matrix can be flattened into a normal
 one-dimensional LeRobot ``action`` feature for training.
 """
@@ -49,6 +49,15 @@ class TCPActionLayout:
     side: str
     pose_indices: tuple[int, ...]
     gripper_width_index: int | None = None
+    gripper_target_width_index: int | None = None
+
+    @property
+    def gripper_target_mode(self) -> str | None:
+        if self.gripper_width_index is not None:
+            return "width"
+        if self.gripper_target_width_index is not None:
+            return "target_width"
+        return None
 
     @property
     def control_names(self) -> tuple[str, ...]:
@@ -56,11 +65,12 @@ class TCPActionLayout:
         rotation = tuple(
             f"{self.side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_6D_AXES
         )
-        gripper = (
-            (f"{self.side}.gripper.width",)
-            if self.gripper_width_index is not None
-            else ()
-        )
+        if self.gripper_width_index is not None:
+            gripper = (f"{self.side}.gripper.width",)
+        elif self.gripper_target_width_index is not None:
+            gripper = (f"{self.side}.gripper.target_width",)
+        else:
+            gripper = ()
         return position + rotation + gripper
 
 
@@ -120,12 +130,35 @@ def detect_tcp_action_layouts(
             raise ValueError(
                 f"Incomplete TCP pose action for side '{side}'; missing {missing}"
             )
+        width_index = name_to_index.get(f"{side}.gripper.width")
+        target_width_index = name_to_index.get(f"{side}.gripper.target_width")
+        if f"{side}.gripper.close" in name_to_index:
+            raise ValueError(
+                "Boolean gripper.close actions are unsupported; convert them to "
+                "gripper.target_width"
+            )
+        if width_index is not None and target_width_index is not None:
+            raise ValueError(
+                "Action schema cannot contain both legacy gripper width and "
+                f"target width for {side}"
+            )
         layouts.append(
             TCPActionLayout(
                 side=side,
                 pose_indices=tuple(name_to_index[name] for name in expected),
-                gripper_width_index=name_to_index.get(f"{side}.gripper.width"),
+                gripper_width_index=width_index,
+                gripper_target_width_index=target_width_index,
             )
+        )
+    modes = {
+        layout.gripper_target_mode
+        for layout in layouts
+        if layout.gripper_target_mode is not None
+    }
+    if len(modes) > 1:
+        raise ValueError(
+            "Mixed legacy gripper.width and gripper.target_width schemas are "
+            "unsupported"
         )
     return layouts
 
@@ -210,6 +243,8 @@ def extract_cartesian_controls(
         arm_controls = [position, rotation_6d]
         if layout.gripper_width_index is not None:
             arm_controls.append(actions[:, layout.gripper_width_index, None])
+        elif layout.gripper_target_width_index is not None:
+            arm_controls.append(actions[:, layout.gripper_target_width_index, None])
         controls.append(np.concatenate(arm_controls, axis=1))
     result = np.concatenate(controls, axis=1)
     if np.any(~np.isfinite(result)):
@@ -253,11 +288,7 @@ def fit_adaptive_bspline(
         raise ValueError(
             f"max_knots must be at least {minimum_valid_knots} for degree {degree}"
         )
-    if (
-        min_knots is not None
-        and max_knots is not None
-        and max_knots < min_knots
-    ):
+    if min_knots is not None and max_knots is not None and max_knots < min_knots:
         raise ValueError("max_knots cannot be smaller than min_knots")
     maximum_available_knots = len(controls) + degree + 1
     if min_knots is not None and min_knots > maximum_available_knots:
@@ -332,9 +363,7 @@ def fit_adaptive_bspline(
             expanded_knots,
             k=degree,
         )
-        last_error = float(
-            np.max(np.abs(last_spline(sample_times) - controls))
-        )
+        last_error = float(np.max(np.abs(last_spline(sample_times) - controls)))
     return AdaptiveSplineFit(
         spline=last_spline,
         max_abs_error=last_error,

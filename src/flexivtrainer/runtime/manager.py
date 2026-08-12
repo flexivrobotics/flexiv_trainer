@@ -140,6 +140,8 @@ class RuntimeManager:
             self.get_active_sides,
             self.get_end_effector_config,
             self.get_gripper_default_width,
+            self.get_gripper_velocity,
+            self.get_gripper_force_limit,
             gripper_initialization_registry=self.gripper_initialization,
         )
         self.cameras = CameraService(settings)
@@ -212,6 +214,12 @@ class RuntimeManager:
     def get_gripper_default_width(self) -> float | None:
         return self._robot_config.gripper_default_width_m
 
+    def get_gripper_velocity(self) -> float | None:
+        return self._robot_config.gripper_velocity_m_s
+
+    def get_gripper_force_limit(self) -> float | None:
+        return self._robot_config.gripper_force_limit_n
+
     def _rollout_is_running(self) -> bool:
         try:
             return self.rollout.status().get("status") == "running"
@@ -281,11 +289,40 @@ class RuntimeManager:
 
     def update_robot_config(self, payload: RobotSerialConfig) -> dict[str, Any]:
         normalized = payload.normalized()
+        params_changed = (
+            normalized.gripper_velocity_m_s != self._robot_config.gripper_velocity_m_s
+            or normalized.gripper_force_limit_n
+            != self._robot_config.gripper_force_limit_n
+        )
+        if params_changed and self.recording.status().get("active"):
+            raise ValueError(
+                "Gripper velocity and force limit cannot change while recording"
+            )
+        if (
+            params_changed
+            and normalized.gripper_velocity_m_s is not None
+            and normalized.gripper_force_limit_n is not None
+            and self.teleop.gripper_command_parameter_snapshot() is not None
+        ):
+            result = self.teleop.set_gripper_params(
+                normalized.gripper_velocity_m_s,
+                normalized.gripper_force_limit_n,
+            )
+            if not result.get("ok"):
+                raise ValueError(str(result.get("error")))
+            normalized = normalized.model_copy(
+                update={
+                    "gripper_velocity_m_s": result["velocity"],
+                    "gripper_force_limit_n": result["force"],
+                }
+            )
         # These save on every toggle; they must not bounce the services.
         ignored = {
             "recording_entries": [],
             "record_resolution": "",
             "gripper_default_width_m": None,
+            "gripper_velocity_m_s": None,
+            "gripper_force_limit_n": None,
         }
         changed = normalized.model_copy(update=ignored) != (
             self._robot_config.model_copy(update=ignored)
@@ -906,12 +943,12 @@ class RuntimeManager:
             windows[key] = {
                 "chunk_index": int(chunk),
                 "file_index": int(file),
-                "from_timestamp": float(record.get(f"videos/{key}/from_timestamp") or 0.0),
+                "from_timestamp": float(
+                    record.get(f"videos/{key}/from_timestamp") or 0.0
+                ),
                 "to_timestamp": float(record.get(f"videos/{key}/to_timestamp") or 0.0),
             }
-        first_item = (
-            dataset.get_raw_item(from_index) if to_index > from_index else {}
-        )
+        first_item = dataset.get_raw_item(from_index) if to_index > from_index else {}
         result.update(
             {
                 "episode_index": int(episode_index),
@@ -1038,9 +1075,7 @@ class RuntimeManager:
             raise ValueError("Access denied: camera path escapes the videos root")
 
         video_path = (
-            camera_dir
-            / f"chunk-{chunk_index:03d}"
-            / f"file-{file_index:03d}.mp4"
+            camera_dir / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.mp4"
         ).resolve()
         if not video_path.is_relative_to(camera_dir):
             raise ValueError("Access denied: video path escapes the dataset root")

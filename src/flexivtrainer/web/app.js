@@ -15,10 +15,7 @@
 const state = {
     activeView: "home",
     summary: null,
-    // Per-side manual gripper control inputs (velocity/force), keyed by arm
-    // side. Seeded from the gripper params once teleop is running; kept in
-    // memory so user edits survive re-renders within a session.
-    gripperControl: {},
+    gripperCommandControl: { velocity: null, force: null },
     // One shared default/open width for every configured gripper. Slider traffic
     // is coalesced so at most one hardware request is in flight.
     gripperWidthControl: {
@@ -263,9 +260,8 @@ function sideHasGripper(side) {
 // every arm are concatenated into the single `observation.state` / `action`
 // feature. Each row's label is the feature name-prefix it contributes (e.g.
 // `left_arm.tcp_pose`), matching the per-axis names in those features. A side
-// whose follower is a gripper also gets a `gripper` toggle (width + force);
-// the same measured gripper states feed both its state and action entries, so
-// both verify against the follower's `gripper` payload section.
+// whose follower is a gripper also gets measured state and accepted command
+// entries.
 function buildArmMetricRecordingOptions(sides) {
     const options = [];
     sides.forEach((side, index) => {
@@ -307,12 +303,12 @@ function buildArmMetricRecordingOptions(sides) {
         if (sideHasGripper(side)) {
             options.push({
                 id: `action.${side}.gripper`,
-                label: `${side}.gripper`,
+                label: `${side}.gripper.target_width`,
                 group: "action",
                 bucket: "action",
-                payload: "gripper",
+                payload: "gripper_command",
                 side: index,
-                verifyField: "width",
+                verifyField: "target_width",
             });
         }
     });
@@ -594,36 +590,6 @@ function saveCachedTask(task) {
     }
 }
 
-// localStorage key the last-used gripper velocity/force are cached under, keyed
-// by arm side, so the sliders/number boxes resume their values across reloads
-// instead of always reverting to the model defaults.
-const GRIPPER_PARAMS_STORAGE_KEY = "flexivtrainer.gripperParams";
-
-// Read the cached gripper params for one side as {velocity, force}, or {} when
-// none/unavailable. Wrapped in try/catch (localStorage can throw in sandboxed
-// or private-mode frames).
-function loadCachedGripperParams(side) {
-    try {
-        const raw = window.localStorage.getItem(GRIPPER_PARAMS_STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) : {};
-        const entry = parsed && typeof parsed === "object" ? parsed[side] : null;
-        return entry && typeof entry === "object" ? entry : {};
-    } catch (error) {
-        return {};
-    }
-}
-
-function saveCachedGripperParams(side, velocity, force) {
-    try {
-        const raw = window.localStorage.getItem(GRIPPER_PARAMS_STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) : {};
-        const next = parsed && typeof parsed === "object" ? parsed : {};
-        next[side] = { velocity, force };
-        window.localStorage.setItem(GRIPPER_PARAMS_STORAGE_KEY, JSON.stringify(next));
-    } catch (error) {
-        // Persistence is best-effort; ignore storage failures.
-    }
-}
 const RECORD_START_MARKUP = `
     <span class="button-content">
         <svg class="button-icon button-icon--play" viewBox="0 0 24 24" aria-hidden="true">
@@ -3797,6 +3763,7 @@ function renderGripperControl(teleopStatus) {
 
     const grippers = teleopStatus?.gripper || {};
     const gripperSession = teleopStatus?.gripper_session || {};
+    const commandParameters = teleopStatus?.gripper_command || null;
     // Rebuild the panel structure (and re-seed the sliders) only when the set of
     // sides or their params availability changes, so dragging a slider isn't
     // clobbered by the ~10Hz status poll.
@@ -3805,7 +3772,7 @@ function renderGripperControl(teleopStatus) {
         .join(",");
     if (state.ui.gripperPanelSignature !== signature) {
         state.ui.gripperPanelSignature = signature;
-        buildGripperControlPanel(content, sides, grippers);
+        buildGripperControlPanel(content, sides, grippers, commandParameters);
     }
 
     const teleop = teleopStatus?.teleop || {};
@@ -3823,6 +3790,10 @@ function renderGripperControl(teleopStatus) {
         anySessionReady,
     );
     updateGlobalGripperWidthControl(teleop, allPrepared);
+    updateGlobalGripperCommandControl(
+        teleopStatus?.recording || {},
+        allPrepared,
+    );
     sides.forEach((side) =>
         updateGripperControlBlock(
             side,
@@ -3833,7 +3804,7 @@ function renderGripperControl(teleopStatus) {
     );
 }
 
-function buildGripperControlPanel(content, sides, grippers) {
+function buildGripperControlPanel(content, sides, grippers, commandParameters) {
     content.innerHTML = "";
 
     // Preparation always creates connection-local handles and reads parameters;
@@ -3856,68 +3827,96 @@ function buildGripperControlPanel(content, sides, grippers) {
     content.appendChild(actions);
 
     buildGlobalGripperWidthControl(content, sides, grippers);
+    buildGlobalGripperCommandControl(content, commandParameters);
 
     const multiple = sides.length > 1;
     sides.forEach((side) => {
-        const params = grippers[side];
         const label = GRIPPER_SIDE_LABELS[side] ?? "";
         const block = document.createElement("div");
         block.className = "gripper-control-block";
         block.dataset.side = side;
-        block.innerHTML = `
-            ${multiple && label ? `<div class="gripper-control-title">${label}</div>` : ""}
-            <label class="gripper-input-group">
-                <span>Grasping velocity: <strong class="gripper-velocity-value"></strong> m/s</span>
-                <div class="gripper-input-row">
-                    <input type="range" class="gripper-velocity" step="0.001" />
-                    <input type="number" class="gripper-number-input gripper-velocity-number" step="0.001" aria-label="Grasping velocity (m/s)" />
-                </div>
-                <small class="gripper-input-note"></small>
-            </label>
-            <label class="gripper-input-group">
-                <span>Grasping force: <strong class="gripper-force-value"></strong> N</span>
-                <div class="gripper-input-row">
-                    <input type="range" class="gripper-force" step="0.1" />
-                    <input type="number" class="gripper-number-input gripper-force-number" step="0.1" aria-label="Grasping force (N)" />
-                </div>
-                <small class="gripper-input-note"></small>
-            </label>
-            <p class="gripper-control-hint"></p>
-        `;
+        block.innerHTML = `${multiple && label ? `<div class="gripper-control-title">${label}</div>` : ""}<p class="gripper-control-hint"></p>`;
         content.appendChild(block);
-
-        const velInput = block.querySelector(".gripper-velocity");
-        const forceInput = block.querySelector(".gripper-force");
-        const velNumber = block.querySelector(".gripper-velocity-number");
-        const forceNumber = block.querySelector(".gripper-force-number");
-
-        if (params) {
-            const store = (state.gripperControl[side] ||= {});
-            const cached = loadCachedGripperParams(side);
-            // Seed from the cached last-used value, then the model default
-            // (velocity = max_vel; grasping force = 1/4 of max_force). The clamp
-            // below keeps a cached value valid if the gripper's range changed.
-            if (store.velocity == null) {
-                store.velocity = cached.velocity != null ? cached.velocity : params.max_vel;
-            }
-            if (store.force == null) {
-                store.force = cached.force != null ? cached.force : params.max_force / 4;
-            }
-            // Clamp any carried-over value into the (possibly new) range.
-            store.velocity = clampNumber(store.velocity, params.min_vel, params.max_vel);
-            store.force = clampNumber(store.force, params.min_force, params.max_force);
-
-            bindGripperControl(block, velInput, velNumber, side, "velocity", params.min_vel, params.max_vel, 3);
-            bindGripperControl(block, forceInput, forceNumber, side, "force", params.min_force, params.max_force, 1);
-        } else {
-            // Params (and thus the valid range) are obtained on Init; leave the
-            // controls disabled until then.
-            velInput.disabled = true;
-            forceInput.disabled = true;
-            velNumber.disabled = true;
-            forceNumber.disabled = true;
-        }
     });
+}
+
+function buildGlobalGripperCommandControl(content, params) {
+    const block = document.createElement("div");
+    block.className = "gripper-command-parameters";
+    block.innerHTML = `
+        <label class="gripper-input-group">
+            <span>Grasping velocity: <strong class="gripper-velocity-value"></strong> m/s</span>
+            <div class="gripper-input-row"><input type="range" class="gripper-velocity" step="0.001" /></div>
+            <small class="gripper-input-note gripper-velocity-note"></small>
+        </label>
+        <label class="gripper-input-group">
+            <span>Force limit: <strong class="gripper-force-value"></strong> N</span>
+            <div class="gripper-input-row"><input type="range" class="gripper-force" step="0.1" /></div>
+            <small class="gripper-input-note gripper-force-note"></small>
+        </label>`;
+    content.appendChild(block);
+    if (!params) {
+        block.querySelectorAll("input").forEach((input) => { input.disabled = true; });
+        return;
+    }
+    const control = state.gripperCommandControl;
+    control.velocity = params.velocity_m_s;
+    control.force = params.force_limit_n;
+    bindGlobalGripperCommandInput(
+        block,
+        "velocity",
+        params.min_velocity_m_s,
+        params.max_velocity_m_s,
+        3,
+    );
+    bindGlobalGripperCommandInput(
+        block,
+        "force",
+        params.min_force_limit_n,
+        params.max_force_limit_n,
+        1,
+    );
+}
+
+function bindGlobalGripperCommandInput(block, field, min, max, decimals) {
+    const input = block.querySelector(`.gripper-${field}`);
+    const value = block.querySelector(`.gripper-${field}-value`);
+    const note = block.querySelector(`.gripper-${field}-note`);
+    const control = state.gripperCommandControl;
+    input.min = min;
+    input.max = max;
+    input.value = control[field];
+    value.textContent = roundForInput(control[field], decimals);
+    note.textContent = `Shared range: ${roundForInput(min, decimals)}–${roundForInput(max, decimals)}`;
+    input.oninput = () => {
+        control[field] = clampNumber(parseFloat(input.value), min, max);
+        value.textContent = roundForInput(control[field], decimals);
+    };
+    input.onchange = () => sendGlobalGripperParams();
+}
+
+function updateGlobalGripperCommandControl(recording, allPrepared) {
+    const block = byId("teleop-gripper-content")?.querySelector(
+        ".gripper-command-parameters",
+    );
+    if (!block) return;
+    const disabled = !allPrepared || !!state.ui.gripperInitBusy || !!recording.active;
+    block.querySelectorAll("input").forEach((input) => { input.disabled = disabled; });
+}
+
+async function sendGlobalGripperParams() {
+    const control = state.gripperCommandControl;
+    try {
+        const result = await api("/teleop/gripper/params", {
+            method: "POST",
+            body: JSON.stringify({ velocity: control.velocity, force: control.force }),
+        });
+        state.summary.robot_config = result.robot_config;
+        state.summary.services = result.services;
+    } catch (error) {
+        state.ui.gripperPanelSignature = null;
+        showToast(error.message, true);
+    }
 }
 
 function configuredGripperDefaultWidth() {
@@ -4050,103 +4049,6 @@ async function recordGripperDefaultWidth() {
         updateGlobalGripperWidthControl(state.teleopStatus?.teleop || {}, true);
     } catch (error) {
         config.gripper_default_width_m = previous;
-        showToast(error.message, true);
-    }
-}
-
-// Configure a range slider plus its number box for one gripper field: set their
-// bounds, reflect the stored value, keep the two inputs in sync, live-update the
-// readout while editing, and push to the backend when committed (change).
-// ``decimals`` controls the displayed precision.
-function bindGripperControl(block, slider, number, side, field, min, max, decimals) {
-    const valueEl = block.querySelector(`.gripper-${field}-value`);
-    const note = block.querySelector(`.gripper-${field}-number`).closest(".gripper-input-group").querySelector(".gripper-input-note");
-    const store = (state.gripperControl[side] ||= {});
-    const step = 1 / 10 ** decimals;
-    slider.min = min;
-    slider.max = max;
-    number.min = roundForInput(min, decimals);
-    number.max = roundForInput(max, decimals);
-    number.step = step;
-
-    // Reflect the stored value across the readout, slider, and number box.
-    const render = () => {
-        const rounded = roundForInput(store[field], decimals);
-        if (valueEl) valueEl.textContent = rounded;
-        slider.value = store[field];
-        // Don't fight the field the user is typing in (e.g. a partial "0.").
-        if (document.activeElement !== number) {
-            number.value = rounded;
-        }
-    };
-    store[field] = clampNumber(store[field], min, max);
-    render();
-    if (note) {
-        note.textContent = `Range: ${roundForInput(min, decimals)}–${roundForInput(max, decimals)}`;
-    }
-
-    // Live-update (no backend push) while dragging the slider / typing a number.
-    const onInput = (rawValue) => {
-        const value = clampNumber(parseFloat(rawValue), min, max);
-        store[field] = value;
-        const rounded = roundForInput(value, decimals);
-        if (valueEl) valueEl.textContent = rounded;
-        return value;
-    };
-    slider.oninput = () => {
-        const value = onInput(slider.value);
-        if (document.activeElement !== number) {
-            number.value = roundForInput(value, decimals);
-        }
-    };
-    number.oninput = () => {
-        // Allow intermediate, not-yet-parseable input without snapping it; only
-        // mirror to the slider once it parses to a number.
-        if (number.value.trim() === "" || Number.isNaN(parseFloat(number.value))) {
-            return;
-        }
-        const value = onInput(number.value);
-        slider.value = value;
-    };
-
-    // Commit: clamp, normalize the displayed value, persist, and push to backend.
-    // ``store[field]`` is kept current by the oninput handlers above; fall back
-    // to it when the number box holds an unparseable intermediate value.
-    const commit = () => {
-        const parsed = parseFloat(number.value);
-        const base = Number.isNaN(parsed) ? store[field] : parsed;
-        store[field] = clampNumber(base, min, max);
-        render();
-        persistGripperParams(side);
-        // Push to the backend so the mirror loop's Move() uses the new value.
-        sendGripperParams(side);
-    };
-    slider.onchange = commit;
-    number.onchange = commit;
-}
-
-// Cache this side's last-used velocity/force so they persist across reloads.
-function persistGripperParams(side) {
-    const store = state.gripperControl[side] || {};
-    if (store.velocity == null || store.force == null) {
-        return;
-    }
-    saveCachedGripperParams(side, store.velocity, store.force);
-}
-
-// Persist this side's velocity/force on the backend (used by the mirror loop's
-// Move() calls). Best-effort; surfaced on failure.
-async function sendGripperParams(side) {
-    const store = state.gripperControl[side] || {};
-    if (store.velocity == null || store.force == null) {
-        return;
-    }
-    try {
-        await api(`/teleop/gripper/${side}/params`, {
-            method: "POST",
-            body: JSON.stringify({ velocity: store.velocity, force: store.force }),
-        });
-    } catch (error) {
         showToast(error.message, true);
     }
 }

@@ -65,7 +65,7 @@ class SharedRolloutConfig(BaseModel):
     # Replay the trained trajectory faster than the dataset rate. 2.0 halves
     # waypoint spacing, so the path is traversed in half the time at twice the
     # commanded velocity, and the planner must tick twice as often.
-    playback_speed: float = Field(default=2.0, gt=0.0, le=4.0)
+    playback_speed: float = Field(default=1.0, gt=0.0, le=4.0)
     # Sync CUDA each tick so infer_ms attributes GPU time instead of just launch
     # time. Costs a whole-device wait inside the planner deadline, so it is a
     # profiling aid, not a default.

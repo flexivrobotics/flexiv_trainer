@@ -49,6 +49,7 @@ orbbec = [
 flexiv-trainer-server = "flexivtrainer.api.app:run"
 flexivtrainer-server = "flexivtrainer.api.app:run"
 flexivtrainer-convert-bspline = "flexivtrainer.cli.convert_bspline_dataset:main"
+flexivtrainer-convert-gripper-actions = "flexivtrainer.cli.convert_gripper_actions:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flexivtrainer"]

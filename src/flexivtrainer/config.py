@@ -166,6 +166,8 @@ class RobotSerialConfig(BaseModel):
     gripper_default_width_m: float | None = Field(
         default=None, ge=0, allow_inf_nan=False
     )
+    gripper_velocity_m_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    gripper_force_limit_n: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     # Cached recording checklist; empty means never saved, so defaults apply.
     recording_entries: list[str] = Field(default_factory=list)
     # Cached capture-resolution preset id; empty means never saved.
@@ -224,6 +226,8 @@ class RobotSerialConfig(BaseModel):
             end_effector_config=dict(self.end_effector_config),
             home_posture_deg=self._normalize_home_posture(),
             gripper_default_width_m=self.gripper_default_width_m,
+            gripper_velocity_m_s=self.gripper_velocity_m_s,
+            gripper_force_limit_n=self.gripper_force_limit_n,
             # Entries for inactive sides are kept, as with the serials above.
             recording_entries=[
                 str(entry) for entry in self.recording_entries if str(entry).strip()

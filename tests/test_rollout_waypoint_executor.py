@@ -96,6 +96,27 @@ def test_named_layout_maps_only_the_configured_gripper_side() -> None:
     assert layout[1]["gripper_width"] is None
 
 
+def test_named_layout_accepts_target_width_and_rejects_ambiguous_modes() -> None:
+    base = canonical_action_names(19, ["single_arm"])
+    layout = build_action_layout(
+        [*base, "single_arm.gripper.target_width"], ["single_arm"]
+    )
+
+    assert layout[0]["gripper_width"] == 19
+    assert layout[0]["gripper_target_mode"] == "target_width"
+    with pytest.raises(ValueError, match="both"):
+        build_action_layout(
+            [
+                *base,
+                "single_arm.gripper.width",
+                "single_arm.gripper.target_width",
+            ],
+            ["single_arm"],
+        )
+    with pytest.raises(ValueError, match="unsupported"):
+        build_action_layout([*base, "single_arm.gripper.close"], ["single_arm"])
+
+
 @pytest.mark.parametrize(
     ("sides", "action_dim", "expected_twist", "expected_wrench"),
     [
@@ -150,14 +171,10 @@ def test_dual_arm_dispatch_maps_each_arm_and_zero_fills_missing_wrench(
     executor._send_waypoint(executor._waypoints[0])
 
     assert robots[0].commands[0][0] == left_pose
-    assert robots[0].commands[0][1] == (
-        left_wrench if include_wrench else [0.0] * 6
-    )
+    assert robots[0].commands[0][1] == (left_wrench if include_wrench else [0.0] * 6)
     assert robots[0].commands[0][2] == left_twist
     assert robots[1].commands[0][0] == right_pose
-    assert robots[1].commands[0][1] == (
-        right_wrench if include_wrench else [0.0] * 6
-    )
+    assert robots[1].commands[0][1] == (right_wrench if include_wrench else [0.0] * 6)
     assert robots[1].commands[0][2] == right_twist
 
 
@@ -328,7 +345,5 @@ def test_single_waypoint_chunk_survives_only_when_inference_beats_dt() -> None:
 
     for latency, expected in ((0.012, 1), (0.022, 0)):
         executor = _executor()
-        executor.replace_waypoints(
-            actions, [loop_start + dt], now=loop_start + latency
-        )
+        executor.replace_waypoints(actions, [loop_start + dt], now=loop_start + latency)
         assert executor.scheduled_count == expected

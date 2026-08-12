@@ -14,6 +14,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 import flexivtrainer.teleop.end_effector as ee
 from flexivtrainer.config import EndEffectorSideConfig
 
@@ -335,18 +337,46 @@ def test_cached_takeover_blocks_open_until_leader_requests_close(monkeypatch) ->
     # preserves the rollout grasp and sends no hardware command.
     ctl._tick(0, ctl._configs[0])
     assert gripper.moves == []
+    assert ctl.gripper_commands_by_index() == {}
     assert ctl.gripper_snapshot()["single_arm"]["takeover_pending"] is True
 
     # Close is accepted without any preceding Open and arms normal mirroring.
     tdk._leader_ports[0] = True
     ctl._tick(0, ctl._configs[0])
     assert gripper.moves == [(0.0, 0.5, 12.5)]
+    assert ctl.gripper_commands_by_index() == {0: {"target_width": 0.0}}
     assert ctl.gripper_snapshot()["single_arm"]["takeover_pending"] is False
 
     # Releasing after the deliberate Close now opens to the configured default.
     tdk._leader_ports[0] = False
     ctl._tick(0, ctl._configs[0])
     assert gripper.moves[-1] == (0.06, 0.5, 12.5)
+    assert ctl.gripper_commands_by_index() == {0: {"target_width": 0.06}}
+
+
+def test_failed_gripper_move_does_not_publish_a_command(monkeypatch) -> None:
+    class FailingMoveGripper(FakeGripper):
+        def Move(self, width: float, velocity: float, force: float) -> None:
+            raise RuntimeError("Move failed")
+
+    monkeypatch.setattr(ee, "Gripper", FailingMoveGripper)
+    monkeypatch.setattr(ee, "Tool", FakeTool)
+    cfg = EndEffectorSideConfig(
+        leader="digital_input",
+        follower="gripper",
+        gripper_activated_state="close",
+    )
+    ctl = ee.EndEffectorController(
+        FakeTDK(FakeFollower(), [True] * 18),
+        ["single_arm"],
+        {"single_arm": cfg},
+    )
+    ctl._setup_gripper(0, ctl._configs[0])
+
+    with pytest.raises(RuntimeError, match="Move failed"):
+        ctl._tick(0, ctl._configs[0])
+
+    assert ctl.gripper_commands_by_index() == {}
 
 
 def test_default_width_replaces_open_target_and_manual_tuning_clamps(
@@ -377,6 +407,7 @@ def test_default_width_replaces_open_target_and_manual_tuning_clamps(
     result = ctl.move_grippers_to_width(0.2)
     assert result == {"widths": {"single_arm": 0.1}, "errors": {}}
     assert gripper.moves[-1][0] == 0.1
+    assert ctl.gripper_commands_by_index() == {}
 
     # Manual tuning resets the cached mirror state; the next tick reasserts Open
     # using the newly tuned width (clamped independently for this gripper).
@@ -438,9 +469,7 @@ def test_gripper_states_by_index_reports_width_and_force(monkeypatch) -> None:
     follower = FakeFollower()
     tdk = FakeTDK(follower, [False] * 18)
     cfg = EndEffectorSideConfig(follower="gripper", gripper_model="Flexiv-GN01")
-    ctl = ee.EndEffectorController(
-        tdk, ["left_arm", "right_arm"], {"left_arm": cfg}
-    )
+    ctl = ee.EndEffectorController(tdk, ["left_arm", "right_arm"], {"left_arm": cfg})
 
     # Nothing before the gripper is enabled.
     assert ctl.gripper_states_by_index() == {}
@@ -451,8 +480,8 @@ def test_gripper_states_by_index_reports_width_and_force(monkeypatch) -> None:
     assert states == {0: {"width": 0.042, "force": -3.5}}
 
 
-def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:
-    # The panel sliders' velocity/force (set_command_params) must drive the
+def test_global_command_params_apply_to_mirror_loop(monkeypatch) -> None:
+    # The panel's global velocity/force (set_command_params) must drive the
     # mirror loop's Move() calls.
     monkeypatch.setattr(ee, "Gripper", FakeGripper)
     monkeypatch.setattr(ee, "Tool", FakeTool)
@@ -471,7 +500,7 @@ def test_command_params_apply_to_mirror_loop(monkeypatch) -> None:
     gripper = ctl._grippers[0]
 
     # Panel sets velocity/force (clamped into [0.01,0.5] / [1,50]).
-    stored = ctl.set_command_params("single_arm", velocity=0.3, force=12.0)
+    stored = ctl.set_command_params(velocity=0.3, force=12.0)
     assert stored == (0.3, 12.0)
 
     # Mirror tick: leader triggered -> close, using the panel velocity/force.

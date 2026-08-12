@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,11 +22,62 @@ import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig
+from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.data.recording_service import (
     DEFAULT_JOB_NAME,
     RecordingService,
     sanitize_job_name,
 )
+
+
+def test_capture_loop_warns_with_deadline_delay(monkeypatch) -> None:
+    import flexivtrainer.data.recording_service as recording_module
+
+    class OneIterationStopEvent:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def is_set(self) -> bool:
+            self.checks += 1
+            return self.checks > 1
+
+        def wait(self, timeout=None) -> bool:
+            raise AssertionError(f"unexpected wait: {timeout}")
+
+    frames = []
+    warnings = []
+    service = RecordingService.__new__(RecordingService)
+    service._fps = 30
+    service._recording_entries = []
+    service._recording_sides = []
+    service._stop_event = OneIterationStopEvent()
+    service._task = "test"
+    service._dataset = SimpleNamespace(add_frame=frames.append)
+    service._lock = threading.Lock()
+    service._frames_captured = 0
+    service._grab_camera_data = lambda *args, **kwargs: ({}, {})
+    monkeypatch.setattr(
+        recording_module.time,
+        "monotonic",
+        lambda: next(iterations),
+    )
+    monkeypatch.setattr(
+        recording_module,
+        "warn",
+        lambda message, detail=None: warnings.append((message, detail)),
+    )
+    iterations = iter([100.0, 100.05])
+
+    service._capture_loop()
+
+    assert len(frames) == 1
+    assert warnings == [
+        (
+            "Recording capture loop missed its deadline",
+            "frame_index=0 latest_delay_s=0.016667 max_delay_s=0.016667 "
+            "overruns=1 target_period_s=0.033333",
+        )
+    ]
 
 
 def test_grab_images_converts_bgr_capture_to_rgb() -> None:
@@ -120,7 +172,12 @@ def test_ensure_camera_streams_rejects_missing_selected_depth() -> None:
         service._ensure_camera_streams(["ego"], depth_names=["ego"])
 
 
-def _arm_snapshot_payload(base: float, *, gripper: dict | None = None) -> dict:
+def _arm_snapshot_payload(
+    base: float,
+    *,
+    gripper: dict | None = None,
+    gripper_command: dict | None = None,
+) -> dict:
     payload = {
         "connected": True,
         "states": {
@@ -136,6 +193,8 @@ def _arm_snapshot_payload(base: float, *, gripper: dict | None = None) -> dict:
     }
     if gripper is not None:
         payload["gripper"] = dict(gripper)
+    if gripper_command is not None:
+        payload["gripper_command"] = dict(gripper_command)
     return payload
 
 
@@ -146,11 +205,25 @@ class _FakeTeleop:
         return {
             "robots": {
                 "FOLLOWER_A": _arm_snapshot_payload(
-                    0.0, gripper={"width": 0.03, "force": -2.0}
+                    0.0,
+                    gripper={"width": 0.03, "force": -2.0},
+                    gripper_command={"target_width": 0.01},
                 ),
                 "FOLLOWER_B": _arm_snapshot_payload(100.0),
             }
         }
+
+    def gripper_command_metadata(self):
+        return GripperCommandMetadata(velocity_m_s=0.2, force_limit_n=20.0)
+
+
+class _FakeTeleopWithoutCommand(_FakeTeleop):
+    def robot_data_snapshot(self, *, include_states=True, include_actions=True):
+        snapshot = super().robot_data_snapshot(
+            include_states=include_states, include_actions=include_actions
+        )
+        snapshot["robots"]["FOLLOWER_A"].pop("gripper_command")
+        return snapshot
 
 
 def _drive_capture(service: RecordingService, frames: int) -> None:
@@ -164,11 +237,7 @@ def _drive_capture(service: RecordingService, frames: int) -> None:
         time.sleep(0.02)
 
 
-def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
-    # End-to-end: a follower configured as a gripper must land its measured
-    # width/force in the saved LeRobot dataset, in both observation.state and
-    # action, alongside the arm's TCP metrics. Exercises the recording loop and
-    # the real LeRobotDataset round-trip (skipped if lerobot isn't installed).
+def test_records_gripper_state_and_target_command_into_saved_episode(tmp_path) -> None:
     pytest.importorskip("lerobot")
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -199,23 +268,18 @@ def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
         service.stop()
     result = service.save()
 
-    dataset = LeRobotDataset(
-        f"local/{result['episode_name']}", root=result["path"]
-    )
+    dataset = LeRobotDataset(f"local/{result['episode_name']}", root=result["path"])
     features = dataset.features
 
-    # Both the observation and action vectors carry the left arm's gripper
-    # width/force (right arm has no gripper, so no gripper axes for it).
     state_names = features["observation.state"]["names"]
     action_names = features["action"]["names"]
     assert "left_arm.gripper.width" in state_names
     assert "left_arm.gripper.force" in state_names
-    assert "left_arm.gripper.width" in action_names
-    assert "left_arm.gripper.force" in action_names
+    assert "left_arm.gripper.target_width" in action_names
+    assert "left_arm.gripper.width" not in action_names
+    assert "left_arm.gripper.force" not in action_names
     assert not any(name.startswith("right_arm.gripper") for name in state_names)
 
-    # The stored values match the snapshot's gripper states, identical in state
-    # and action (recording reuses gripper.states() for both).
     frame = dataset[0]
     # The provided task string is stamped into every recorded frame.
     assert frame["task"] == "gripper recording test"
@@ -223,8 +287,33 @@ def test_records_gripper_width_force_into_saved_episode(tmp_path) -> None:
     action = np.asarray(frame["action"])
     assert state[state_names.index("left_arm.gripper.width")] == pytest.approx(0.03)
     assert state[state_names.index("left_arm.gripper.force")] == pytest.approx(-2.0)
-    assert action[action_names.index("left_arm.gripper.width")] == pytest.approx(0.03)
-    assert action[action_names.index("left_arm.gripper.force")] == pytest.approx(-2.0)
+    assert action[action_names.index("left_arm.gripper.target_width")] == pytest.approx(
+        0.01
+    )
+    assert json.loads(
+        (Path(result["path"]) / "meta" / "gripper_command.json").read_text()
+    ) == {
+        "format_version": 1,
+        "velocity_m_s": 0.2,
+        "force_limit_n": 20.0,
+    }
+
+
+def test_recording_rejects_gripper_action_before_first_command(tmp_path) -> None:
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    service = RecordingService(
+        settings,
+        teleop=_FakeTeleopWithoutCommand(),
+        cameras=SimpleNamespace(),
+        get_active_sides=lambda: ["left_arm", "right_arm"],
+    )
+
+    with pytest.raises(RuntimeError, match="send a leader command"):
+        service.start(
+            recording_entries=["action.left_arm.gripper"],
+            job_name="missing_command",
+        )
 
 
 @pytest.mark.parametrize(

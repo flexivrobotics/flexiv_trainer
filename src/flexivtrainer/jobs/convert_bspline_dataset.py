@@ -66,8 +66,10 @@ def _load_action_names(info: dict[str, Any]) -> list[str]:
     features = info.get("features")
     action = features.get("action") if isinstance(features, dict) else None
     names = action.get("names") if isinstance(action, dict) else None
-    if not isinstance(names, list) or not names or not all(
-        isinstance(name, str) for name in names
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(name, str) for name in names)
     ):
         raise ValueError(
             "The source dataset's action feature must have named axes in "
@@ -146,12 +148,11 @@ def _episode_error_report(
         )
 
         actual_matrix = rotation_6d_to_matrix(controls[:, start + 3 : start + 9])
-        fitted_matrix = rotation_6d_to_matrix(
-            reconstructed[:, start + 3 : start + 9]
+        fitted_matrix = rotation_6d_to_matrix(reconstructed[:, start + 3 : start + 9])
+        difference = (
+            Rotation.from_matrix(fitted_matrix)
+            * Rotation.from_matrix(actual_matrix).inv()
         )
-        difference = Rotation.from_matrix(fitted_matrix) * Rotation.from_matrix(
-            actual_matrix
-        ).inv()
         max_rotation_error = max(
             max_rotation_error,
             float(np.max(difference.magnitude())),
@@ -516,9 +517,7 @@ def convert_lerobot_tcp_actions_to_bspline(
 
     parameter_rows = chunk_size + 2 * degree
     control_names = [name for layout in layouts for name in layout.control_names]
-    matrix_shape = list(
-        parameter_matrix_shape(layouts, parameter_rows=parameter_rows)
-    )
+    matrix_shape = list(parameter_matrix_shape(layouts, parameter_rows=parameter_rows))
     flattened_action_dim = math.prod(matrix_shape)
     flattened_names = parameter_feature_names(
         layouts,
@@ -545,9 +544,12 @@ def convert_lerobot_tcp_actions_to_bspline(
         "control_names": control_names,
         "parameter_channel_names": ["knot", *control_names],
         "gripper_width_sides": [
+            layout.side for layout in layouts if layout.gripper_width_index is not None
+        ],
+        "gripper_target_width_sides": [
             layout.side
             for layout in layouts
-            if layout.gripper_width_index is not None
+            if layout.gripper_target_width_index is not None
         ],
         "rotation_representation": "rotation_6d_rows",
         "degree": degree,

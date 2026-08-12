@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.data.lerobot_io import resolve_recording_image_names
 from flexivtrainer.observability import (
     describe_exception,
@@ -75,6 +76,7 @@ class BSplineRunner:
         append_wrench: Callable[[dict[str, Any]], None] | None = None,
         gripper_default_width_m: float | None = None,
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
+        gripper_command_parameters: GripperCommandMetadata | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -105,6 +107,7 @@ class BSplineRunner:
         self._prepare_motion = prepare_motion
         self._gripper_default_width_m = gripper_default_width_m
         self._gripper_initialization_registry = gripper_initialization_registry
+        self._gripper_command_parameters = gripper_command_parameters
 
         self._error: str | None = None
         self._stop_reason: str | None = None
@@ -172,30 +175,27 @@ class BSplineRunner:
                 control_hz=rollout_cfg.control_hz,
                 speed_scale=rollout_cfg.speed_scale,
                 predict_before_end_s=rollout_cfg.predict_before_end_s,
-                time_align_error_threshold=(
-                    rollout_cfg.time_align_error_threshold
-                ),
+                time_align_error_threshold=(rollout_cfg.time_align_error_threshold),
                 time_align_max_fraction=rollout_cfg.time_align_max_fraction,
                 handoff_blend_s=getattr(rollout_cfg, "handoff_blend_s", 0.15),
                 handoff_max_accel=getattr(rollout_cfg, "handoff_max_accel", 2.0),
             )
             if self._bspline_layout.gripper_sides:
                 gripper_kwargs: dict[str, Any] = {
-                    "target_source": lambda: (
-                        bspline_executor.last_gripper_widths
-                    ),
+                    "target_source": lambda: (bspline_executor.last_gripper_targets),
                     "failure_event": self._stop_event,
                 }
-                if self._gripper_default_width_m is not None:
-                    gripper_kwargs["default_width_m"] = (
-                        self._gripper_default_width_m
+                if self._bspline_layout.gripper_target_mode == "target_width":
+                    gripper_kwargs["target_mode"] = "target_width"
+                    gripper_kwargs["command_parameters"] = (
+                        self._gripper_command_parameters
                     )
+                if self._gripper_default_width_m is not None:
+                    gripper_kwargs["default_width_m"] = self._gripper_default_width_m
                 if self._gripper_initialization_registry is not None:
                     gripper_kwargs.update(
                         followers=self._followers,
-                        initialization_registry=(
-                            self._gripper_initialization_registry
-                        ),
+                        initialization_registry=(self._gripper_initialization_registry),
                         append_log=self._append_log,
                     )
                 gripper_executor = GripperExecutor(
@@ -231,8 +231,7 @@ class BSplineRunner:
         if array.ndim == 1:
             return array
         raise ValueError(
-            "B-spline policy must return one flat action, got "
-            f"shape={array.shape}"
+            f"B-spline policy must return one flat action, got shape={array.shape}"
         )
 
     def _infer_bspline_plan(
@@ -310,9 +309,9 @@ class BSplineRunner:
         align_searched = False
         align_capped = False
         step = 0
-        inference_future: (
-            Future[tuple[float, BSplineInstallResult | None]] | None
-        ) = None
+        inference_future: Future[tuple[float, BSplineInstallResult | None]] | None = (
+            None
+        )
         inference_pool = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rollout-bspline-inference"
         )
@@ -396,9 +395,7 @@ class BSplineRunner:
                     {
                         "t": round(time.monotonic(), 3),
                         "step": step,
-                        "send_hz": round(
-                            executor_status.achieved_send_hz, 2
-                        ),
+                        "send_hz": round(executor_status.achieved_send_hz, 2),
                         "missed_deadlines": executor_status.missed_deadlines,
                         "spline_remaining_s": (
                             None
@@ -433,8 +430,7 @@ class BSplineRunner:
                     remaining = executor.remaining_s(now)
                     until_replan = max(
                         0.0,
-                        (remaining or 0.0)
-                        - rollout_cfg.predict_before_end_s,
+                        (remaining or 0.0) - rollout_cfg.predict_before_end_s,
                     )
                     wake_at = min(wake_at, now + until_replan)
                 self._stop_event.wait(max(0.0, wake_at - now))

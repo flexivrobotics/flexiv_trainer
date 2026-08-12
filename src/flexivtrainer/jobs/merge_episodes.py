@@ -18,6 +18,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from flexivtrainer.data.gripper_command import (
+    GRIPPER_COMMAND_RELATIVE_PATH,
+    GripperCommandMetadata,
+    action_gripper_mode,
+    read_gripper_command_metadata,
+    write_gripper_command_metadata,
+)
+
 
 def _load_manifest(root: Path) -> Any:
     from flexivtrainer.data.lerobot_io import EpisodeManifest
@@ -25,7 +33,7 @@ def _load_manifest(root: Path) -> Any:
     return EpisodeManifest.from_path(root)
 
 
-def _feature_keys(root: Path) -> set[str]:
+def _features(root: Path) -> dict[str, Any]:
     info_path = root / "meta" / "info.json"
     try:
         payload = json.loads(info_path.read_text(encoding="utf-8"))
@@ -34,10 +42,30 @@ def _feature_keys(root: Path) -> set[str]:
     features = payload.get("features") if isinstance(payload, dict) else None
     if not isinstance(features, dict):
         raise ValueError(f"Dataset metadata has no features object: {info_path}")
-    return set(features)
+    return features
 
 
-def _validate_matching_feature_keys(episode_roots: list[Path]) -> None:
+def _feature_keys(root: Path) -> set[str]:
+    return set(_features(root))
+
+
+def _action_signature(root: Path) -> tuple[Any, Any]:
+    action = _features(root).get("action")
+    if not isinstance(action, dict):
+        raise ValueError(f"Dataset metadata has no action feature: {root}")
+    return action.get("shape"), action.get("names")
+
+
+def _action_names(root: Path) -> list[str]:
+    names = _action_signature(root)[1]
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise ValueError(f"Dataset action feature has no valid axis names: {root}")
+    return names
+
+
+def _validate_matching_feature_keys(
+    episode_roots: list[Path],
+) -> GripperCommandMetadata | None:
     expected = _feature_keys(episode_roots[0])
     mismatches: list[str] = []
     for root in episode_roots[1:]:
@@ -58,6 +86,39 @@ def _validate_matching_feature_keys(episode_roots: list[Path]) -> None:
             "Depth-enabled and RGB-only recordings must be merged separately: "
             + "; ".join(mismatches)
         )
+
+    expected_action = _action_signature(episode_roots[0])
+    action_mismatches = [
+        root.name
+        for root in episode_roots[1:]
+        if _action_signature(root) != expected_action
+    ]
+    if action_mismatches:
+        raise ValueError(
+            "Datasets cannot be merged because their action shapes or axis names "
+            "differ. Convert legacy gripper width/force datasets with "
+            "flexivtrainer-convert-gripper-actions before merging: "
+            + ", ".join(action_mismatches)
+        )
+    mode = action_gripper_mode(_action_names(episode_roots[0]))
+    if mode != "target_width":
+        return None
+    metadata = [
+        read_gripper_command_metadata(root / GRIPPER_COMMAND_RELATIVE_PATH)
+        for root in episode_roots
+    ]
+    expected_metadata = metadata[0]
+    mismatches = [
+        root.name
+        for root, actual in zip(episode_roots[1:], metadata[1:], strict=True)
+        if actual != expected_metadata
+    ]
+    if mismatches:
+        raise ValueError(
+            "Datasets cannot be merged because gripper command velocity/force "
+            "metadata differs: " + ", ".join(mismatches)
+        )
+    return expected_metadata
 
 
 def merge_episode_datasets(
@@ -81,7 +142,7 @@ def merge_episode_datasets(
     if not episode_roots:
         raise ValueError("At least one episode dataset is required")
 
-    _validate_matching_feature_keys(episode_roots)
+    gripper_command = _validate_matching_feature_keys(episode_roots)
 
     target_root = output_root / output_name
     if target_root.exists():
@@ -112,6 +173,8 @@ def merge_episode_datasets(
         output_repo_id=f"local/{output_name}",
         output_dir=target_root,
     )
+    if gripper_command is not None:
+        write_gripper_command_metadata(target_root, gripper_command)
 
     return {
         "output_name": output_name,

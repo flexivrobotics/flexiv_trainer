@@ -20,8 +20,9 @@ import math
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
+from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.runtime.gripper_session import (
     GripperIdentity,
@@ -39,7 +40,7 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 class GripperExecutor:
-    """Own configured follower grippers and execute latest-only width targets."""
+    """Own configured follower grippers and execute latest-only policy targets."""
 
     DEFAULT_COMMAND_HZ = 30.0
     MAX_COMMAND_HZ = 30.0
@@ -59,6 +60,8 @@ class GripperExecutor:
         tool_factory: Callable[[Any], Any] | None = None,
         idle_mode: Any = None,
         target_source: Callable[[], Mapping[str, float]] | None = None,
+        target_mode: Literal["width", "legacy_width", "target_width"] = "width",
+        command_parameters: GripperCommandMetadata | None = None,
         failure_event: threading.Event | None = None,
         default_width_m: float | None = None,
         followers: Sequence[str] | None = None,
@@ -76,13 +79,17 @@ class GripperExecutor:
                 "Follower serials are required with an initialization registry"
             )
         if not math.isfinite(command_hz) or not 0 < command_hz <= self.MAX_COMMAND_HZ:
-            raise ValueError(
-                f"command_hz must be in (0, {self.MAX_COMMAND_HZ:g}]"
-            )
+            raise ValueError(f"command_hz must be in (0, {self.MAX_COMMAND_HZ:g}]")
         if default_width_m is not None and (
             not math.isfinite(default_width_m) or default_width_m < 0
         ):
             raise ValueError("default_width_m must be finite and nonnegative")
+        if target_mode not in {"width", "legacy_width", "target_width"}:
+            raise ValueError(f"Unsupported gripper target mode: {target_mode}")
+        if target_mode == "target_width" and command_parameters is None:
+            raise ValueError(
+                "gripper.target_width rollout requires gripper command metadata"
+            )
 
         self._robots = dict(zip(sides, robots, strict=True))
         self._followers = (
@@ -116,6 +123,10 @@ class GripperExecutor:
         self._tool_factory = tool_factory or default_tool_factory
         self._idle_mode = default_idle_mode if idle_mode is None else idle_mode
         self._target_source = target_source
+        self._target_mode = (
+            "legacy_width" if target_mode in {"width", "legacy_width"} else target_mode
+        )
+        self._command_parameters = command_parameters
         self._failure_event = failure_event
         self._default_width_m = default_width_m
         self._initialization_registry = initialization_registry
@@ -125,9 +136,7 @@ class GripperExecutor:
         self._period = 1.0 / command_hz
 
         self._lock = threading.Lock()
-        self._io_locks = {
-            side: threading.Lock() for side in self._controlled_sides
-        }
+        self._io_locks = {side: threading.Lock() for side in self._controlled_sides}
         self._grippers: dict[str, Any] = {}
         self._params: dict[str, Any] = {}
         self._pending: dict[str, float] = {}
@@ -248,6 +257,9 @@ class GripperExecutor:
         if registry is not None:
             registry.fail(claimed - set(initialized_identities))
 
+        if self._target_mode == "target_width":
+            self._validate_command_parameters()
+
         if self._default_width_m is not None:
             for side in initialized_sides:
                 params = self._params[side]
@@ -262,12 +274,7 @@ class GripperExecutor:
                         f"range=[{float(params.min_width):.4f}, "
                         f"{float(params.max_width):.4f}]",
                     )
-                velocity = float(params.max_vel)
-                force = _clamp(
-                    float(params.max_force) * self.FORCE_FRACTION,
-                    float(params.min_force),
-                    float(params.max_force),
-                )
+                velocity, force = self._move_parameters(side)
                 try:
                     with self._io_locks[side]:
                         self._grippers[side].Move(width, velocity, force)
@@ -285,9 +292,7 @@ class GripperExecutor:
                     errors[side] = message
 
         if errors:
-            detail = "; ".join(
-                f"{side}: {message}" for side, message in errors.items()
-            )
+            detail = "; ".join(f"{side}: {message}" for side, message in errors.items())
             raise RuntimeError(f"Gripper preparation failed: {detail}")
         try:
             self._refresh_states()
@@ -323,21 +328,18 @@ class GripperExecutor:
                 raise RuntimeError(
                     f"Gripper telemetry is unavailable: {', '.join(sorted(missing))}"
                 )
-            return {
-                side: dict(self._measured[side])
-                for side in self._controlled_sides
-            }
+            return {side: dict(self._measured[side]) for side in self._controlled_sides}
 
-    def submit(self, widths: Mapping[str, float]) -> None:
-        """Replace pending targets without waiting for hardware I/O."""
+    def submit(self, targets: Mapping[str, float]) -> None:
+        """Replace pending policy targets without waiting for hardware I/O."""
         updates: dict[str, float] = {}
-        for side, value in widths.items():
+        for side, value in targets.items():
             if side not in self._configs:
                 raise ValueError(f"Unknown controlled gripper side: {side}")
-            width = float(value)
-            if not math.isfinite(width):
-                raise ValueError(f"Gripper width must be finite: {side}")
-            updates[side] = width
+            target = float(value)
+            if not math.isfinite(target):
+                raise ValueError(f"Gripper target must be finite: {side}")
+            updates[side] = target
         with self._lock:
             self._pending.update(updates)
 
@@ -395,8 +397,9 @@ class GripperExecutor:
             self._pending = {}
         if self._target_source is not None:
             pending.update(self._target_source())
-        for side, requested_width in pending.items():
+        for side, target in pending.items():
             params = self._params[side]
+            requested_width = target
             width = _clamp(
                 requested_width, float(params.min_width), float(params.max_width)
             )
@@ -406,16 +409,60 @@ class GripperExecutor:
                 and abs(width - last_width) < self.DUPLICATE_TOLERANCE_M
             ):
                 continue
-            velocity = float(params.max_vel)
-            force = _clamp(
-                float(params.max_force) * self.FORCE_FRACTION,
-                float(params.min_force),
-                float(params.max_force),
-            )
+            velocity, force = self._move_parameters(side)
             with self._io_locks[side]:
                 self._grippers[side].Move(width, velocity, force)
             self._last_sent[side] = width
         self._refresh_states()
+
+    def _validate_command_parameters(self) -> None:
+        metadata = self._command_parameters
+        if metadata is None:
+            raise RuntimeError("Gripper command metadata is unavailable")
+        errors: list[str] = []
+        for side in self._controlled_sides:
+            params = self._params[side]
+            if (
+                not float(params.min_vel)
+                <= metadata.velocity_m_s
+                <= float(params.max_vel)
+            ):
+                errors.append(
+                    f"{side} velocity {metadata.velocity_m_s:g} m/s is outside "
+                    f"[{float(params.min_vel):g}, {float(params.max_vel):g}]"
+                )
+            if (
+                not float(params.min_force)
+                <= metadata.force_limit_n
+                <= float(params.max_force)
+            ):
+                errors.append(
+                    f"{side} force {metadata.force_limit_n:g} N is outside "
+                    f"[{float(params.min_force):g}, {float(params.max_force):g}]"
+                )
+        if errors:
+            raise RuntimeError(
+                "Checkpoint gripper command parameters are incompatible: "
+                + "; ".join(errors)
+            )
+
+    def _move_parameters(self, side: str) -> tuple[float, float]:
+        params = self._params[side]
+        metadata = self._command_parameters
+        if self._target_mode == "target_width" and metadata is not None:
+            return metadata.velocity_m_s, metadata.force_limit_n
+        return (
+            float(params.max_vel),
+            _clamp(
+                float(params.max_force) * self.FORCE_FRACTION,
+                float(params.min_force),
+                float(params.max_force),
+            ),
+        )
+
+    def describe_target(self, side: str, target: float) -> str:
+        del side
+        return f"width={target:.4f}"
 
     def _refresh_states(self) -> None:
         measured: dict[str, dict[str, float]] = {}
@@ -444,6 +491,8 @@ def initialize_gripper_executor(
     followers: Sequence[str] | None = None,
     initialization_registry: GripperInitializationRegistry | None = None,
     append_log: Callable[..., None] | None = None,
+    target_mode: Literal["width", "legacy_width", "target_width"] = "width",
+    command_parameters: GripperCommandMetadata | None = None,
     executor_factory: Callable[..., GripperExecutor] = GripperExecutor,
 ) -> GripperExecutor | None:
     """Create and initialize predicted grippers while their robots are IDLE."""
@@ -451,6 +500,10 @@ def initialize_gripper_executor(
     if not controlled_sides:
         return None
     kwargs: dict[str, Any] = {"failure_event": failure_event}
+    if target_mode not in {"width", "legacy_width"}:
+        kwargs["target_mode"] = target_mode
+    if command_parameters is not None:
+        kwargs["command_parameters"] = command_parameters
     if default_width_m is not None:
         kwargs["default_width_m"] = default_width_m
     if initialization_registry is not None:

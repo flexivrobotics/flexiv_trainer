@@ -343,13 +343,21 @@ def _config_manager(tmp_path) -> RuntimeManager:
     manager.shutdowns = []
     manager.cameras = SimpleNamespace(set_active_locations=lambda names: None)
     manager.recording = SimpleNamespace(
-        shutdown=lambda: manager.shutdowns.append("recording")
+        shutdown=lambda: manager.shutdowns.append("recording"),
+        status=lambda: {"active": False},
     )
+    manager.applied_gripper_params = []
     manager.teleop = SimpleNamespace(
         shutdown=lambda: manager.shutdowns.append("teleop"),
         snapshot=lambda: SimpleNamespace(
             available=True, initialized=False, started=False, error=None, fault=None
         ),
+        gripper_command_parameter_snapshot=lambda: None,
+        set_gripper_params=lambda velocity, force: {
+            "ok": True,
+            "velocity": velocity,
+            "force": force,
+        },
     )
     manager.service_summary = lambda: {}
     return manager
@@ -396,3 +404,46 @@ def test_gripper_default_width_persists_without_bouncing_services(tmp_path) -> N
     reloaded = _bare_manager(tmp_path)
     reloaded._robot_config = reloaded._load_robot_config()
     assert reloaded.get_gripper_default_width() == pytest.approx(0.065)
+
+
+def test_gripper_command_params_apply_live_and_persist_without_restart(
+    tmp_path,
+) -> None:
+    manager = _config_manager(tmp_path)
+
+    def apply(velocity, force):
+        manager.applied_gripper_params.append((velocity, force))
+        return {"ok": True, "velocity": 0.2, "force": 20.0}
+
+    manager.teleop.gripper_command_parameter_snapshot = lambda: {
+        "velocity_m_s": 0.1,
+        "force_limit_n": 10.0,
+    }
+    manager.teleop.set_gripper_params = apply
+
+    manager.update_robot_config(
+        RobotSerialConfig(
+            gripper_velocity_m_s=0.25,
+            gripper_force_limit_n=25.0,
+        )
+    )
+
+    assert manager.applied_gripper_params == [(0.25, 25.0)]
+    assert manager.shutdowns == []
+    reloaded = _bare_manager(tmp_path)
+    reloaded._robot_config = reloaded._load_robot_config()
+    assert reloaded.get_gripper_velocity() == pytest.approx(0.2)
+    assert reloaded.get_gripper_force_limit() == pytest.approx(20.0)
+
+
+def test_gripper_command_params_cannot_change_while_recording(tmp_path) -> None:
+    manager = _config_manager(tmp_path)
+    manager.recording.status = lambda: {"active": True}
+
+    with pytest.raises(ValueError, match="while recording"):
+        manager.update_robot_config(
+            RobotSerialConfig(
+                gripper_velocity_m_s=0.2,
+                gripper_force_limit_n=20.0,
+            )
+        )

@@ -34,6 +34,8 @@ class RobotConfigRequest(BaseModel):
     gripper_default_width_m: float | None = Field(
         default=None, ge=0, allow_inf_nan=False
     )
+    gripper_velocity_m_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    gripper_force_limit_n: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     recording_entries: list[str] = Field(default_factory=list)
     record_resolution: str = ""
 
@@ -48,7 +50,10 @@ def update_robot_config(
     request: RobotConfigRequest,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
-    return runtime.update_robot_config(RobotSerialConfig(**request.model_dump()))
+    try:
+        return runtime.update_robot_config(RobotSerialConfig(**request.model_dump()))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/services/{service_name}/{action}")

@@ -131,14 +131,11 @@ _TCP_WRENCH_AXES = [
     "tcp_wrench.mz",
 ]
 
-# Gripper width/force is measured state, but the request records the same
-# measured values for both observation and action (there is no separate
-# commanded-gripper signal in the snapshot). Its axes are shared by the state
-# and action vectors, like the other metrics' axis naming.
 _GRIPPER_LABEL = "gripper"
-_GRIPPER_AXES = ["gripper.width", "gripper.force"]
-# Fields read out of the follower payload's "gripper" section, in axis order.
-_GRIPPER_FIELDS = ["width", "force"]
+_GRIPPER_STATE_AXES = ["gripper.width", "gripper.force"]
+_GRIPPER_STATE_FIELDS = ["width", "force"]
+_GRIPPER_ACTION_AXES = ["gripper.target_width"]
+_GRIPPER_ACTION_FIELDS = ["target_width"]
 
 # Each metric: (label, state snapshot field, action snapshot field, axis names).
 # The label appears in entry keys and axis names (e.g. "tcp_pose"). State and
@@ -159,9 +156,6 @@ def _resolve_sides(sides: list[str] | None) -> list[str]:
     return list(sides) if sides else list(_DUAL_SIDES)
 
 
-# Per-side metric labels available for state and action. The gripper label is
-# appended to both: its (width, force) is recorded into observation.state and
-# action alike from the same measured gripper states.
 def _state_metric_labels() -> list[str]:
     return [label for label, _, _, _ in _METRICS] + [_GRIPPER_LABEL]
 
@@ -332,7 +326,9 @@ def _collect_arm_group(
             continue
         for index, value in enumerate(vector):
             values.append(float(value))
-            names.append(axis_names[index] if index < len(axis_names) else f"{label}.{index}")
+            names.append(
+                axis_names[index] if index < len(axis_names) else f"{label}.{index}"
+            )
     return values, names
 
 
@@ -342,23 +338,28 @@ def _collect_arm_gripper(
     kind: str,
     enabled_entries: set[str],
 ) -> tuple[list[float], list[str]]:
-    """Append a follower gripper's (width, force) to an arm's state or action.
-
-    The same measured ``payload["gripper"]`` width/force feeds both the
-    ``observation.state`` and ``action`` vectors, gated per-side by the
-    ``"<observation.state|action>.<side>.gripper"`` entry key. Returns empty when
-    the side has no gripper telemetry (no gripper configured/enabled) or the
-    entry is disabled.
-    """
+    """Append measured gripper state or the accepted movement command."""
     feature_ns = "observation.state" if kind == "state" else "action"
     if f"{feature_ns}.{side}.{_GRIPPER_LABEL}" not in enabled_entries:
         return [], []
-    gripper = payload.get("gripper")
+    if kind == "state":
+        gripper = payload.get("gripper")
+        fields = _GRIPPER_STATE_FIELDS
+        axes = _GRIPPER_STATE_AXES
+    else:
+        gripper = payload.get("gripper_command")
+        fields = _GRIPPER_ACTION_FIELDS
+        axes = _GRIPPER_ACTION_AXES
+        if not isinstance(gripper, dict) or gripper.get("target_width") is None:
+            raise ValueError(
+                f"Gripper command is unavailable for {side}; send a leader "
+                "command before recording"
+            )
     if not isinstance(gripper, dict):
         return [], []
     values: list[float] = []
     names: list[str] = []
-    for axis_index, field in enumerate(_GRIPPER_FIELDS):
+    for axis_index, field in enumerate(fields):
         raw = gripper.get(field)
         if raw is None:
             continue
@@ -366,7 +367,7 @@ def _collect_arm_gripper(
             values.append(float(raw))
         except (TypeError, ValueError):
             continue
-        names.append(_GRIPPER_AXES[axis_index])
+        names.append(axes[axis_index])
     return values, names
 
 
@@ -405,9 +406,6 @@ def _iter_combined_features(
         arm_state_values, arm_state_names = _collect_arm_group(
             payload.get("states"), side, "state", enabled_entries
         )
-        # The gripper's measured width/force trails the arm's robot-state metrics
-        # in the same combined vector, and the identical values trail the action
-        # metrics so state and action stay aligned arm-for-arm.
         gripper_state_values, gripper_state_names = _collect_arm_gripper(
             payload, side, "state", enabled_entries
         )

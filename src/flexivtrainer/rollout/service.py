@@ -36,6 +36,7 @@ from flexivtrainer.rollout.checkpoint import (
     _positive_float,
     checkpoint_action_names,
     checkpoint_action_output_dim,
+    checkpoint_gripper_command_metadata,
     checkpoint_image_resolutions,
     resolve_checkpoint_path,
 )
@@ -159,9 +160,7 @@ class RolloutService:
     ) -> None:
         self._logs.append(_encode_ui_log(level, source, message, detail))
 
-    def start(
-        self, checkpoint_path: str, task: str | None = None
-    ) -> dict[str, Any]:
+    def start(self, checkpoint_path: str, task: str | None = None) -> dict[str, Any]:
         task = task.strip() if isinstance(task, str) else None
         task = task or None
         with self._lock:
@@ -210,9 +209,9 @@ class RolloutService:
             raise RuntimeError(
                 f"Failed to load policy: {describe_exception(exc)}"
             ) from exc
-        policy_type = getattr(
-            getattr(policy, "config", None), "type", None
-        ) or getattr(policy, "name", "")
+        policy_type = getattr(getattr(policy, "config", None), "type", None) or getattr(
+            policy, "name", ""
+        )
         is_bspline = policy_type == "bspline_diffusion"
         image_resolutions = checkpoint_image_resolutions(checkpoint_path)
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
@@ -225,8 +224,7 @@ class RolloutService:
             override_fn(policy, rollout_cfg) if override_fn is not None else False
         )
         compile_act = bool(
-            policy_type == "act"
-            and getattr(rollout_cfg, "compile_model", False)
+            policy_type == "act" and getattr(rollout_cfg, "compile_model", False)
         )
         compile_mode = str(getattr(rollout_cfg, "compile_mode", "reduce-overhead"))
         overrides_applied |= compile_act
@@ -240,6 +238,8 @@ class RolloutService:
         waypoint_action_dim: int | None = None
         waypoint_layout_inferred = False
         waypoint_gripper_sides: tuple[str, ...] = ()
+        waypoint_gripper_target_mode = "width"
+        gripper_command_parameters = None
         end_effector_config: dict[str, Any] = {}
         gripper_default_width_m = self._get_gripper_default_width()
         if is_bspline:
@@ -252,6 +252,15 @@ class RolloutService:
                 end_effector_config,
                 policy_label="B-spline",
             )
+            if bspline_layout.gripper_target_mode == "target_width":
+                gripper_command_parameters = checkpoint_gripper_command_metadata(
+                    checkpoint_path
+                )
+                if gripper_command_parameters is None:
+                    raise ValueError(
+                        "B-spline checkpoint predicts gripper.target_width but "
+                        "has no gripper_command.json"
+                    )
         else:
             (
                 waypoint_layout,
@@ -268,10 +277,24 @@ class RolloutService:
                 for arm in waypoint_layout
                 if isinstance(arm.get("gripper_width"), int)
             )
-            if waypoint_gripper_sides:
-                end_effector_config = dict(
-                    self._get_end_effector_config() or {}
+            modes = {
+                str(arm.get("gripper_target_mode"))
+                for arm in waypoint_layout
+                if arm.get("gripper_target_mode") is not None
+            }
+            if modes:
+                waypoint_gripper_target_mode = next(iter(modes))
+            if waypoint_gripper_target_mode == "target_width":
+                gripper_command_parameters = checkpoint_gripper_command_metadata(
+                    checkpoint_path
                 )
+                if gripper_command_parameters is None:
+                    raise ValueError(
+                        "Waypoint checkpoint predicts gripper.target_width but "
+                        "has no gripper_command.json"
+                    )
+            if waypoint_gripper_sides:
+                end_effector_config = dict(self._get_end_effector_config() or {})
                 self._preflight_grippers(
                     waypoint_gripper_sides,
                     end_effector_config,
@@ -335,9 +358,8 @@ class RolloutService:
                 stop_robots=hardware.stop_robots,
                 prepare_motion=self._prepare_motion,
                 gripper_default_width_m=gripper_default_width_m,
-                gripper_initialization_registry=(
-                    self._gripper_initialization_registry
-                ),
+                gripper_initialization_registry=(self._gripper_initialization_registry),
+                gripper_command_parameters=gripper_command_parameters,
             )
         else:
             assert waypoint_layout is not None
@@ -358,6 +380,7 @@ class RolloutService:
                 action_layout=waypoint_layout,
                 action_dim=waypoint_action_dim,
                 gripper_sides=waypoint_gripper_sides,
+                gripper_target_mode=waypoint_gripper_target_mode,
                 end_effector_config=end_effector_config,
                 motion_limits=motion_limits,
                 planner_hz_fallback=app_rollout.planner_hz,
@@ -379,9 +402,8 @@ class RolloutService:
                 ),
                 uses_cuda_graphs=uses_cuda_graphs,
                 gripper_default_width_m=gripper_default_width_m,
-                gripper_initialization_registry=(
-                    self._gripper_initialization_registry
-                ),
+                gripper_initialization_registry=(self._gripper_initialization_registry),
+                gripper_command_parameters=gripper_command_parameters,
             )
 
         with self._lock:
@@ -397,9 +419,7 @@ class RolloutService:
             self._running = True
             # Drop any depth-preview lease now; alignment would otherwise keep
             # stealing the GIL from the policy loop until it lapsed on its own.
-            clear_leases = getattr(
-                self._cameras, "clear_depth_alignment_leases", None
-            )
+            clear_leases = getattr(self._cameras, "clear_depth_alignment_leases", None)
             if callable(clear_leases):
                 clear_leases()
             self._logs.clear()
@@ -596,9 +616,7 @@ class RolloutService:
                 "Every active waypoint arm must have a follower robot serial"
             )
         config = getattr(policy, "config", None)
-        policy_dim = self._action_feature_dim(
-            getattr(config, "output_features", None)
-        )
+        policy_dim = self._action_feature_dim(getattr(config, "output_features", None))
         saved_dim = checkpoint_action_output_dim(checkpoint_path)
         if policy_dim is not None and saved_dim is not None and policy_dim != saved_dim:
             raise RuntimeError(
@@ -635,9 +653,7 @@ class RolloutService:
             raise RuntimeError("B-spline policy has no checkpoint configuration")
         names = getattr(config, "action_feature_names", None)
         if not isinstance(names, list | tuple):
-            raise RuntimeError(
-                "B-spline checkpoint has no action feature names"
-            )
+            raise RuntimeError("B-spline checkpoint has no action feature names")
         try:
             layout = parse_bspline_action_layout(names)
         except ValueError as exc:
@@ -664,14 +680,10 @@ class RolloutService:
             or degree < 1
             or layout.rows <= degree + 1
         ):
-            raise RuntimeError(
-                "B-spline checkpoint has an invalid spline degree"
-            )
+            raise RuntimeError("B-spline checkpoint has an invalid spline degree")
         for method in ("enqueue_observation", "predict_action_chunk"):
             if not callable(getattr(policy, method, None)):
-                raise RuntimeError(
-                    f"B-spline policy does not implement {method}()"
-                )
+                raise RuntimeError(f"B-spline policy does not implement {method}()")
         return layout
 
     @staticmethod
@@ -739,9 +751,7 @@ class RolloutService:
             )
 
     def _prepare_motion(self, robot: Any, serial: str) -> None:
-        hardware.prepare_robot_motion(
-            robot, serial, self._stop_event, self._append_log
-        )
+        hardware.prepare_robot_motion(robot, serial, self._stop_event, self._append_log)
 
     def _release_robots(self) -> None:
         with self._lock:

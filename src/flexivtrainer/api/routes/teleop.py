@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from flexivtrainer.config import RobotSerialConfig
 from flexivtrainer.data.lerobot_io import (
     DEFAULT_RECORDING_ENTRY_KEYS,
     resolve_recording_entries,
@@ -44,9 +45,6 @@ class StartTeleopRequest(BaseModel):
 
 
 class GripperParamsRequest(BaseModel):
-    # Per-side grasping velocity/force from the panel sliders. Both must be
-    # positive; they are additionally clamped into the gripper's reported range
-    # server-side.
     velocity: float = Field(gt=0)
     force: float = Field(gt=0)
 
@@ -167,6 +165,7 @@ def status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
         "robot_data": runtime.teleop.robot_data_snapshot(),
         "gripper": runtime.teleop.gripper_snapshot(),
         "gripper_session": runtime.teleop.gripper_session_snapshot(),
+        "gripper_command": runtime.teleop.gripper_command_parameter_snapshot(),
         "cameras": runtime.cameras.status(),
         "recording": runtime.recording.status(),
         "services": runtime.service_summary(),
@@ -340,20 +339,24 @@ def reinitialize_grippers(
     return result
 
 
-@router.post("/gripper/{side}/params")
+@router.post("/gripper/params")
 def set_gripper_params(
-    side: str,
     request: GripperParamsRequest,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
-    # Records this side's slider velocity/force for the mirror loop's Move()s.
-    result = runtime.teleop.set_gripper_params(side, request.velocity, request.force)
-    if not result.get("ok"):
+    if runtime.recording.status().get("active"):
         raise HTTPException(
             status_code=409,
-            detail=str(result.get("error") or "Failed to set gripper parameters"),
+            detail="Gripper velocity and force limit cannot change while recording",
         )
-    return result
+    result = runtime.teleop.set_gripper_params(request.velocity, request.force)
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=str(result.get("error")))
+    config = RobotSerialConfig.model_validate(runtime.robot_config_snapshot())
+    config.gripper_velocity_m_s = float(result["velocity"])
+    config.gripper_force_limit_n = float(result["force"])
+    updated = runtime.update_robot_config(config)
+    return {**updated, **result}
 
 
 @router.post("/gripper/width")

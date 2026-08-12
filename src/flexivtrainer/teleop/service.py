@@ -26,6 +26,7 @@ from flexivtrainer.config import (
     EndEffectorSideConfig,
     TeleopRobotPair,
 )
+from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.observability import describe_exception, info, warn
 from flexivtrainer.runtime.gripper_session import (
     GripperIdentity,
@@ -99,6 +100,8 @@ class TeleopService:
             Callable[[], dict[str, EndEffectorSideConfig]] | None
         ) = None,
         get_gripper_default_width: Callable[[], float | None] | None = None,
+        get_gripper_velocity: Callable[[], float | None] | None = None,
+        get_gripper_force_limit: Callable[[], float | None] | None = None,
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
         gripper_init_settle_s: float = EndEffectorController.INIT_SETTLE_S,
     ) -> None:
@@ -107,11 +110,11 @@ class TeleopService:
         # Active arm sides (in pair-index order) and the per-side end effector
         # config drive the optional end effector controller; defaults keep the
         # service usable without that wiring.
-        self._get_active_sides = get_active_sides or (
-            lambda: ["left_arm", "right_arm"]
-        )
+        self._get_active_sides = get_active_sides or (lambda: ["left_arm", "right_arm"])
         self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._get_gripper_default_width = get_gripper_default_width or (lambda: None)
+        self._get_gripper_velocity = get_gripper_velocity or (lambda: None)
+        self._get_gripper_force_limit = get_gripper_force_limit or (lambda: None)
         self._gripper_initialization_registry = gripper_initialization_registry
         self._gripper_init_settle_s = gripper_init_settle_s
         self._controller: Any | None = None
@@ -216,17 +219,8 @@ class TeleopService:
         snapshot_robots: dict[str, Any] = {}
         errors: dict[str, str] = {}
 
-        # Live width/force for any follower configured as a gripper, keyed by the
-        # same pair index used below. Folded into the follower payload so that
-        # recording can append it to both observation.state and action. Read once
-        # up front; absent for sides without an enabled gripper. Skip the read
-        # entirely when neither states nor actions are requested so a bare
-        # snapshot never touches the (hardware) gripper layer.
-        gripper_states = (
-            self._gripper_states_by_index()
-            if (include_states or include_actions)
-            else {}
-        )
+        gripper_states = self._gripper_states_by_index() if include_states else {}
+        gripper_commands = self._gripper_commands_by_index() if include_actions else {}
 
         for index, serial in enumerate(configured_serials):
             base_name = serial or f"robot_{index}"
@@ -265,13 +259,14 @@ class TeleopService:
                         if actions:
                             payload["actions"] = actions
 
-                # A follower gripper's measured width/force feeds both the
-                # observation and the action, so attach it whenever either is
-                # requested; the recorder appends it to the matching vector(s).
-                if include_states or include_actions:
+                if include_states:
                     gripper = gripper_states.get(index)
                     if gripper is not None:
                         payload["gripper"] = dict(gripper)
+                if include_actions:
+                    command = gripper_commands.get(index)
+                    if command is not None:
+                        payload["gripper_command"] = dict(command)
             except Exception as exc:  # pragma: no cover - hardware specific
                 payload["connected"] = False
                 payload["error"] = describe_exception(exc)
@@ -289,6 +284,14 @@ class TeleopService:
             return {}
         try:
             return self._end_effectors.gripper_states_by_index()
+        except Exception:  # pragma: no cover - hardware specific
+            return {}
+
+    def _gripper_commands_by_index(self) -> dict[int, dict[str, float]]:
+        if self._end_effectors is None:
+            return {}
+        try:
+            return self._end_effectors.gripper_commands_by_index()
         except Exception:  # pragma: no cover - hardware specific
             return {}
 
@@ -428,9 +431,7 @@ class TeleopService:
             if callable(init_method):
                 if ZeroFTSensor is not None:
                     flag = (
-                        ZeroFTSensor.Enable
-                        if zero_ft_sensor
-                        else ZeroFTSensor.Disable
+                        ZeroFTSensor.Enable if zero_ft_sensor else ZeroFTSensor.Disable
                     )
                     init_method(zero_ft_sensor=flag)
                 else:
@@ -461,7 +462,11 @@ class TeleopService:
         # ``cleared`` flag is re-derived from any_fault() so the UI does not have
         # to trust the per-robot return vector alone.
         if self._controller is None:
-            return {"ok": False, "cleared": False, "error": "Teleoperation not connected"}
+            return {
+                "ok": False,
+                "cleared": False,
+                "error": "Teleoperation not connected",
+            }
 
         clear_fault = getattr(self._controller, "ClearFault", None)
         if not callable(clear_fault):
@@ -497,6 +502,8 @@ class TeleopService:
                 self._get_active_sides(),
                 dict(self._get_end_effector_config() or {}),
                 self._get_gripper_default_width(),
+                self._get_gripper_velocity(),
+                self._get_gripper_force_limit(),
                 gripper_identities=self._gripper_identities(),
                 initialization_registry=self._gripper_initialization_registry,
                 init_settle_s=self._gripper_init_settle_s,
@@ -662,25 +669,34 @@ class TeleopService:
             for side, identity in self._gripper_identities().items()
         }
 
-    def set_gripper_params(
-        self, side: str, velocity: float, force: float
-    ) -> dict[str, Any]:
-        # Store this side's slider velocity/force; used by the mirror loop's
-        # Move() calls. Allowed any time after init (including while the loop is
-        # running, to tune it live) -- it only records values, it does not move
-        # the gripper.
+    def set_gripper_params(self, velocity: float, force: float) -> dict[str, Any]:
         if self._end_effectors is None:
             return {
                 "ok": False,
                 "error": "Initialize the gripper before setting its parameters",
             }
         try:
-            velocity, force = self._end_effectors.set_command_params(
-                side, velocity, force
-            )
+            velocity, force = self._end_effectors.set_command_params(velocity, force)
             return {"ok": True, "velocity": velocity, "force": force}
         except Exception as exc:  # pragma: no cover - hardware specific
             return {"ok": False, "error": describe_exception(exc)}
+
+    def gripper_command_parameter_snapshot(self) -> dict[str, float] | None:
+        if self._end_effectors is None:
+            return None
+        try:
+            return self._end_effectors.command_parameter_snapshot()
+        except RuntimeError:
+            return None
+
+    def gripper_command_metadata(self) -> GripperCommandMetadata:
+        snapshot = self.gripper_command_parameter_snapshot()
+        if snapshot is None:
+            raise RuntimeError("Initialize all selected grippers before recording")
+        return GripperCommandMetadata(
+            velocity_m_s=float(snapshot["velocity_m_s"]),
+            force_limit_n=float(snapshot["force_limit_n"]),
+        )
 
     def set_gripper_width(self, width: float) -> dict[str, Any]:
         """Tune every initialized gripper while the teleop loop is stopped."""
@@ -877,9 +893,7 @@ class TeleopService:
         # Home is offered whenever the robots are connected and the teleop
         # control loop is not running (HomeAll() throws if it is). It is
         # available right after Connect, before the first Start.
-        can_home = (
-            self._initialized and not started and self._controller is not None
-        )
+        can_home = self._initialized and not started and self._controller is not None
         return TeleopSnapshot(
             configured=configured,
             available=TransparentCartesianTeleopLAN is not None,
