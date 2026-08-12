@@ -23,6 +23,7 @@ from functools import partial
 from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
+from flexivtrainer.data.hub import ACTION_NAMES_FILENAME
 from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.policies import act as act_policy
@@ -39,6 +40,7 @@ from flexivtrainer.rollout.checkpoint import (
     checkpoint_gripper_command_metadata,
     checkpoint_image_resolutions,
     resolve_checkpoint_path,
+    resolve_hub_checkpoint,
 )
 from flexivtrainer.rollout.executors.bspline import (
     BSplineActionLayout,
@@ -119,6 +121,7 @@ class RolloutService:
         self._error: str | None = None
         self._stop_reason: str | None = None
         self._checkpoint_path: str | None = None
+        self._checkpoint_repo_id: str | None = None
         self._task: str | None = None
         self._robots: list[Any] = []
         self._device = "cpu"
@@ -144,6 +147,9 @@ class RolloutService:
             return {
                 "status": status,
                 "checkpoint_path": self._checkpoint_path,
+                # Set for Hub rollouts so the UI shows "acme/policy" rather than
+                # an opaque cache directory.
+                "checkpoint_repo_id": self._checkpoint_repo_id,
                 "task": self._task,
                 "error": self._error,
                 "stop_reason": self._stop_reason,
@@ -160,7 +166,16 @@ class RolloutService:
     ) -> None:
         self._logs.append(_encode_ui_log(level, source, message, detail))
 
-    def start(self, checkpoint_path: str, task: str | None = None) -> dict[str, Any]:
+    def start(
+        self,
+        checkpoint_path: str | None = None,
+        task: str | None = None,
+        *,
+        source: str = "local",
+        repo_id: str | None = None,
+        revision: str | None = None,
+        action_names: list[str] | None = None,
+    ) -> dict[str, Any]:
         task = task.strip() if isinstance(task, str) else None
         task = task or None
         with self._lock:
@@ -183,12 +198,30 @@ class RolloutService:
                     "(it holds the robot connection)."
                 )
 
+        checkpoint_origin = checkpoint_path
         try:
-            resolved_checkpoint = resolve_checkpoint_path(
-                checkpoint_path, self._settings.storage.root
-            )
+            if source == "hub":
+                if not repo_id:
+                    raise ValueError("repo_id is required when source='hub'")
+                checkpoint_origin = repo_id
+                self._append_log(
+                    "INFO", "HUB", "Fetching checkpoint from HuggingFace", repo_id
+                )
+                resolved_checkpoint = resolve_hub_checkpoint(
+                    repo_id, revision, self._settings
+                )
+            elif source != "local":
+                raise ValueError(f"Unsupported checkpoint source: {source!r}")
+            elif not checkpoint_path:
+                raise ValueError("checkpoint_path is required when source='local'")
+            else:
+                resolved_checkpoint = resolve_checkpoint_path(
+                    checkpoint_path, self._settings.storage.root
+                )
         except FileNotFoundError as exc:
-            raise RuntimeError(f"Checkpoint not found: {checkpoint_path}") from exc
+            raise RuntimeError(f"Checkpoint not found: {checkpoint_origin}") from exc
+        # HubError propagates as-is so the route can map its subclasses to
+        # distinct status codes rather than a blanket 409.
         checkpoint_path = str(resolved_checkpoint)
 
         device = self._resolve_device(self._settings.training.default_device)
@@ -271,6 +304,7 @@ class RolloutService:
                 policy,
                 sides,
                 followers,
+                action_names=action_names,
             )
             waypoint_gripper_sides = tuple(
                 str(arm["side"])
@@ -408,6 +442,7 @@ class RolloutService:
 
         with self._lock:
             self._checkpoint_path = checkpoint_path
+            self._checkpoint_repo_id = repo_id if source == "hub" else None
             self._task = task
             self._error = None
             self._stop_reason = None
@@ -608,6 +643,7 @@ class RolloutService:
         policy: Any,
         sides: list[str],
         followers: list[str],
+        action_names: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], int, bool]:
         """Resolve a waypoint action contract before any robot is connected."""
 
@@ -631,11 +667,25 @@ class RolloutService:
 
         try:
             names = checkpoint_action_names(
-                checkpoint_path, self._settings.storage.root
+                checkpoint_path,
+                self._settings.storage.root,
+                settings=self._settings,
+                override=action_names,
             )
             inferred = names is None
             if names is None:
-                names = canonical_action_names(action_dim, sides)
+                # canonical_action_names only covers the two unambiguous widths
+                # and raises for anything with a gripper axis. Guessing a gripper
+                # axis would drive real hardware from a made-up layout, so turn
+                # that into an error that names the fix.
+                try:
+                    names = canonical_action_names(action_dim, sides)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{exc}. The checkpoint has no {ACTION_NAMES_FILENAME} "
+                        "sidecar and its training dataset is unavailable, so "
+                        "supply action_names explicitly when starting the rollout."
+                    ) from exc
             layout = build_action_layout(names, sides, action_dim)
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc

@@ -26,6 +26,7 @@ from flexivtrainer.data.gripper_command import (
     GripperCommandMetadata,
     read_gripper_command_metadata,
 )
+from flexivtrainer.data.hub import ACTION_NAMES_FILENAME
 from flexivtrainer.data.lerobot_io import first_dataset_task
 
 _LANGUAGE_POLICY_TYPES = {"multi_task_dit", "smolvla", "pi0", "pi05"}
@@ -188,50 +189,155 @@ def checkpoint_action_output_dim(checkpoint_path: str) -> int | None:
     return int(shape[0])
 
 
-def checkpoint_action_names(
-    checkpoint_path: str, storage_root: Path | None = None
+def _validated_action_names(names: Any, origin: str) -> list[str]:
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(name, str) and name for name in names)
+    ):
+        raise ValueError(f"Action feature has no valid named axes: {origin}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"Action axes are not unique: {origin}")
+    return list(names)
+
+
+def checkpoint_sidecar_action_names(checkpoint_path: str) -> list[str] | None:
+    """Read the self-describing action-name sidecar this app writes at training.
+
+    A checkpoint that carries its own axis names needs no training dataset at
+    rollout, which is what makes Hub checkpoints usable and also survives the
+    local dataset being deleted or renamed.
+    """
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    payload = _read_json(model_dir / ACTION_NAMES_FILENAME)
+    if payload is None:
+        return None
+    return _validated_action_names(
+        payload.get("action_names"), str(model_dir / ACTION_NAMES_FILENAME)
+    )
+
+
+def checkpoint_config_action_names(checkpoint_path: str) -> list[str] | None:
+    """Read axis names from the policy config when it happens to carry them."""
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    config = _read_json(model_dir / "config.json") or {}
+    output_features = config.get("output_features")
+    action = (
+        output_features.get("action") if isinstance(output_features, dict) else None
+    )
+    names = action.get("names") if isinstance(action, dict) else None
+    if names is None:
+        return None
+    return _validated_action_names(names, str(model_dir / "config.json"))
+
+
+def _hub_dataset_action_names(
+    checkpoint_path: str, settings: Any
 ) -> list[str] | None:
-    """Recover ordered action-axis names from a checkpoint's training dataset.
+    """Fetch the training dataset's metadata from the Hub to recover axis names.
+
+    Only ``meta/`` is pulled, so this stays cheap even for video-heavy datasets.
+    """
+    if settings is None or not getattr(getattr(settings, "hub", None), "enabled", True):
+        return None
+    from flexivtrainer.data.hub import (  # noqa: PLC0415
+        HubError,
+        fetch_dataset_metadata,
+        is_hub_repo_id,
+        parse_hub_ref,
+    )
+
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    train_config = _read_json(model_dir / "train_config.json") or {}
+    dataset = train_config.get("dataset")
+    repo_id = dataset.get("repo_id") if isinstance(dataset, dict) else None
+    if not is_hub_repo_id(repo_id):
+        return None
+    revision = dataset.get("revision") if isinstance(dataset, dict) else None
+    try:
+        root = fetch_dataset_metadata(settings, parse_hub_ref(repo_id, revision))
+    except (HubError, ValueError):
+        # Recovery is best-effort; the caller raises an actionable error when
+        # every tier misses.
+        return None
+    return _dataset_action_names(root)
+
+
+def _dataset_action_names(candidate: Path) -> list[str] | None:
+    info_path = candidate / "meta" / "info.json"
+    if not info_path.is_file():
+        return None
+    info = _read_json(info_path) or {}
+    features = info.get("features")
+    action = features.get("action") if isinstance(features, dict) else None
+    if action is None:
+        return None
+    names = _validated_action_names(
+        action.get("names") if isinstance(action, dict) else None,
+        str(info_path),
+    )
+    shape = action.get("shape")
+    if not isinstance(shape, list | tuple) or len(shape) != 1 or shape[0] != len(names):
+        raise ValueError(
+            f"Training dataset action shape does not match its named axes: {info_path}"
+        )
+    return names
+
+
+def checkpoint_action_names(
+    checkpoint_path: str,
+    storage_root: Path | None = None,
+    *,
+    settings: Any = None,
+    override: list[str] | None = None,
+) -> list[str] | None:
+    """Recover ordered action-axis names for a checkpoint.
 
     Ordinary LeRobot waypoint configs retain the action width but not the scalar
-    axis names. The training dataset remains the authoritative source for where
-    each arm's pose, twist, and optional wrench live in that flat vector.
+    axis names, so the names must come from somewhere else. Tried in descending
+    order of authority: an explicit caller override, the checkpoint's own
+    ``action_names.json`` sidecar, the policy config, a local copy of the
+    training dataset, and finally the training dataset's Hub metadata.
+
+    Returns ``None`` only when every source misses; callers must treat that as an
+    error for gripper-bearing layouts rather than guessing an axis order.
     """
 
+    if override is not None:
+        return _validated_action_names(override, "action_names override")
+
+    sidecar = checkpoint_sidecar_action_names(checkpoint_path)
+    if sidecar is not None:
+        return sidecar
+
+    from_config = checkpoint_config_action_names(checkpoint_path)
+    if from_config is not None:
+        return from_config
+
     for candidate in _checkpoint_dataset_candidates(checkpoint_path, storage_root):
-        info_path = candidate / "meta" / "info.json"
-        if not info_path.is_file():
-            continue
-        info = _read_json(info_path) or {}
-        features = info.get("features")
-        action = features.get("action") if isinstance(features, dict) else None
-        if action is None:
-            continue
-        names = action.get("names") if isinstance(action, dict) else None
-        if (
-            not isinstance(names, list)
-            or not names
-            or not all(isinstance(name, str) and name for name in names)
-        ):
-            raise ValueError(
-                f"Training dataset action feature has no valid named axes: {info_path}"
-            )
-        if len(set(names)) != len(names):
-            raise ValueError(
-                f"Training dataset action axes are not unique: {info_path}"
-            )
-        shape = action.get("shape")
-        if (
-            not isinstance(shape, list | tuple)
-            or len(shape) != 1
-            or shape[0] != len(names)
-        ):
-            raise ValueError(
-                "Training dataset action shape does not match its named axes: "
-                f"{info_path}"
-            )
-        return list(names)
-    return None
+        names = _dataset_action_names(candidate)
+        if names is not None:
+            return names
+
+    return _hub_dataset_action_names(checkpoint_path, settings)
+
+
+def resolve_hub_checkpoint(
+    repo_id: str, revision: str | None, settings: Any
+) -> Path:
+    """Materialize a Hub checkpoint, then validate it like any local checkpoint.
+
+    The cache lives inside the storage root, so the existing
+    ``resolve_checkpoint_path`` accepts it and still applies its segment-walk and
+    symlink-escape checks to the downloaded content.
+    """
+    from flexivtrainer.data.hub import (  # noqa: PLC0415
+        fetch_checkpoint_snapshot,
+        parse_hub_ref,
+    )
+
+    target = fetch_checkpoint_snapshot(settings, parse_hub_ref(repo_id, revision))
+    return resolve_checkpoint_path(str(target), settings.storage.root)
 
 
 def checkpoint_gripper_command_metadata(

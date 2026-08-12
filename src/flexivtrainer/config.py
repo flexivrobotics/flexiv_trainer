@@ -87,6 +87,12 @@ class StorageConfig(BaseModel):
         return self.root / self.cache_dirname
 
     @property
+    def hub_cache_root(self) -> Path:
+        # Inside the storage root on purpose: a downloaded checkpoint then passes
+        # the same resolve_checkpoint_path validation as a local one.
+        return self.cache_root / "hub"
+
+    @property
     def runtime_config_path(self) -> Path:
         return self.root / "robot_serials.json"
 
@@ -101,12 +107,26 @@ class StorageConfig(BaseModel):
         self.merged_root.mkdir(parents=True, exist_ok=True)
         self.training_root.mkdir(parents=True, exist_ok=True)
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        (self.hub_cache_root / "datasets").mkdir(parents=True, exist_ok=True)
+        (self.hub_cache_root / "checkpoints").mkdir(parents=True, exist_ok=True)
 
 
 # Read by the dataset patches in flexivtrainer.policies.lerobot_plugins. Only
 # TrainingService sets it; unset means "leave the dataset alone", since the app
 # imports those patches too and still needs depth for previews.
 TRAIN_LOAD_DEPTH_ENV = "FLEXIVTRAINER_TRAIN_LOAD_DEPTH"
+
+
+class HubConfig(BaseModel):
+    """HuggingFace Hub access for training datasets and policy checkpoints."""
+
+    enabled: bool = True
+    # Only needed for private or gated repos. When unset, the HF_TOKEN /
+    # HUGGING_FACE_HUB_TOKEN environment variables and the huggingface-cli login
+    # cache are used instead.
+    token: str | None = None
+    # Pin every fetch to a branch, tag, or commit; None tracks the repo default.
+    default_revision: str | None = None
 
 
 class TrainingDefaultsConfig(BaseModel):
@@ -284,6 +304,7 @@ class AppSettings(BaseSettings):
         ]
     )
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    hub: HubConfig = Field(default_factory=HubConfig)
     training: TrainingDefaultsConfig = Field(default_factory=TrainingDefaultsConfig)
     policies: PolicyConfig = Field(default_factory=PolicyConfig)
     rollout: RolloutLoopConfig = Field(default_factory=RolloutLoopConfig)

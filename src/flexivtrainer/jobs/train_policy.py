@@ -37,6 +37,14 @@ from flexivtrainer.data.gripper_command import (
     read_gripper_command_metadata,
     write_gripper_command_metadata,
 )
+from flexivtrainer.data.hub import (
+    ACTION_NAMES_FILENAME,
+    HubRef,
+    fetch_checkpoint_snapshot,
+    fetch_dataset_metadata,
+    hub_token,
+    parse_hub_ref,
+)
 from flexivtrainer.observability import (
     Pulse,
     error,
@@ -223,6 +231,9 @@ class TrainingJob:
     source_dataset_root: Path | None = None
     converted_dataset_root: Path | None = None
     gripper_command_metadata: GripperCommandMetadata | None = None
+    # Ordered action-axis names from the training dataset, written into each
+    # saved checkpoint so rollout never has to locate that dataset again.
+    action_names: list[str] | None = None
     phase: str = "training"
     process: subprocess.Popen[str] | None = None
     logs: list[str] = field(default_factory=list)
@@ -517,6 +528,23 @@ class TrainingService:
             raise FileNotFoundError(f"No dataset metadata found under: {resolved}")
         return f"local/{resolved.name}", resolved
 
+    def _resolve_hub_dataset(self, ref: HubRef) -> tuple[str, Path]:
+        """Fetch a Hub dataset's ``meta/`` and resolve it like a local dataset.
+
+        Only metadata is materialized. Every pre-flight read below (gripper
+        command metadata, depth features, the B-spline contract, checkpoint
+        compatibility) then works against a real directory, while the training
+        subprocess fetches the bulk data itself from ``--dataset.repo_id``.
+        """
+        root = fetch_dataset_metadata(self._settings, ref)
+        cache_root = self._settings.storage.hub_cache_root.expanduser().resolve()
+        resolved = root.expanduser().resolve()
+        if not resolved.is_relative_to(cache_root):
+            raise ValueError(f"Access denied: hub cache escaped ({cache_root})")
+        if not (resolved / "meta" / "info.json").is_file():
+            raise FileNotFoundError(f"No dataset metadata found under: {resolved}")
+        return ref.repo_id, resolved
+
     def _resolve_output_dir(self, output_dir: Path) -> Path:
         training_root = self._settings.storage.training_root.expanduser().resolve()
         resolved = output_dir.expanduser().resolve()
@@ -605,8 +633,39 @@ class TrainingService:
             )
         return fields
 
+    def _resolve_hub_checkpoint(self, ref: HubRef) -> tuple[Path, Path]:
+        """Snapshot a Hub checkpoint, then validate it exactly like a local one."""
+        target = fetch_checkpoint_snapshot(self._settings, ref)
+        model_dir = target
+        if not (model_dir / "config.json").is_file():
+            nested = model_dir / "pretrained_model"
+            if (nested / "config.json").is_file():
+                model_dir = nested
+        if not (model_dir / "config.json").is_file():
+            raise FileNotFoundError(f"Checkpoint config.json not found under: {target}")
+        if not (model_dir / "model.safetensors").is_file():
+            raise FileNotFoundError(
+                f"Checkpoint model.safetensors not found under: {model_dir}"
+            )
+        checkpoint_dir = (
+            model_dir.parent if model_dir.name == "pretrained_model" else model_dir
+        )
+        return checkpoint_dir, model_dir
+
+    def inspect_hub_checkpoint(
+        self, repo_id: str, revision: str | None = None
+    ) -> dict[str, Any]:
+        ref = parse_hub_ref(repo_id, revision)
+        return self._inspect_resolved_checkpoint(*self._resolve_hub_checkpoint(ref))
+
     def inspect_checkpoint(self, checkpoint_path: Path) -> dict[str, Any]:
-        checkpoint_dir, model_dir = self._resolve_checkpoint(checkpoint_path)
+        return self._inspect_resolved_checkpoint(
+            *self._resolve_checkpoint(checkpoint_path)
+        )
+
+    def _inspect_resolved_checkpoint(
+        self, checkpoint_dir: Path, model_dir: Path
+    ) -> dict[str, Any]:
         policy_config = self._read_json(model_dir / "config.json")
         policy_type = policy_config.get("type")
         if policy_type not in POLICY_CATALOG:
@@ -626,6 +685,24 @@ class TrainingService:
                 else None
             ),
         }
+
+    def _dataset_action_names(self, dataset_root: Path) -> list[str] | None:
+        """Ordered action-axis names from a dataset, for the checkpoint sidecar."""
+        try:
+            info = self._read_json(dataset_root / "meta" / "info.json")
+        except ValueError:
+            return None
+        features = info.get("features")
+        action = features.get("action") if isinstance(features, dict) else None
+        names = action.get("names") if isinstance(action, dict) else None
+        if (
+            not isinstance(names, list)
+            or not names
+            or not all(isinstance(name, str) and name for name in names)
+            or len(set(names)) != len(names)
+        ):
+            return None
+        return list(names)
 
     def _dataset_gripper_command_metadata(
         self, dataset_root: Path
@@ -790,6 +867,11 @@ class TrainingService:
 
         env = dict(os.environ)
         env[TRAIN_LOAD_DEPTH_ENV] = "1" if self._settings.training.load_depth else "0"
+        # A Hub dataset is downloaded by this subprocess, so a configured token
+        # has to reach it for private or gated repos.
+        token = hub_token(self._settings)
+        if token:
+            env.setdefault("HF_TOKEN", token)
         return env
 
     def _rgb_only_policy_input_features(
@@ -997,8 +1079,11 @@ class TrainingService:
         extra_args: list[str],
         checkpoint_info: dict[str, Any] | None,
         bspline_contract: dict[str, Any] | None,
+        hub_ref: HubRef | None = None,
     ) -> list[str]:
-        repo_id = f"local/{resolved_root.name}"
+        repo_id = (
+            hub_ref.repo_id if hub_ref is not None else f"local/{resolved_root.name}"
+        )
         executable = shutil.which("lerobot-train")
         if executable is None:
             executable = sys.executable
@@ -1011,19 +1096,22 @@ class TrainingService:
             command = [executable]
 
         # LeRobot treats policy-scoped discovery as a --policy.path override.
-        command.extend(
-            [
-                "--dataset.repo_id",
-                repo_id,
-                "--dataset.root",
-                str(resolved_root),
-                (
-                    "--discover_packages_path="
-                    if checkpoint_info is not None
-                    else "--policy.discover_packages_path="
-                )
-                + "flexivtrainer.policies.lerobot_plugins",
-            ]
+        command.extend(["--dataset.repo_id", repo_id])
+        if hub_ref is None:
+            command.extend(["--dataset.root", str(resolved_root)])
+        else:
+            # Omit --dataset.root so LeRobot downloads the bulk data itself; the
+            # local cache holds only meta/, which would look like a truncated
+            # dataset if passed as the root.
+            if hub_ref.revision:
+                command.append(f"--dataset.revision={hub_ref.revision}")
+        command.append(
+            (
+                "--discover_packages_path="
+                if checkpoint_info is not None
+                else "--policy.discover_packages_path="
+            )
+            + "flexivtrainer.policies.lerobot_plugins"
         )
         device = resolve_training_device(self._settings.training.default_device)
         # Without a checkpoint, initialize a new policy for training from scratch.
@@ -1100,12 +1188,19 @@ class TrainingService:
 
     def start(
         self,
-        dataset_root: Path,
+        dataset_root: Path | None,
         output_dir: Path,
         policy_type: str,
         extra_args: list[str] | None = None,
         training_mode: TrainingMode = "new",
         checkpoint_path: Path | None = None,
+        *,
+        dataset_source: str = "local",
+        dataset_repo_id: str | None = None,
+        dataset_revision: str | None = None,
+        checkpoint_source: str = "local",
+        checkpoint_repo_id: str | None = None,
+        checkpoint_revision: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._job is not None and self._job.status == "running":
@@ -1113,7 +1208,23 @@ class TrainingService:
 
             if training_mode not in {"new", "fine_tune"}:
                 raise ValueError(f"Unsupported training mode: {training_mode}")
-            _, resolved_root = self._resolve_dataset(dataset_root)
+            hub_ref: HubRef | None = None
+            if dataset_source == "hub":
+                if not dataset_repo_id:
+                    raise ValueError(
+                        "dataset_repo_id is required when dataset_source='hub'"
+                    )
+                hub_ref = parse_hub_ref(
+                    dataset_repo_id,
+                    dataset_revision or self._settings.hub.default_revision,
+                )
+                _, resolved_root = self._resolve_hub_dataset(hub_ref)
+            elif dataset_source != "local":
+                raise ValueError(f"Unsupported dataset source: {dataset_source!r}")
+            elif dataset_root is None:
+                raise ValueError("dataset_path is required when dataset_source='local'")
+            else:
+                _, resolved_root = self._resolve_dataset(dataset_root)
             gripper_command_metadata = self._dataset_gripper_command_metadata(
                 resolved_root
             )
@@ -1122,14 +1233,32 @@ class TrainingService:
             checkpoint_info: dict[str, Any] | None = None
             bspline_contract: dict[str, Any] | None = None
             if training_mode == "fine_tune":
-                if checkpoint_path is None:
+                if checkpoint_source == "hub":
+                    if not checkpoint_repo_id:
+                        raise ValueError(
+                            "checkpoint_repo_id is required when "
+                            "checkpoint_source='hub'"
+                        )
+                    checkpoint_info = self.inspect_hub_checkpoint(
+                        checkpoint_repo_id,
+                        checkpoint_revision or self._settings.hub.default_revision,
+                    )
+                elif checkpoint_path is None:
                     raise ValueError("checkpoint_path is required for fine-tuning")
-                checkpoint_info = self.inspect_checkpoint(checkpoint_path)
+                else:
+                    checkpoint_info = self.inspect_checkpoint(checkpoint_path)
                 policy_type = checkpoint_info["policy_type"]
             is_bspline = policy_type == "bspline_diffusion"
             requires_conversion = (
                 is_bspline and not (resolved_root / "meta" / "bspline.json").is_file()
             )
+            if requires_conversion and hub_ref is not None:
+                # Conversion runs as a subprocess over the dataset's parquet
+                # files, which are not materialized for a Hub dataset.
+                raise ValueError(
+                    "B-spline Diffusion cannot convert a Hub dataset in place. "
+                    "Download the dataset locally first, then train from it."
+                )
             if checkpoint_info is not None and not requires_conversion:
                 self._validate_checkpoint_dataset(checkpoint_info, resolved_root)
             elif is_bspline and not requires_conversion:
@@ -1143,13 +1272,16 @@ class TrainingService:
                     [
                         f"mode={training_mode}",
                         f"policy={policy_type}",
-                        f"dataset={resolved_root.name}",
+                        f"dataset={hub_ref.repo_id if hub_ref else resolved_root.name}",
                         f"output={output_dir.name}",
                     ]
                 ),
                 style="bright_magenta",
             )
-            info("Training dataset resolved", f"root={resolved_root}")
+            if hub_ref is not None:
+                info("Training dataset resolved", f"hub={hub_ref} meta={resolved_root}")
+            else:
+                info("Training dataset resolved", f"root={resolved_root}")
             job_id = str(uuid.uuid4())
             effective_root = resolved_root
             if requires_conversion:
@@ -1178,6 +1310,7 @@ class TrainingService:
                     extra_args=normalized_extra_args,
                     checkpoint_info=checkpoint_info,
                     bspline_contract=bspline_contract,
+                    hub_ref=hub_ref,
                 )
                 phase = "training"
 
@@ -1202,6 +1335,7 @@ class TrainingService:
                 source_dataset_root=resolved_root if requires_conversion else None,
                 converted_dataset_root=effective_root if requires_conversion else None,
                 gripper_command_metadata=gripper_command_metadata,
+                action_names=self._dataset_action_names(effective_root),
                 phase=phase,
                 status="running",
                 last_event=(
@@ -1397,13 +1531,32 @@ class TrainingService:
         metadata = job.gripper_command_metadata
         if metadata is None or not job.output_dir.is_dir():
             return
-        model_dirs = {
+        for model_dir in TrainingService._checkpoint_model_dirs(job):
+            write_gripper_command_metadata(model_dir, metadata, checkpoint=True)
+
+    @staticmethod
+    def _checkpoint_model_dirs(job: TrainingJob) -> set[Path]:
+        return {
             path.parent
             for path in job.output_dir.rglob("config.json")
             if (path.parent / "model.safetensors").is_file()
         }
-        for model_dir in model_dirs:
-            write_gripper_command_metadata(model_dir, metadata, checkpoint=True)
+
+    @staticmethod
+    def _sync_action_names(job: TrainingJob) -> None:
+        """Write the action-axis sidecar beside every saved checkpoint.
+
+        This makes a checkpoint self-describing, so rolling it out never depends
+        on locating the training dataset. It is what lets a checkpoint published
+        to the Hub be used elsewhere, and it also survives the local dataset
+        being deleted or renamed.
+        """
+        names = job.action_names
+        if not names or not job.output_dir.is_dir():
+            return
+        payload = json.dumps({"action_names": list(names)}, indent=2) + "\n"
+        for model_dir in TrainingService._checkpoint_model_dirs(job):
+            (model_dir / ACTION_NAMES_FILENAME).write_text(payload, encoding="utf-8")
 
     def _collect_logs(self, job: TrainingJob) -> None:
         assert job.process is not None
@@ -1424,6 +1577,7 @@ class TrainingService:
                 self._update_job_from_log(job, text)
                 if job.last_event == "checkpoint_saved":
                     self._sync_gripper_command_metadata(job)
+                    self._sync_action_names(job)
                 stream("TRAIN", text, detail=f"job_id={job.job_id}")
             job.return_code = job.process.wait()
             if job.status == "stopped":
@@ -1459,6 +1613,7 @@ class TrainingService:
                 return
 
             self._sync_gripper_command_metadata(job)
+            self._sync_action_names(job)
 
             if job.pulse is not None:
                 elapsed = format_elapsed(time.monotonic() - job.started_at)

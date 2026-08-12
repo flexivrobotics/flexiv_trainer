@@ -2736,6 +2736,29 @@ button:active {
     word-break: break-all;
 }
 
+.rollout-hub-fields {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.6rem;
+}
+
+.rollout-hub-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: inherit;
+    font-family: inherit;
+    font-size: 0.85rem;
+}
+
+.rollout-hub-input:disabled {
+    opacity: 0.6;
+}
+
 .rollout-error {
     color: #c0392b;
 }

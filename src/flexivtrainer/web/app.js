@@ -34,6 +34,14 @@ const state = {
     // service status snapshot, and its device selection (reuses the training
     // device probe/state on the backend).
     rolloutCheckpointPath: "",
+    // "local" browses the filesystem; "hub" takes an owner/model repo id. The
+    // two never share an input, so a repo id cannot reach a path resolver.
+    rolloutCheckpointSource: "local",
+    rolloutCheckpointRepoId: "",
+    rolloutCheckpointRevision: "",
+    // Set when a checkpoint carries no recoverable action layout, so the user
+    // is warned before starting rather than at the failure.
+    rolloutActionNamesWarning: "",
     rolloutTaskText: "",
     rolloutRequiresTask: true,
     rolloutStatus: null,
@@ -70,6 +78,11 @@ const state = {
     mergedScopeCache: {},
     // Training page state
     mergedDatasetPath: "",
+    // "local" uses mergedDatasetPath; "hub" uses the repo id below. Kept on
+    // separate fields so a repo id never reaches the path resolver.
+    trainingDatasetSource: "local",
+    trainingDatasetRepoId: "",
+    trainingDatasetRevision: "",
     mergedDatasetPreview: null,
     mergedDatasetSeries: null,
     mergedDatasetFrame: 0,
@@ -5071,12 +5084,69 @@ function renderTraining() {
     }
 
     if (state.trainingStep === datasetStep) {
-        const loaded = !!state.mergedDatasetPath;
-        const datasetName = loaded ? state.mergedDatasetPath.split("/").pop() : "";
+        const usingHub = state.trainingDatasetSource === "hub";
+        const hubRepoId = (state.trainingDatasetRepoId || "").trim();
+        const loaded = usingHub ? !!hubRepoId : !!state.mergedDatasetPath;
+        const datasetName = usingHub
+            ? hubRepoId
+            : (loaded ? state.mergedDatasetPath.split("/").pop() : "");
         const preview = state.mergedDatasetPreview;
         const meta = preview
             ? `${(preview.num_episodes || 0).toLocaleString()} episodes · ${(preview.num_frames || 0).toLocaleString()} frames`
             : "Loading dataset metadata…";
+
+        if (usingHub) {
+            const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
+            container.innerHTML = `
+                ${headerHtml}
+                <div class="merged-dataset-entry">
+                    <div class="rollout-hub-fields">
+                        <input class="rollout-hub-input" id="training-hub-repo" type="text"
+                            placeholder="owner/dataset (e.g. lerobot/pusht)"
+                            autocomplete="off" spellcheck="false">
+                        <input class="rollout-hub-input" id="training-hub-revision" type="text"
+                            placeholder="revision (optional)"
+                            autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="episode-row__meta">The dataset is downloaded by the training run; only its metadata is fetched now.</div>
+                </div>
+                <div class="control-bar control-bar--episode-step">
+                    <button class="secondary-button" id="training-dataset-source-toggle" type="button">Use Local</button>
+                </div>
+                <div class="control-bar control-bar--floating-step-nav">
+                    <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
+                    <button id="training-flow-next" type="button" ${hubRepoId ? "" : "disabled"}>Next</button>
+                </div>`;
+            const repoInput = byId("training-hub-repo");
+            repoInput.value = state.trainingDatasetRepoId || "";
+            repoInput.oninput = () => {
+                state.trainingDatasetRepoId = repoInput.value.trim();
+                const nextBtn = byId("training-flow-next");
+                if (nextBtn) nextBtn.disabled = !state.trainingDatasetRepoId;
+            };
+            const revisionInput = byId("training-hub-revision");
+            revisionInput.value = state.trainingDatasetRevision || "";
+            revisionInput.oninput = () => {
+                state.trainingDatasetRevision = revisionInput.value.trim();
+            };
+            byId("training-dataset-source-toggle").onclick = () => {
+                state.trainingDatasetSource = "local";
+                renderTraining();
+            };
+            byId("training-dataset-back").onclick = () => {
+                if (isFineTune) {
+                    state.trainingStep = checkpointStep;
+                } else {
+                    state.trainingMode = null;
+                }
+                renderTraining();
+            };
+            byId("training-flow-next").onclick = () => {
+                state.trainingStep = previewStep;
+                renderTraining();
+            };
+            return;
+        }
 
         const bodyHtml = loaded
             ? `
@@ -5100,6 +5170,7 @@ function renderTraining() {
         const controlHtml = `
             <div class="control-bar control-bar--episode-step">
                 <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
+                <button class="secondary-button" id="training-dataset-source-toggle" type="button">Use HuggingFace</button>
             </div>
             <div class="control-bar control-bar--floating-step-nav">
                 <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
@@ -5115,6 +5186,10 @@ function renderTraining() {
         `;
 
         byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
+        byId("training-dataset-source-toggle").onclick = () => {
+            state.trainingDatasetSource = "hub";
+            renderTraining();
+        };
         byId("training-dataset-back").onclick = () => {
             if (isFineTune) {
                 state.trainingStep = checkpointStep;
@@ -5921,7 +5996,15 @@ async function startTrainingRun(outputDir) {
         state.trainingStatus = await api("/training/start", {
             method: "POST",
             body: JSON.stringify({
-                dataset_path: state.mergedDatasetPath,
+                ...(state.trainingDatasetSource === "hub"
+                    ? {
+                        dataset_source: "hub",
+                        dataset_repo_id: (state.trainingDatasetRepoId || "").trim(),
+                        ...((state.trainingDatasetRevision || "").trim()
+                            ? { dataset_revision: state.trainingDatasetRevision.trim() }
+                            : {}),
+                    }
+                    : { dataset_source: "local", dataset_path: state.mergedDatasetPath }),
                 output_dir: outputDir,
                 policy_type: state.trainingMode === "fine_tune"
                     ? state.trainingCheckpointInfo?.policy_type
@@ -6867,15 +6950,51 @@ function openTrainingCheckpointBrowser() {
     }).catch((error) => showToast(error.message, true));
 }
 
+// Pre-flight a Hub checkpoint: fills the task field and warns up front when the
+// action layout cannot be recovered, rather than failing at Start.
+async function loadHubCheckpointInfo() {
+    const repoId = (state.rolloutCheckpointRepoId || "").trim();
+    if (!repoId) {
+        showToast("Enter a HuggingFace repo id (owner/model)", true);
+        return;
+    }
+    const params = new URLSearchParams({ source: "hub", repo_id: repoId });
+    const revision = (state.rolloutCheckpointRevision || "").trim();
+    if (revision) {
+        params.set("revision", revision);
+    }
+    try {
+        const info = await api(`/rollout/checkpoint-info?${params.toString()}`);
+        state.rolloutTaskText = (info && info.task) || "";
+        state.rolloutRequiresTask = !(info && info.requires_task === false);
+        state.rolloutActionNamesWarning =
+            info && !info.action_names
+                ? "This checkpoint has no action-name metadata. If its layout "
+                  + "includes a gripper, the rollout will refuse to start."
+                : "";
+        showToast(`Loaded ${repoId}`);
+    } catch (error) {
+        state.rolloutActionNamesWarning = "";
+        showToast(error.message, true);
+    }
+    renderRollout();
+}
+
 async function startRolloutRun() {
+    const useHub = state.rolloutCheckpointSource === "hub";
+    const repoId = (state.rolloutCheckpointRepoId || "").trim();
     const checkpoint = state.rolloutCheckpointPath;
-    if (!checkpoint) {
+    if (useHub ? !repoId : !checkpoint) {
         return;
     }
     const task = state.rolloutRequiresTask ? state.rolloutTaskText || "" : "";
+    const revision = (state.rolloutCheckpointRevision || "").trim();
+    const payload = useHub
+        ? { source: "hub", repo_id: repoId, task, ...(revision ? { revision } : {}) }
+        : { source: "local", checkpoint_path: checkpoint, task };
     state.rolloutStatus = await api("/rollout/start", {
         method: "POST",
-        body: JSON.stringify({ checkpoint_path: checkpoint, task }),
+        body: JSON.stringify(payload),
     });
     renderRollout();
 }
@@ -6952,7 +7071,10 @@ function renderRollout() {
     const isRunning = status.status === "running";
     const checkpoint = state.rolloutCheckpointPath;
     const checkpointName = checkpoint ? checkpoint.split("/").pop() : "";
-    const canStart = !!checkpoint && !isRunning;
+    const hasCheckpointSelection = state.rolloutCheckpointSource === "hub"
+        ? !!(state.rolloutCheckpointRepoId || "").trim()
+        : !!checkpoint;
+    const canStart = hasCheckpointSelection && !isRunning;
 
     const devices = state.rolloutDevices || { configured: "auto", resolved: "cpu", devices: [] };
     const configuredDevice = devices.configured || "auto";
@@ -6992,6 +7114,9 @@ function renderRollout() {
         status.status, status.stop_reason || "", status.error || "",
         checkpoint, configuredDevice, deviceOptions, deviceDetail,
         state.rolloutRequiresTask, rolloutServiceKey, rolloutServiceBusyKey,
+        // Without these the local/Hub toggle changes state but the guard above
+        // returns early, so the panel never redraws and the click looks dead.
+        state.rolloutCheckpointSource, state.rolloutActionNamesWarning || "",
     ].join("|");
     if (container.dataset.renderKey === renderKey) {
         renderRolloutCameras();
@@ -7036,10 +7161,35 @@ function renderRollout() {
                 <section class="panel panel--soft">
                     <div class="panel-header"><h3>Policy Checkpoint</h3></div>
                     <div class="rollout-checkpoint">
-                        <code class="rollout-checkpoint__path">${checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected"}</code>
-                        <button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>
+                        <code class="rollout-checkpoint__path">${
+                            state.rolloutCheckpointSource === "hub"
+                                ? (state.rolloutCheckpointRepoId ? escapeHtml(state.rolloutCheckpointRepoId) : "No Hub repo entered")
+                                : (checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected")
+                        }</code>
+                        <button class="secondary-button" id="rollout-source-toggle" type="button" ${isRunning ? "disabled" : ""}>${
+                            state.rolloutCheckpointSource === "hub" ? "Use Local" : "Use HuggingFace"
+                        }</button>
+                        ${
+                            state.rolloutCheckpointSource === "hub"
+                                ? ""
+                                : `<button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>`
+                        }
                     </div>
-                    ${checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
+                    ${
+                        state.rolloutCheckpointSource === "hub"
+                            ? `<div class="rollout-hub-fields">
+                                <input class="rollout-hub-input" id="rollout-hub-repo" type="text"
+                                    placeholder="owner/model (e.g. lerobot/pi0)"
+                                    autocomplete="off" spellcheck="false" ${isRunning ? "disabled" : ""}>
+                                <input class="rollout-hub-input" id="rollout-hub-revision" type="text"
+                                    placeholder="revision (optional)"
+                                    autocomplete="off" spellcheck="false" ${isRunning ? "disabled" : ""}>
+                                <button class="secondary-button" id="rollout-hub-load" type="button" ${isRunning ? "disabled" : ""}>Load</button>
+                            </div>`
+                            : ""
+                    }
+                    ${state.rolloutCheckpointSource !== "hub" && checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
+                    ${state.rolloutActionNamesWarning ? `<p class="training-controls__state rollout-error">${escapeHtml(state.rolloutActionNamesWarning)}</p>` : ""}
                     <label class="field-label rollout-task-label" for="rollout-task">Task Instruction</label>
                     <textarea class="rollout-task-input" id="rollout-task" rows="3"
                         placeholder="${state.rolloutRequiresTask ? 'Task instruction (optional)' : 'This policy does not take a language input'}"
@@ -7077,6 +7227,40 @@ function renderRollout() {
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {
         browseBtn.onclick = () => openCheckpointBrowser();
+    }
+    const sourceToggle = byId("rollout-source-toggle");
+    if (sourceToggle) {
+        sourceToggle.onclick = () => {
+            state.rolloutCheckpointSource =
+                state.rolloutCheckpointSource === "hub" ? "local" : "hub";
+            state.rolloutActionNamesWarning = "";
+            renderRollout();
+        };
+    }
+    const hubRepoInput = byId("rollout-hub-repo");
+    if (hubRepoInput) {
+        hubRepoInput.value = state.rolloutCheckpointRepoId || "";
+        // The repo id is deliberately kept out of the render key so the 1s poll
+        // cannot rebuild the panel mid-typing and steal focus, so enable the
+        // Start button directly instead of relying on a rebuild.
+        hubRepoInput.oninput = () => {
+            state.rolloutCheckpointRepoId = hubRepoInput.value.trim();
+            const primary = byId("rollout-primary-action");
+            if (primary && state.rolloutStatus?.status !== "running") {
+                primary.disabled = !state.rolloutCheckpointRepoId;
+            }
+        };
+    }
+    const hubRevisionInput = byId("rollout-hub-revision");
+    if (hubRevisionInput) {
+        hubRevisionInput.value = state.rolloutCheckpointRevision || "";
+        hubRevisionInput.oninput = () => {
+            state.rolloutCheckpointRevision = hubRevisionInput.value.trim();
+        };
+    }
+    const hubLoadBtn = byId("rollout-hub-load");
+    if (hubLoadBtn) {
+        hubLoadBtn.onclick = () => loadHubCheckpointInfo();
     }
     const taskInput = byId("rollout-task");
     if (taskInput) {
