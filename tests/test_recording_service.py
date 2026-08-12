@@ -74,7 +74,7 @@ def test_capture_loop_warns_with_deadline_delay(monkeypatch) -> None:
     assert warnings == [
         (
             "Recording capture loop missed its deadline",
-            "latest_delay_s=0.016667 max_delay_s=0.016667 "
+            "frame_index=0 latest_delay_s=0.016667 max_delay_s=0.016667 "
             "overruns=1 target_period_s=0.033333",
         )
     ]

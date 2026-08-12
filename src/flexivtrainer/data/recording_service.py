@@ -646,6 +646,8 @@ class RecordingService:
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
+            with self._lock:
+                frame_index = self._frames_captured
             try:
                 images, depths = self._grab_camera_data(
                     image_names,
@@ -732,6 +734,7 @@ class RecordingService:
                 ):
                     warn(
                         "Recording capture loop missed its deadline",
+                        f"frame_index={frame_index} "
                         f"latest_delay_s={delay_s:.6f} "
                         f"max_delay_s={max_delay_since_warning_s:.6f} "
                         f"overruns={overruns_since_warning} "
