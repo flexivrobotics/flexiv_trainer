@@ -462,14 +462,12 @@ class TestLayoutWarning:
         from flexivtrainer.api.routes.rollout import _layout_ok, _layout_warning
         from flexivtrainer.rollout.executors.waypoint import canonical_action_names
 
-        # A gripper-bearing layout is fine when the axis names are recorded:
-        # width 14 is not canonical, but recorded names are not bound to that.
+        # Width 14 is not canonical, but recorded names are not bound to that.
         names = canonical_action_names(13, ["single_arm"]) + [
             "single_arm.gripper.target_width"
         ]
         assert _layout_warning(names, 14, ["single_arm"]) is None
 
-        # ...and the confirmation says so without quoting canonical widths.
         message = _layout_ok(names, 14, ["single_arm"])
         assert message is not None
         assert "Policy loaded successfully" in message
@@ -484,15 +482,12 @@ class TestLayoutWarning:
     def test_confirms_inferable_width(self):
         from flexivtrainer.api.routes.rollout import _layout_ok
 
-        # The correct-arm-mode case reports the same facts as its warning
-        # counterpart, ending in a verdict instead of a fix.
         message = _layout_ok(None, 26, ["left_arm", "right_arm"])
         assert message is not None
         assert "action width is 26" in message
         assert "for 2 arms are 26 or 38" in message
         assert "Arm mode matches: dual-arm" in message
 
-        # Silent when there is nothing to infer or the width is unusable.
         assert _layout_ok(["a"] * 26, 26, ["left_arm", "right_arm"]) is None
         assert _layout_ok(None, 26, ["single_arm"]) is None
 
@@ -500,8 +495,6 @@ class TestLayoutWarning:
         from flexivtrainer.api.routes.rollout import _layout_ok, _layout_warning
         from flexivtrainer.rollout.executors.waypoint import canonical_action_names
 
-        # Recorded names skip width inference but still face the arm-layout
-        # check, so the pre-flight must surface that mismatch too.
         dual = canonical_action_names(26, ["left_arm", "right_arm"])
         message = _layout_warning(dual, 26, ["single_arm"])
         assert message is not None
@@ -575,8 +568,7 @@ class TestSessionHubToken:
         assert hub_token(settings) == "configured-token"
         assert has_session_token() is False
 
-        # The typed token is the operator's answer to an auth failure, so a
-        # stale configured token must not win over it.
+        # A stale configured token must not beat the operator's typed one.
         set_session_token("  typed-token  ")
         assert has_session_token() is True
         assert hub_token(settings) == "typed-token"
@@ -591,7 +583,142 @@ class TestSessionHubToken:
 
         settings = AppSettings()
         set_session_token("secret")
-        # It lives beside the settings object, never inside it, so dumping
-        # config to disk cannot leak the credential.
+        # Lives beside the settings object, so dumping config cannot leak it.
         assert settings.hub.token is None
         assert "secret" not in settings.model_dump_json()
+
+    def test_session_token_reaches_the_training_subprocess(self, monkeypatch):
+        from flexivtrainer.config import AppSettings
+        from flexivtrainer.data.hub import set_session_token
+        from flexivtrainer.jobs.train_policy import TrainingService
+
+        # The subprocess downloads the bulk dataset, so a stale HF_TOKEN there
+        # would fail the run even after the operator supplied a working one.
+        monkeypatch.setenv("HF_TOKEN", "stale-env-token")
+        service = TrainingService(AppSettings())
+        assert service._training_env()["HF_TOKEN"] == "stale-env-token"
+
+        set_session_token("typed-token")
+        assert service._training_env()["HF_TOKEN"] == "typed-token"
+
+
+def _pose_twist_names(prefix: str = "single_arm") -> list[str]:
+    return [
+        f"{prefix}.tcp_pose.{axis}"
+        for axis in ("x", "y", "z", "q_w", "q_x", "q_y", "q_z")
+    ] + [f"{prefix}.tcp_twist.{axis}" for axis in ("vx", "vy", "vz", "wx", "wy", "wz")]
+
+
+class TestInspectHubDataset:
+    """Load-time pre-flight: same checks and same words as Start."""
+
+    def test_reports_facts_and_a_confirmation(self, tmp_path, monkeypatch):
+        service = TrainingService(make_settings(tmp_path))
+        stub_dataset_fetch(monkeypatch, _pose_twist_names())
+
+        result = service.inspect_hub_dataset("acme/demo")
+
+        assert result["repo_id"] == "acme/demo"
+        assert result["action_dim"] == 13
+        assert result["fps"] == 30
+        assert result["dataset_warning"] is None
+        assert "loaded successfully" in result["dataset_ok"]
+
+    def test_tolerates_missing_counts(self, tmp_path, monkeypatch):
+        # The fixture writes no total_episodes/total_frames; reporting 0 would
+        # read as an empty dataset rather than as absent metadata.
+        service = TrainingService(make_settings(tmp_path))
+        stub_dataset_fetch(monkeypatch, _pose_twist_names())
+
+        result = service.inspect_hub_dataset("acme/demo")
+
+        assert result["num_episodes"] is None
+        assert result["num_frames"] is None
+        assert "0 episodes" not in result["dataset_ok"]
+        assert "records no episode or frame counts" in result["dataset_ok"]
+
+    def test_missing_gripper_metadata_is_trainable_but_noted(
+        self, tmp_path, monkeypatch
+    ):
+        # Training only feeds tensors to a policy, so an unusable gripper schema
+        # must not block it. Rollout refuses such a checkpoint on its own.
+        service = TrainingService(make_settings(tmp_path))
+        names = [*_pose_twist_names(), "single_arm.gripper.target_width"]
+        stub_dataset_fetch(monkeypatch, names)
+
+        result = service.inspect_hub_dataset("acme/demo")
+
+        assert result["dataset_warning"] is None
+        assert "gripper command metadata" in result["dataset_ok"]
+        assert "cannot be rolled out" in result["dataset_ok"]
+        # The Hub cache directory is an opaque digest; it must not reach the UI.
+        assert str(tmp_path) not in result["dataset_ok"]
+
+    def test_unnamed_action_axes_are_trainable(self, tmp_path, monkeypatch):
+        # LeRobot's grouped {"motors": [...]} form: no arm layout needed.
+        service = TrainingService(make_settings(tmp_path))
+        stub_dataset_fetch(monkeypatch, _pose_twist_names())
+        root = service._resolve_hub_dataset(parse_hub_ref("acme/demo"))[1]
+        info_path = root / "meta" / "info.json"
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        info["features"]["action"]["names"] = {"motors": ["motor_0", "motor_1"]}
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+
+        result = service.inspect_hub_dataset("acme/demo")
+
+        assert result["dataset_warning"] is None
+        assert "cannot be rolled out" in result["dataset_ok"]
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            pytest.param(["motor_0", "motor_1"], id="arbitrary"),
+            pytest.param(
+                ["a.gripper.target_width"], id="target_width_without_metadata"
+            ),
+            pytest.param(["a.gripper.close"], id="boolean_gripper"),
+            pytest.param(
+                ["a.gripper.target_width", "b.gripper.width"], id="mixed_conventions"
+            ),
+        ],
+    )
+    def test_start_and_load_both_accept_any_action_schema(
+        self, tmp_path, monkeypatch, names
+    ):
+        # Anti-drift: Start and Load share _dataset_preflight. Asserted on that
+        # call rather than by running start(), which spawns a real subprocess.
+        service = TrainingService(make_settings(tmp_path))
+        stub_dataset_fetch(monkeypatch, names)
+        _, root = service._resolve_hub_dataset(parse_hub_ref("acme/demo"))
+
+        assert service._dataset_preflight(root).gripper_command_metadata is None
+        assert service.inspect_hub_dataset("acme/demo")["dataset_warning"] is None
+
+    def test_session_token_reaches_the_metadata_fetch(self, tmp_path, monkeypatch):
+        # LeRobotDatasetMetadata takes no token argument, so the environment is
+        # the only route for a UI-typed token.
+        import os
+
+        from flexivtrainer.data.hub import set_session_token
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        seen: list[str | None] = []
+
+        def fake_metadata(repo_id, root=None, revision=None, force_cache_sync=False):
+            seen.append(os.environ.get("HF_TOKEN"))
+            write_dataset_meta(Path(root), _pose_twist_names())
+            return object()
+
+        monkeypatch.setattr(
+            "lerobot.datasets.lerobot_dataset.LeRobotDatasetMetadata", fake_metadata
+        )
+        service = TrainingService(make_settings(tmp_path))
+        set_session_token("typed-token")
+        try:
+            service.inspect_hub_dataset("acme/demo")
+        finally:
+            set_session_token(None)
+
+        assert seen == ["typed-token"]
+        # Restored, so one fetch cannot leak a credential into later work.
+        assert os.environ.get("HF_TOKEN") is None

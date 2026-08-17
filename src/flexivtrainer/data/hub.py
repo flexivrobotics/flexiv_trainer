@@ -31,6 +31,8 @@ import json
 import os
 import re
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -55,9 +57,8 @@ HubKind = Literal["datasets", "checkpoints"]
 _FETCH_LOCKS: dict[str, threading.Lock] = {}
 _FETCH_LOCKS_GUARD = threading.Lock()
 
-# Token supplied at runtime by an operator, held for this process only. Kept out
-# of AppSettings deliberately: settings are persisted, and a credential typed
-# into the UI must not be written to disk.
+# Kept out of AppSettings deliberately: settings are persisted, and a credential
+# typed into the UI must not be written to disk.
 _SESSION_TOKEN: str | None = None
 _SESSION_TOKEN_GUARD = threading.Lock()
 
@@ -77,6 +78,38 @@ def session_token() -> str | None:
 
 def has_session_token() -> bool:
     return session_token() is not None
+
+
+# os.environ is process-global, so two concurrent fetches must not interleave
+# their save/restore even though they would write the same value.
+_TOKEN_ENV_GUARD = threading.Lock()
+_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+
+
+@contextmanager
+def hub_token_env(settings: AppSettings | None = None) -> Iterator[None]:
+    """Expose the effective token to libraries that read only the environment.
+
+    ``LeRobotDatasetMetadata`` accepts no token argument, so a token typed into
+    the UI would otherwise never reach a private or gated dataset fetch. The
+    previous values are restored on exit, including when nothing was set.
+    """
+    token = hub_token(settings)
+    if not token:
+        yield
+        return
+    with _TOKEN_ENV_GUARD:
+        previous = {name: os.environ.get(name) for name in _TOKEN_ENV_VARS}
+        for name in _TOKEN_ENV_VARS:
+            os.environ[name] = token
+        try:
+            yield
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 class HubError(RuntimeError):
@@ -366,9 +399,15 @@ def fetch_dataset_metadata(
 
         target.mkdir(parents=True, exist_ok=True)
         try:
-            LeRobotDatasetMetadata(
-                ref.repo_id, root=target, revision=ref.revision, force_cache_sync=force
-            )
+            # Unlike snapshot_download, this takes no token argument, so the
+            # effective one has to travel through the environment.
+            with hub_token_env(settings):
+                LeRobotDatasetMetadata(
+                    ref.repo_id,
+                    root=target,
+                    revision=ref.revision,
+                    force_cache_sync=force,
+                )
         except Exception as exc:  # noqa: BLE001 - re-raised as a typed HubError
             # Deliberately leave any partial content in place (snapshot_download
             # resumes) but never mark it complete.

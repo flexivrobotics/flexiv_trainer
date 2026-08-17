@@ -145,6 +145,116 @@ _FINE_TUNE_POLICY_FIELDS = {
 }
 
 
+@dataclass(frozen=True)
+class DatasetFacts:
+    """What a dataset's ``meta/`` says about itself, once validated.
+
+    Counts are optional: a hand-built repo may omit them, and reporting zero
+    would read as an empty dataset rather than as missing metadata.
+    """
+
+    num_episodes: int | None
+    num_frames: int | None
+    fps: float | None
+    action_dim: int | None
+    action_names: list[str] | None
+    gripper_command_metadata: GripperCommandMetadata | None
+    # Not an error: the dataset still trains, the checkpoint just carries no
+    # gripper sidecar.
+    gripper_note: str | None
+    depth_keys: list[str]
+    rgb_keys: list[str]
+    has_bspline_meta: bool
+
+
+def dataset_confirmation(facts: DatasetFacts, *, checkpoint_ok: bool = False) -> str:
+    """Declarative verdict for a dataset whose metadata passed every check.
+
+    Same shape as the rollout's layout confirmation: observed facts, then the
+    verdict. Caveats are appended rather than raised because whether they bite
+    depends on a policy that is chosen later in the wizard.
+    """
+    if facts.num_episodes and facts.num_frames:
+        scale = (
+            f"Dataset has {facts.num_episodes:,} episodes and "
+            f"{facts.num_frames:,} frames"
+        )
+        if facts.fps:
+            scale += f" at {facts.fps:g} Hz"
+        opening = f"{scale}; action width is {_width_text(facts)}"
+    else:
+        opening = (
+            f"Dataset action width is {_width_text(facts)}; meta/info.json "
+            "records no episode or frame counts"
+        )
+
+    if facts.gripper_command_metadata is not None:
+        schema = (
+            "The action schema uses gripper.target_width and "
+            "meta/gripper_command.json is present"
+        )
+    elif facts.gripper_note:
+        # Trainable, but the checkpoint gets no gripper sidecar, so rollout
+        # will refuse it.
+        schema = (
+            f"{facts.gripper_note}. Training is unaffected; a policy trained "
+            "here cannot be rolled out on this robot"
+        )
+    else:
+        schema = (
+            "The action schema has no gripper axis, so no command metadata "
+            "is required"
+        )
+
+    parts = [f"{opening}. {schema}."]
+    if checkpoint_ok:
+        parts.append(
+            "Checkpoint compatibility matches: input and output feature shapes "
+            "and gripper metadata agree."
+        )
+    parts.append("Dataset metadata loaded successfully.")
+
+    # No B-spline caveat: almost no dataset ships meta/bspline.json, so it would
+    # fire on nearly every load for a policy not yet chosen.
+    if facts.depth_keys and not facts.rgb_keys:
+        parts.append(
+            "Depth features are present with no RGB camera; depth is excluded "
+            "from policy inputs, so a policy trained here would receive no "
+            "visual input."
+        )
+    return " ".join(parts)
+
+
+def _width_text(facts: DatasetFacts) -> str:
+    if facts.action_dim is None:
+        return "not recorded"
+    named = "with recorded axis names" if facts.action_names else "with unnamed axes"
+    return f"{facts.action_dim} {named}"
+
+
+def _as_sentence(text: str) -> str:
+    """Terminate a raised message without doubling an existing period."""
+    stripped = text.strip()
+    return stripped if stripped.endswith(".") else f"{stripped}."
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _positive_number(value: Any) -> float | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        return None
+    return float(value)
+
+
 def _stream_level(text: str) -> str:
     # These converter summary fields report reconstruction quality; the word
     # "error" is part of the metric name and does not indicate a failed step.
@@ -658,6 +768,67 @@ class TrainingService:
         ref = parse_hub_ref(repo_id, revision)
         return self._inspect_resolved_checkpoint(*self._resolve_hub_checkpoint(ref))
 
+    def inspect_hub_dataset(
+        self,
+        repo_id: str,
+        revision: str | None = None,
+        *,
+        checkpoint_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Pre-flight a Hub dataset without starting a run.
+
+        Only ``meta/`` is fetched, so this stays cheap even for a dataset with
+        hundreds of gigabytes of video. Transport failures propagate as typed
+        HubErrors for the route to map; a dataset that resolves but cannot be
+        trained on comes back as ``dataset_warning`` in the payload.
+        """
+        ref = parse_hub_ref(repo_id, revision or self._settings.hub.default_revision)
+        _, resolved_root = self._resolve_hub_dataset(ref)
+        checkpoint_info: dict[str, Any] | None = None
+        if checkpoint_path is not None:
+            checkpoint_info = self.inspect_checkpoint(checkpoint_path)
+
+        facts: DatasetFacts | None = None
+        warning: str | None = None
+        try:
+            facts = self._dataset_preflight(resolved_root)
+            if checkpoint_info is not None:
+                # Start refuses this before validating features; match that
+                # order or the two report different causes.
+                if (
+                    checkpoint_info["policy_type"] == "bspline_diffusion"
+                    and not facts.has_bspline_meta
+                ):
+                    raise ValueError(
+                        "B-spline Diffusion cannot convert a Hub dataset in "
+                        "place. Download the dataset locally first, then train "
+                        "from it."
+                    )
+                self._validate_checkpoint_dataset(checkpoint_info, resolved_root)
+        except ValueError as exc:
+            warning = _as_sentence(str(exc))
+
+        # Counts come straight from meta/info.json, so they are reported even
+        # when a schema check failed: they confirm the repo itself resolved.
+        scale = self._dataset_scale(resolved_root)
+
+        return {
+            "repo_id": ref.repo_id,
+            "revision": ref.revision,
+            "num_episodes": scale[0],
+            "num_frames": scale[1],
+            "fps": scale[2],
+            "action_dim": facts.action_dim if facts else None,
+            "dataset_ok": (
+                None
+                if warning is not None or facts is None
+                else dataset_confirmation(
+                    facts, checkpoint_ok=checkpoint_info is not None
+                )
+            ),
+            "dataset_warning": warning,
+        }
+
     def inspect_checkpoint(self, checkpoint_path: Path) -> dict[str, Any]:
         return self._inspect_resolved_checkpoint(
             *self._resolve_checkpoint(checkpoint_path)
@@ -685,6 +856,69 @@ class TrainingService:
                 else None
             ),
         }
+
+    def _dataset_gripper_command(
+        self, dataset_root: Path
+    ) -> tuple[GripperCommandMetadata | None, str | None]:
+        """Gripper metadata if the schema allows it, else the reason it does not.
+
+        Never raises: an unrecognised action schema is trainable, it just cannot
+        carry a gripper sidecar into the checkpoint. Rollout refuses such a
+        checkpoint on its own, so nothing unsafe reaches hardware.
+        """
+        try:
+            return self._dataset_gripper_command_metadata(dataset_root), None
+        except ValueError as exc:
+            return None, str(exc)
+
+    def _dataset_scale(
+        self, dataset_root: Path
+    ) -> tuple[int | None, float | None, float | None]:
+        """Episode/frame/fps counts, tolerating metadata that omits them."""
+        try:
+            info = self._read_json(dataset_root / "meta" / "info.json")
+        except ValueError:
+            return (None, None, None)
+        return (
+            _positive_int(info.get("total_episodes")),
+            _positive_int(info.get("total_frames")),
+            _positive_number(info.get("fps")),
+        )
+
+    def _dataset_preflight(self, dataset_root: Path) -> DatasetFacts:
+        """Meta-only checks Start performs, shared with the Load pre-flight.
+
+        Training only feeds tensors to a policy, so action-axis naming is not
+        constrained here: any schema trains. Gripper metadata is resolved when
+        the naming convention allows it, and the reason is recorded when it does
+        not, so the checkpoint sidecar can be written when it is available.
+        Rollout is where naming actually matters, and it re-checks independently.
+        """
+        info = self._read_json(dataset_root / "meta" / "info.json")
+        features = self._dataset_policy_features(info)
+        action = features.get("action")
+        action_dim = None
+        if action is not None and len(action["shape"]) == 1:
+            action_dim = int(action["shape"][0])
+        depth_keys = self._dataset_depth_keys(info)
+        num_episodes, num_frames, fps = self._dataset_scale(dataset_root)
+        gripper_metadata, gripper_note = self._dataset_gripper_command(dataset_root)
+        return DatasetFacts(
+            num_episodes=num_episodes,
+            num_frames=num_frames,
+            fps=fps,
+            action_dim=action_dim,
+            action_names=self._dataset_action_names(dataset_root),
+            gripper_command_metadata=gripper_metadata,
+            gripper_note=gripper_note,
+            depth_keys=sorted(depth_keys),
+            rgb_keys=sorted(
+                key
+                for key, feature in features.items()
+                if feature["type"] == "VISUAL" and key not in depth_keys
+            ),
+            has_bspline_meta=(dataset_root / "meta" / "bspline.json").is_file(),
+        )
 
     def _dataset_action_names(self, dataset_root: Path) -> list[str] | None:
         """Ordered action-axis names from a dataset, for the checkpoint sidecar."""
@@ -716,13 +950,23 @@ class TrainingService:
         if not isinstance(names, list) or not all(
             isinstance(name, str) for name in names
         ):
-            raise ValueError("Dataset action feature has no valid named axes")
+            # LeRobot also allows a grouped mapping such as {"motors": [...]}.
+            raise ValueError(
+                "Action axes are not a flat list of names, so no arm or gripper "
+                "layout can be derived"
+            )
         mode = action_gripper_mode(names)
         if mode != "target_width":
             return None
-        return read_gripper_command_metadata(
-            dataset_root / GRIPPER_COMMAND_RELATIVE_PATH
-        )
+        path = dataset_root / GRIPPER_COMMAND_RELATIVE_PATH
+        # Checked explicitly: read_gripper_command_metadata reports the absolute
+        # path, which for a Hub dataset is an opaque cache directory.
+        if not path.is_file():
+            raise ValueError(
+                "Action schema uses gripper.target_width but the dataset has no "
+                f"{GRIPPER_COMMAND_RELATIVE_PATH} gripper command metadata"
+            )
+        return read_gripper_command_metadata(path)
 
     @staticmethod
     def _dataset_policy_features(info: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -868,10 +1112,12 @@ class TrainingService:
         env = dict(os.environ)
         env[TRAIN_LOAD_DEPTH_ENV] = "1" if self._settings.training.load_depth else "0"
         # A Hub dataset is downloaded by this subprocess, so a configured token
-        # has to reach it for private or gated repos.
+        # has to reach it for private or gated repos. Assigned rather than
+        # setdefault: hub_token() already ranks an operator-supplied token above
+        # the environment, and setdefault would let a stale HF_TOKEN win.
         token = hub_token(self._settings)
         if token:
-            env.setdefault("HF_TOKEN", token)
+            env["HF_TOKEN"] = token
         return env
 
     def _rgb_only_policy_input_features(
@@ -1225,9 +1471,11 @@ class TrainingService:
                 raise ValueError("dataset_path is required when dataset_source='local'")
             else:
                 _, resolved_root = self._resolve_dataset(dataset_root)
-            gripper_command_metadata = self._dataset_gripper_command_metadata(
+            # Call position unchanged by the extraction, so competing errors
+            # still surface in the same order.
+            gripper_command_metadata = self._dataset_preflight(
                 resolved_root
-            )
+            ).gripper_command_metadata
             output_dir = self._resolve_output_dir(output_dir)
             normalized_extra_args = list(extra_args or [])
             checkpoint_info: dict[str, Any] | None = None

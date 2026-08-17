@@ -128,6 +128,44 @@ def checkpoint_info(
     }
 
 
+@router.get("/hub-dataset-info")
+def hub_dataset_info(
+    repo_id: str,
+    revision: str | None = None,
+    checkpoint_path: str | None = None,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    """Pre-flight a Hub dataset so problems surface here, not at Start.
+
+    Transport and auth failures stay HTTP errors: the UI keys its token prompt
+    off the status code, so folding them into the body would silence it.
+    """
+    try:
+        return runtime.training.inspect_hub_dataset(
+            repo_id,
+            revision,
+            checkpoint_path=Path(checkpoint_path) if checkpoint_path else None,
+        )
+    # Hub errors subclass RuntimeError, so they must precede the 409 handler.
+    except HubDatasetNotTaggedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HubNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HubAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except HubUnavailableError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        status = 403 if str(exc).startswith("Access denied:") else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/devices")
 def training_devices(
     force: bool = False,

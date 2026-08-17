@@ -471,8 +471,8 @@ class RolloutService:
             )
             if waypoint_layout_inferred:
                 confirmation = layout_confirmation(waypoint_action_dim, len(sides))
-                # OK, not WARNING: the width matched the configured arm count, so
-                # this confirms the inference rather than cautioning about it.
+                # OK, not WARNING: the width matched, so this confirms the
+                # inference rather than cautioning about it.
                 self._logs.append(
                     _encode_ui_log(
                         "OK",
@@ -483,8 +483,6 @@ class RolloutService:
                 )
                 ok("Waypoint action layout inferred", confirmation)
             else:
-                # Names were recorded, so the layout was read rather than
-                # guessed. Confirm it in the same shape as the inferred case.
                 confirmation = recorded_layout_confirmation(
                     waypoint_action_dim, len(sides)
                 )

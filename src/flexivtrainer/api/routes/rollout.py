@@ -171,8 +171,6 @@ def rollout_checkpoint_info(
         "layout_warning": _layout_warning(
             action_names, action_dim, runtime.get_active_sides()
         ),
-        # Mirror of layout_warning for the inferable case, so a correct arm mode
-        # is confirmed out loud instead of showing nothing at all.
         "layout_ok": _layout_ok(action_names, action_dim, runtime.get_active_sides()),
     }
 
@@ -189,8 +187,7 @@ def _layout_warning(
         canonical_action_names,
     )
 
-    # Recorded names skip inference but still face the arm-layout check, so
-    # both paths are exercised here rather than only the inferred one.
+    # Recorded names skip inference but still face the arm-layout check.
     try:
         names = (
             canonical_action_names(action_dim, sides)
@@ -200,7 +197,6 @@ def _layout_warning(
         build_action_layout(names, sides, action_dim)
     except ValueError as exc:
         return f"{exc}."
-    # Usable, so it will start; say so rather than leaving a vague caveat.
     return None
 
 
@@ -218,8 +214,7 @@ def _layout_ok(
         recorded_layout_confirmation,
     )
 
-    # Run the same validation the rollout will, so this never claims a match
-    # that the arm-layout check would go on to reject.
+    # Run the rollout's own validation, so this never claims a match it rejects.
     try:
         if action_names is None:
             names = canonical_action_names(action_dim, sides)

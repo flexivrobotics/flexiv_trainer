@@ -42,8 +42,7 @@ class RobotConfigRequest(BaseModel):
 
 
 class HubTokenRequest(BaseModel):
-    # Empty string clears the stored token, so the UI can offer a "forget" action
-    # without a second endpoint.
+    # Empty string clears the stored token.
     token: str = ""
 
 
@@ -56,8 +55,7 @@ def _hub_token_state(runtime: RuntimeManager) -> dict:
     """Whether a token is available, never the token itself."""
     return {
         "session_token_set": has_session_token(),
-        # A configured or environment token means the operator may not need to
-        # type anything, so the UI can say why it is not prompting.
+        # True when a configured or environment token already covers the request.
         "token_available": hub_token(runtime.settings) is not None,
     }
 
@@ -74,12 +72,7 @@ def set_hub_token(
     request: HubTokenRequest,
     runtime: RuntimeManager = Depends(get_runtime_manager),
 ) -> dict:
-    """Hold an operator-supplied Hub token for this server process only.
-
-    Deliberately not persisted: the token is a credential typed in response to
-    an auth failure, and writing it to the settings file would leave it in
-    plaintext on the host.
-    """
+    """Hold an operator-supplied Hub token for this server process only."""
     set_session_token(request.token)
     return _hub_token_state(runtime)
 

@@ -57,11 +57,10 @@ def _group_slice(
 
 
 def _layout_hint(action_dim: int, arm_count: int) -> str:
-    """One-line explanation of a width mismatch, naming the fix when there is one.
+    """Explain a width mismatch, naming the fix when there is one.
 
-    The canonical widths cover pose+twist (13) and pose+twist+wrench (19) per
-    arm, so a width that divides cleanly by one of those points at a different
-    arm count -- the common case, and the only one with a one-step fix.
+    A width that divides cleanly by 13 or 19 points at a different arm count --
+    the common case, and the only one with a one-step fix.
     """
     for per_arm in (_POSE_DIM + _TWIST_DIM, _POSE_DIM + _TWIST_DIM + _WRENCH_DIM):
         if action_dim % per_arm:
@@ -83,12 +82,7 @@ def _layout_hint(action_dim: int, arm_count: int) -> str:
 
 
 def layout_confirmation(action_dim: int, arm_count: int) -> str:
-    """Positive counterpart to :func:`_layout_hint`, same sentence structure.
-
-    Emitted when a width *is* inferable, so the operator reads the same facts
-    (width, canonical widths, why names were inferred) whether the arm mode is
-    right or wrong -- only the verdict at the end differs.
-    """
+    """Positive counterpart to :func:`_layout_hint`, same sentence structure."""
     mode = _ARM_MODES.get(arm_count, f"{arm_count}-arm")
     return (
         f"{_width_preamble(action_dim, arm_count)}. The checkpoint does not "
@@ -100,9 +94,8 @@ def layout_confirmation(action_dim: int, arm_count: int) -> str:
 def recorded_layout_confirmation(action_dim: int, arm_count: int) -> str:
     """Confirmation for a checkpoint that records its own action-axis names.
 
-    Deliberately omits the canonical widths: a named checkpoint is not bound to
-    them (a gripper axis makes 14 or 20 perfectly valid), so quoting "13 or 19"
-    here would read as a contradiction.
+    Omits the canonical widths: a named checkpoint is not bound to them (a
+    gripper axis makes 14 valid), so quoting "13 or 19" would contradict it.
     """
     mode = _ARM_MODES.get(arm_count, f"{arm_count}-arm")
     return (
@@ -133,14 +126,12 @@ def _canonical_widths_text(arm_count: int) -> str:
 
 
 def _sides_hint(checkpoint_sides: list[str], active_sides: list[str]) -> str:
-    """Declarative counterpart to :func:`_layout_hint` for named checkpoints.
+    """Counterpart to :func:`_layout_hint` for checkpoints with recorded names.
 
-    Here the axis names are recorded, so the arm layout is read rather than
-    inferred. A differing arm *count* is the arm-mode case and has the same
-    one-step fix. A matching count with different side names cannot come from
-    this recorder (it emits only ``single_arm`` or ``left_arm``+``right_arm``),
-    so it means a foreign checkpoint whose naming this rig does not use --
-    switching arm mode would not resolve that.
+    A differing arm *count* has the same one-step fix. A matching count with
+    different side names cannot come from this recorder (it emits only
+    ``single_arm`` or ``left_arm``+``right_arm``), so it is a foreign checkpoint
+    that switching arm mode would not resolve.
     """
     checkpoint_text = ", ".join(checkpoint_sides) or "none"
     active_text = ", ".join(active_sides) or "none"

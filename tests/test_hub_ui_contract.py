@@ -72,8 +72,7 @@ def test_loading_state_renders_before_the_request() -> None:
 
     loading = body.index('state.rolloutHubLoadState = "loading"')
     render = body.index("renderRollout();", loading)
-    # The fetch is wrapped for the token-retry flow, so match the await itself
-    # rather than a bare api( call.
+    # Wrapped for the token-retry flow, so match the await, not a bare api(.
     request = body.index("await withHubToken(")
     assert loading < render < request
 
@@ -173,8 +172,6 @@ def test_training_dataset_hub_controls_exist() -> None:
 
 
 def test_hub_token_prompt_is_wired() -> None:
-    # The prompt must exist in the markup and be reachable from every Hub call,
-    # or an operator hitting a private repo has no in-app way to recover.
     html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
     source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
 
@@ -190,19 +187,16 @@ def test_hub_token_prompt_is_wired() -> None:
     # A credential must never be a plain text field.
     assert 'id="hub-token-input" type="password"' in html
 
-    # api() has to expose the status so the token case can be told apart from
-    # an ordinary failure.
     assert "error.status = response.status" in source
     assert "error.detail = detail" in source
 
-    # Every Hub-fetching call retries behind the prompt.
     assert source.count("withHubToken(") >= 4
     assert 'api("/system/hub-token"' in source
 
 
 def test_hub_token_prompt_only_triggers_on_auth_failure() -> None:
-    # Prompting on any error would ask for a token when the repo simply does
-    # not exist, so the trigger is pinned to the Hub's auth wording.
+    # Pinned to the Hub's auth wording: prompting on any error would ask for a
+    # token when the repo simply does not exist.
     source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
     start = source.index("function isHubTokenError(")
     body = source[start : source.index("function promptForHubToken(", start)]
@@ -215,16 +209,14 @@ def test_hub_token_prompt_only_triggers_on_auth_failure() -> None:
 
 
 def test_ui_renders_layout_ok_verdict() -> None:
-    # The server returns layout_ok for a usable checkpoint. Reading only
-    # layout_warning left a successful load with nothing on screen at all.
+    # Reading only layout_warning left a successful load showing nothing.
     source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
 
     assert "info.layout_ok" in source
-    # Both loaders (local path and Hub repo) must set it, and both must clear
-    # it on failure, or a stale verdict outlives the checkpoint it described.
+    # Both loaders must clear it on failure, or a stale verdict outlives it.
     assert source.count("state.rolloutActionNamesOk = (info && info.layout_ok)") == 2
     assert source.count('state.rolloutActionNamesOk = ""') >= 3
-    # It has to take part in the render key or the panel never repaints.
+    # Must be in the render key or the panel never repaints.
     assert 'state.rolloutActionNamesOk || ""' in source
     # A warning outranks the confirmation; they must never show together.
     assert (
@@ -239,3 +231,67 @@ def test_layout_ok_renders_green_not_as_an_error() -> None:
     assert "rollout-ok" in source
     assert ".rollout-ok {" in styles
     assert "color: var(--success);" in styles.split(".rollout-ok {", 1)[1][:120]
+
+
+def test_training_hub_dataset_load_controls_exist() -> None:
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="training-hub-load"' in source
+    assert "loadHubDatasetInfo" in source
+    assert "/training/hub-dataset-info?" in source
+    # meta/ only, so "Downloading" would overstate what the button does.
+    assert '"Loading…"' in source
+
+
+def test_training_loading_state_renders_before_the_request() -> None:
+    # As with the rollout loader: painted before the await, or never seen.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    start = source.index("async function loadHubDatasetInfo()")
+    body = source[start : source.index("async function startTrainingRun(", start)]
+
+    loading = body.index('state.trainingHubLoadState = "loading"')
+    render = body.index("renderTraining();", loading)
+    request = body.index("await withHubToken(")
+    assert loading < render < request
+
+
+def test_training_next_requires_a_clean_dataset_load() -> None:
+    # Without this the feature is optional and problems still reach Start.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'const hubLoaded = state.trainingHubLoadState === "loaded"' in source
+    assert "&& !state.trainingDatasetVerdictWarning" in source
+    assert '${hubLoaded ? "" : "disabled"}>Next' in source
+    assert "nextBtn.disabled = !state.trainingDatasetRepoId" not in source
+
+
+def test_training_dataset_verdict_uses_the_server_strings() -> None:
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "info.dataset_ok" in source
+    assert "info.dataset_warning" in source
+    assert (
+        "!state.trainingDatasetVerdictWarning && state.trainingDatasetVerdict" in source
+    )
+    assert "rollout-ok" in source and "rollout-error" in source
+
+
+def test_editing_training_repo_id_invalidates_the_load() -> None:
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "const invalidateHubLoad = () =>" in source
+    assert 'loadBtn.textContent = "Load"' in source
+    # The revision is part of the cache identity, so it must invalidate too.
+    assert "state.trainingHubLoadedRevision" in source
+    assert source.count("invalidateHubLoad();") >= 2
+
+
+def test_hub_dataset_step_estimate_uses_the_hub_frame_count() -> None:
+    # buildTrainingExtraArgs drops --steps when steps is 0.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    start = source.index("function computeTrainingSteps(")
+    body = source[start : start + 400]
+
+    assert "const frames = trainingDatasetFrames();" in body
+    hub_frames = "state.trainingHubDatasetInfo.num_frames"
+    assert hub_frames in source

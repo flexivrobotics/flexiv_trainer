@@ -42,8 +42,7 @@ const state = {
     // Set when a checkpoint carries no recoverable action layout, so the user
     // is warned before starting rather than at the failure.
     rolloutActionNamesWarning: "",
-    // Positive counterpart to the warning: the server's confirmation that the
-    // checkpoint's action layout is usable with the configured arm mode.
+    // Positive counterpart to the warning above.
     rolloutActionNamesOk: "",
     // "idle" | "loading" | "loaded" | "error". The Hub fetch is synchronous and
     // a policy can be gigabytes, so the button has to show it is working.
@@ -91,6 +90,14 @@ const state = {
     trainingDatasetSource: "local",
     trainingDatasetRepoId: "",
     trainingDatasetRevision: "",
+    // "idle" | "loading" | "loaded" | "error", mirroring rolloutHubLoadState.
+    // The loaded repo id and revision are kept so editing either invalidates it.
+    trainingHubLoadState: "idle",
+    trainingHubLoadedRepoId: "",
+    trainingHubLoadedRevision: "",
+    trainingHubDatasetInfo: null,
+    trainingDatasetVerdict: "",
+    trainingDatasetVerdictWarning: "",
     mergedDatasetPreview: null,
     mergedDatasetSeries: null,
     mergedDatasetFrame: 0,
@@ -1763,8 +1770,7 @@ async function api(path, init, options = {}) {
             const detail = await readErrorDetail(response);
             const baseMessage = `Request failed: ${response.status} ${response.statusText}`;
             const error = new Error(detail ? `${baseMessage} - ${detail}` : baseMessage);
-            // Carry the raw status and detail so callers can react to a specific
-            // failure (e.g. prompt for a Hub token) instead of parsing prose.
+            // Carried so callers can react to a status instead of parsing prose.
             error.status = response.status;
             error.detail = detail || "";
             throw error;
@@ -1782,9 +1788,8 @@ async function api(path, init, options = {}) {
     }
 }
 
-// A Hub repo that is private, gated, or behind a bad token fails with 401/403,
-// or with 404 when the Hub hides a private repo's existence. Only the Hub's own
-// wording distinguishes those from an ordinary missing-repo error.
+// 404 is included because the Hub hides a private repo's existence. Only its
+// wording separates that from an ordinary missing repo.
 function isHubTokenError(error) {
     if (!error || (error.status !== 401 && error.status !== 403 && error.status !== 404)) {
         return false;
@@ -1797,7 +1802,7 @@ function isHubTokenError(error) {
     );
 }
 
-// Resolves to true when a token was submitted, so the caller can retry.
+// Resolves true when a token was submitted.
 function promptForHubToken(reason) {
     const modal = byId("hub-token-modal");
     const input = byId("hub-token-input");
@@ -1852,9 +1857,7 @@ function promptForHubToken(reason) {
     });
 }
 
-// Run a Hub request; on an auth failure, prompt for a token and run it once
-// more. The retry is deliberate rather than automatic on every error, so a
-// genuinely missing repo still fails fast.
+// Retry only on auth failure, so a genuinely missing repo still fails fast.
 async function withHubToken(attempt) {
     try {
         return await attempt();
@@ -5201,6 +5204,20 @@ function renderTraining() {
             : "Loading dataset metadata…";
 
         if (usingHub) {
+            const hubRevision = (state.trainingDatasetRevision || "").trim();
+            const hubLoading = state.trainingHubLoadState === "loading";
+            // Only meta/ is fetched, so "Loading" rather than "Downloading".
+            const hubLoadLabel = hubLoading
+                ? "Loading…"
+                : (state.trainingHubLoadState === "loaded" ? "Loaded" : "Load");
+            const hubLoaded = state.trainingHubLoadState === "loaded"
+                && state.trainingHubLoadedRepoId === hubRepoId
+                && state.trainingHubLoadedRevision === hubRevision
+                && !state.trainingDatasetVerdictWarning;
+            const hubInfo = state.trainingHubDatasetInfo;
+            const hubMeta = hubInfo && hubInfo.num_episodes && hubInfo.num_frames
+                ? `${hubInfo.num_episodes.toLocaleString()} episodes · ${hubInfo.num_frames.toLocaleString()} frames`
+                : "The dataset is downloaded by the training run; only its metadata is fetched now.";
             const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
             container.innerHTML = `
                 ${headerHtml}
@@ -5212,30 +5229,63 @@ function renderTraining() {
                         <input class="rollout-hub-input" id="training-hub-revision" type="text"
                             placeholder="revision (optional)"
                             autocomplete="off" spellcheck="false">
+                        <button class="secondary-button" id="training-hub-load" type="button"
+                            ${hubLoading ? "disabled" : ""}>${escapeHtml(hubLoadLabel)}</button>
                     </div>
-                    <div class="episode-row__meta">The dataset is downloaded by the training run; only its metadata is fetched now.</div>
+                    <div class="episode-row__meta" id="training-hub-meta">${escapeHtml(hubMeta)}</div>
+                    ${state.trainingDatasetVerdictWarning ? `<p class="training-controls__state rollout-error" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdictWarning)}</p>` : ""}
+                    ${!state.trainingDatasetVerdictWarning && state.trainingDatasetVerdict ? `<p class="training-controls__state rollout-ok" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdict)}</p>` : ""}
                 </div>
                 <div class="control-bar control-bar--episode-step">
                     <button class="secondary-button" id="training-dataset-source-toggle" type="button">Use Local</button>
                 </div>
                 <div class="control-bar control-bar--floating-step-nav">
                     <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
-                    <button id="training-flow-next" type="button" ${hubRepoId ? "" : "disabled"}>Next</button>
+                    <button id="training-flow-next" type="button" ${hubLoaded ? "" : "disabled"}>Next</button>
                 </div>`;
+            // Editing either field invalidates the verdict in place: a rebuild
+            // mid-typing would steal focus.
+            const invalidateHubLoad = () => {
+                if (state.trainingHubLoadState === "idle") {
+                    return;
+                }
+                const repoChanged =
+                    state.trainingDatasetRepoId !== state.trainingHubLoadedRepoId;
+                const revisionChanged =
+                    (state.trainingDatasetRevision || "").trim()
+                    !== state.trainingHubLoadedRevision;
+                if (!repoChanged && !revisionChanged) {
+                    return;
+                }
+                state.trainingHubLoadState = "idle";
+                state.trainingHubLoadedRepoId = "";
+                state.trainingHubLoadedRevision = "";
+                state.trainingHubDatasetInfo = null;
+                state.trainingDatasetVerdict = "";
+                state.trainingDatasetVerdictWarning = "";
+                const nextBtn = byId("training-flow-next");
+                if (nextBtn) nextBtn.disabled = true;
+                const loadBtn = byId("training-hub-load");
+                if (loadBtn) loadBtn.textContent = "Load";
+                const verdict = byId("training-hub-verdict");
+                if (verdict) verdict.remove();
+            };
             const repoInput = byId("training-hub-repo");
             repoInput.value = state.trainingDatasetRepoId || "";
             repoInput.oninput = () => {
                 state.trainingDatasetRepoId = repoInput.value.trim();
-                const nextBtn = byId("training-flow-next");
-                if (nextBtn) nextBtn.disabled = !state.trainingDatasetRepoId;
+                invalidateHubLoad();
             };
             const revisionInput = byId("training-hub-revision");
             revisionInput.value = state.trainingDatasetRevision || "";
             revisionInput.oninput = () => {
                 state.trainingDatasetRevision = revisionInput.value.trim();
+                invalidateHubLoad();
             };
+            byId("training-hub-load").onclick = () => loadHubDatasetInfo();
             byId("training-dataset-source-toggle").onclick = () => {
                 state.trainingDatasetSource = "local";
+                resetHubDatasetLoad();
                 renderTraining();
             };
             byId("training-dataset-back").onclick = () => {
@@ -5293,6 +5343,7 @@ function renderTraining() {
         byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
         byId("training-dataset-source-toggle").onclick = () => {
             state.trainingDatasetSource = "hub";
+            resetHubDatasetLoad();
             renderTraining();
         };
         byId("training-dataset-back").onclick = () => {
@@ -5929,9 +5980,18 @@ function policyFieldValue(policy, field) {
     return field.name in edits ? edits[field.name] : field.default;
 }
 
+// Without the Hub branch a Hub run computes 0 steps and ships no --steps at
+// all, silently falling back to LeRobot's default.
+function trainingDatasetFrames() {
+    if (state.trainingDatasetSource === "hub") {
+        return (state.trainingHubDatasetInfo && state.trainingHubDatasetInfo.num_frames) || 0;
+    }
+    return (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+}
+
 // steps = epochs * ceil(frames / batch_size); shown live under the epochs box.
 function computeTrainingSteps(policy, editsOverride = null) {
-    const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+    const frames = trainingDatasetFrames();
     const edits = editsOverride || state.policyConfig[policy] || {};
     const batch = Number(edits.batch_size ?? 64);
     const epochs = Number(edits.epochs ?? 100);
@@ -5997,7 +6057,7 @@ function renderPolicyConfigPanel(policy, options = {}) {
         const el = byId("steps-readout");
         if (!el) return;
         const steps = computeTrainingSteps(key, edits);
-        const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+        const frames = trainingDatasetFrames();
         el.textContent = steps
             ? `= ${steps.toLocaleString()} steps (${edits.epochs ?? 100} epochs × ⌈${frames.toLocaleString()} frames / batch⌉)`
             : "load a dataset to compute steps";
@@ -6093,6 +6153,63 @@ function buildFineTuneExtraArgs() {
         }
     });
     return args;
+}
+
+// So a verdict never outlives the repo it described.
+function resetHubDatasetLoad() {
+    state.trainingHubLoadState = "idle";
+    state.trainingHubLoadedRepoId = "";
+    state.trainingHubLoadedRevision = "";
+    state.trainingHubDatasetInfo = null;
+    state.trainingDatasetVerdict = "";
+    state.trainingDatasetVerdictWarning = "";
+}
+
+// Only meta/ is fetched, so problems surface here instead of at Start.
+async function loadHubDatasetInfo() {
+    const repoId = (state.trainingDatasetRepoId || "").trim();
+    if (!repoId) {
+        showToast("Enter a HuggingFace repo id (owner/dataset)", true);
+        return;
+    }
+    const revision = (state.trainingDatasetRevision || "").trim();
+    const params = new URLSearchParams({ repo_id: repoId });
+    if (revision) {
+        params.set("revision", revision);
+    }
+    if (state.trainingMode === "fine_tune" && state.trainingCheckpointPath) {
+        params.set("checkpoint_path", state.trainingCheckpointPath);
+    }
+    state.trainingHubLoadState = "loading";
+    state.trainingHubLoadedRepoId = "";
+    state.trainingHubDatasetInfo = null;
+    state.trainingDatasetVerdict = "";
+    state.trainingDatasetVerdictWarning = "";
+    renderTraining();
+    try {
+        const info = await withHubToken(() =>
+            api(`/training/hub-dataset-info?${params.toString()}`)
+        );
+        state.trainingHubDatasetInfo = info || null;
+        state.trainingDatasetVerdict = (info && info.dataset_ok) || "";
+        state.trainingDatasetVerdictWarning = (info && info.dataset_warning) || "";
+        state.trainingHubLoadedRepoId = repoId;
+        state.trainingHubLoadedRevision = revision;
+        if (state.trainingDatasetVerdictWarning) {
+            state.trainingHubLoadState = "error";
+        } else {
+            state.trainingHubLoadState = "loaded";
+            showToast(`Loaded ${repoId}`);
+        }
+    } catch (error) {
+        state.trainingHubDatasetInfo = null;
+        state.trainingDatasetVerdict = "";
+        // detail is the server's sentence; message carries the HTTP preamble.
+        state.trainingDatasetVerdictWarning = error.detail || error.message;
+        state.trainingHubLoadState = "error";
+        showToast(error.message, true);
+    }
+    renderTraining();
 }
 
 async function startTrainingRun(outputDir) {

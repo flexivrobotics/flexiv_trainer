@@ -255,8 +255,7 @@ def test_layout_rejects_unknown_width_and_partial_named_group() -> None:
     with pytest.raises(ValueError, match="action width is 27"):
         canonical_action_names(27, ["left_arm", "right_arm"])
 
-    # A width valid for a different arm count names that mode as the fix, and
-    # states the widths that would have been inferable for the configured one.
+    # A width valid for a different arm count names that mode as the fix.
     with pytest.raises(ValueError, match="Arm mode mismatch: set dual-arm mode"):
         canonical_action_names(26, ["single_arm"])
     with pytest.raises(ValueError, match="for 1 arm are 13 or 19"):
@@ -269,8 +268,7 @@ def test_layout_rejects_unknown_width_and_partial_named_group() -> None:
 
 
 def test_layout_reports_recorded_side_mismatch() -> None:
-    # Names are recorded here, so the arm layout is read rather than inferred.
-    # A differing arm count is still the arm-mode case and names that fix.
+    # Names recorded: a differing arm count is still the arm-mode case.
     dual = canonical_action_names(26, ["left_arm", "right_arm"])
     with pytest.raises(ValueError, match="Arm mode mismatch: set dual-arm mode"):
         build_action_layout(dual, ["single_arm"])
@@ -278,9 +276,8 @@ def test_layout_reports_recorded_side_mismatch() -> None:
     with pytest.raises(ValueError, match=recorded):
         build_action_layout(dual, ["single_arm"])
 
-    # A matching count with a different side name cannot be fixed by arm mode.
-    # This recorder only ever emits "single_arm" or "left_arm"+"right_arm", so
-    # such a layout comes from a foreign checkpoint with its own naming.
+    # This recorder emits only "single_arm" or "left_arm"+"right_arm", so a
+    # different name means a foreign checkpoint -- arm mode cannot fix it.
     with pytest.raises(ValueError, match="Arm layout mismatch"):
         build_action_layout(canonical_action_names(13, ["arm"]), ["single_arm"])
 
