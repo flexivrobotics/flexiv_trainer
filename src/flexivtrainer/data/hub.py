@@ -55,6 +55,29 @@ HubKind = Literal["datasets", "checkpoints"]
 _FETCH_LOCKS: dict[str, threading.Lock] = {}
 _FETCH_LOCKS_GUARD = threading.Lock()
 
+# Token supplied at runtime by an operator, held for this process only. Kept out
+# of AppSettings deliberately: settings are persisted, and a credential typed
+# into the UI must not be written to disk.
+_SESSION_TOKEN: str | None = None
+_SESSION_TOKEN_GUARD = threading.Lock()
+
+
+def set_session_token(token: str | None) -> None:
+    """Store (or clear with ``None``) the operator-supplied token in memory."""
+    global _SESSION_TOKEN
+    normalized = token.strip() if isinstance(token, str) else None
+    with _SESSION_TOKEN_GUARD:
+        _SESSION_TOKEN = normalized or None
+
+
+def session_token() -> str | None:
+    with _SESSION_TOKEN_GUARD:
+        return _SESSION_TOKEN
+
+
+def has_session_token() -> bool:
+    return session_token() is not None
+
 
 class HubError(RuntimeError):
     """Base for Hub failures, so routes can map them to HTTP status codes."""
@@ -158,8 +181,14 @@ def hub_cache_dir(settings: AppSettings, kind: HubKind, ref: HubRef) -> Path:
 def hub_token(settings: AppSettings | None = None) -> str | None:
     """Token for private/gated repos, or ``None`` to use anonymous access.
 
-    Falls through to the ``huggingface-cli login`` cache when nothing is set.
+    A token typed into the UI wins: it is the operator's direct response to an
+    auth failure, so it must override a stale configured or environment token
+    rather than lose to one. Falls through to the ``huggingface-cli login``
+    cache when nothing is set.
     """
+    supplied = session_token()
+    if supplied:
+        return supplied
     configured = getattr(getattr(settings, "hub", None), "token", None)
     if isinstance(configured, str) and configured.strip():
         return configured.strip()

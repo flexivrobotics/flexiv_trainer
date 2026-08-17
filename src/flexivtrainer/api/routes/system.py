@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from flexivtrainer.config import EndEffectorSideConfig, RobotSerialConfig
+from flexivtrainer.data.hub import has_session_token, hub_token, set_session_token
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -40,9 +41,47 @@ class RobotConfigRequest(BaseModel):
     record_resolution: str = ""
 
 
+class HubTokenRequest(BaseModel):
+    # Empty string clears the stored token, so the UI can offer a "forget" action
+    # without a second endpoint.
+    token: str = ""
+
+
 @router.get("/summary")
 def get_system_summary(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return runtime.system_summary()
+
+
+def _hub_token_state(runtime: RuntimeManager) -> dict:
+    """Whether a token is available, never the token itself."""
+    return {
+        "session_token_set": has_session_token(),
+        # A configured or environment token means the operator may not need to
+        # type anything, so the UI can say why it is not prompting.
+        "token_available": hub_token(runtime.settings) is not None,
+    }
+
+
+@router.get("/hub-token")
+def get_hub_token_state(
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    return _hub_token_state(runtime)
+
+
+@router.put("/hub-token")
+def set_hub_token(
+    request: HubTokenRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    """Hold an operator-supplied Hub token for this server process only.
+
+    Deliberately not persisted: the token is a credential typed in response to
+    an auth failure, and writing it to the settings file would leave it in
+    plaintext on the host.
+    """
+    set_session_token(request.token)
+    return _hub_token_state(runtime)
 
 
 @router.put("/robot-config")

@@ -374,6 +374,29 @@ limitations under the License.
         </div>
     </div>
 
+    <div class="dialog-backdrop hidden" id="hub-token-modal">
+        <div class="dialog-panel dialog-panel--compact">
+            <div class="dialog-header">
+                <div>
+                    <p class="eyebrow">HuggingFace Access</p>
+                    <h3>This repository needs a token</h3>
+                </div>
+            </div>
+            <p class="hub-token-reason" id="hub-token-reason"></p>
+            <label class="field-label" for="hub-token-input">Access token</label>
+            <input class="text-input" id="hub-token-input" type="password" autocomplete="off"
+                spellcheck="false" placeholder="hf_...">
+            <p class="hub-token-note">
+                Held in memory for this server session only — never written to disk.
+                Create one at huggingface.co/settings/tokens with read access.
+            </p>
+            <div class="hub-token-actions">
+                <button class="secondary-button" id="hub-token-cancel" type="button">Cancel</button>
+                <button class="start-button" id="hub-token-submit" type="button">Save &amp; retry</button>
+            </div>
+        </div>
+    </div>
+
     <div class="fault-center hidden" id="fault-center">
         <button class="fault-toggle" id="fault-toggle" type="button" aria-label="Robot fault"
             aria-expanded="false" title="Robot fault">

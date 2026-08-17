@@ -459,16 +459,54 @@ class TestLayoutWarning:
     """The warning must state a real blocker, not a hypothetical about grippers."""
 
     def test_silent_when_names_are_known(self):
-        from flexivtrainer.api.routes.rollout import _layout_warning
+        from flexivtrainer.api.routes.rollout import _layout_ok, _layout_warning
+        from flexivtrainer.rollout.executors.waypoint import canonical_action_names
 
-        # A gripper-bearing layout is fine when the axis names are recorded.
-        assert _layout_warning(["a"] * 14, 14, ["single_arm"]) is None
+        # A gripper-bearing layout is fine when the axis names are recorded:
+        # width 14 is not canonical, but recorded names are not bound to that.
+        names = canonical_action_names(13, ["single_arm"]) + [
+            "single_arm.gripper.target_width"
+        ]
+        assert _layout_warning(names, 14, ["single_arm"]) is None
+
+        # ...and the confirmation says so without quoting canonical widths.
+        message = _layout_ok(names, 14, ["single_arm"])
+        assert message is not None
+        assert "Policy loaded successfully" in message
+        assert "canonical" not in message
 
     def test_silent_when_width_is_inferable(self):
         from flexivtrainer.api.routes.rollout import _layout_warning
 
         assert _layout_warning(None, 13, ["single_arm"]) is None
         assert _layout_warning(None, 26, ["left_arm", "right_arm"]) is None
+
+    def test_confirms_inferable_width(self):
+        from flexivtrainer.api.routes.rollout import _layout_ok
+
+        # The correct-arm-mode case reports the same facts as its warning
+        # counterpart, ending in a verdict instead of a fix.
+        message = _layout_ok(None, 26, ["left_arm", "right_arm"])
+        assert message is not None
+        assert "action width is 26" in message
+        assert "for 2 arms are 26 or 38" in message
+        assert "Arm mode matches: dual-arm" in message
+
+        # Silent when there is nothing to infer or the width is unusable.
+        assert _layout_ok(["a"] * 26, 26, ["left_arm", "right_arm"]) is None
+        assert _layout_ok(None, 26, ["single_arm"]) is None
+
+    def test_warns_on_recorded_arm_count_mismatch(self):
+        from flexivtrainer.api.routes.rollout import _layout_ok, _layout_warning
+        from flexivtrainer.rollout.executors.waypoint import canonical_action_names
+
+        # Recorded names skip width inference but still face the arm-layout
+        # check, so the pre-flight must surface that mismatch too.
+        dual = canonical_action_names(26, ["left_arm", "right_arm"])
+        message = _layout_warning(dual, 26, ["single_arm"])
+        assert message is not None
+        assert "Arm mode mismatch: set dual-arm mode" in message
+        assert _layout_ok(dual, 26, ["single_arm"]) is None
 
     def test_warns_on_arm_count_mismatch(self):
         from flexivtrainer.api.routes.rollout import _layout_warning
@@ -477,9 +515,9 @@ class TestLayoutWarning:
         # count, so the message must name it rather than blaming a gripper.
         message = _layout_warning(None, 26, ["single_arm"])
         assert message is not None
-        assert "width 26" in message
-        assert "1 arm(s)" in message
-        assert "arm mode" in message
+        assert "action width is 26" in message
+        assert "for 1 arm are 13 or 19" in message
+        assert "Arm mode mismatch: set dual-arm mode" in message
         assert "gripper" not in message.lower()
 
     def test_warns_on_unknown_gripper_width(self):
@@ -512,3 +550,48 @@ class TestHubFineTuneCheckpoint:
         assert (model_dir / "config.json").is_file()
         assert (model_dir / "model.safetensors").is_file()
         assert checkpoint_dir == model_dir
+
+
+class TestSessionHubToken:
+    """An operator-supplied token lives in memory only, and outranks the rest."""
+
+    def teardown_method(self):
+        from flexivtrainer.data.hub import set_session_token
+
+        set_session_token(None)
+
+    def test_session_token_overrides_configured_and_env(self, monkeypatch):
+        from flexivtrainer.config import AppSettings
+        from flexivtrainer.data.hub import (
+            has_session_token,
+            hub_token,
+            set_session_token,
+        )
+
+        settings = AppSettings()
+        settings.hub.token = "configured-token"
+        monkeypatch.setenv("HF_TOKEN", "env-token")
+
+        assert hub_token(settings) == "configured-token"
+        assert has_session_token() is False
+
+        # The typed token is the operator's answer to an auth failure, so a
+        # stale configured token must not win over it.
+        set_session_token("  typed-token  ")
+        assert has_session_token() is True
+        assert hub_token(settings) == "typed-token"
+
+        set_session_token("")
+        assert has_session_token() is False
+        assert hub_token(settings) == "configured-token"
+
+    def test_session_token_is_never_persisted(self):
+        from flexivtrainer.config import AppSettings
+        from flexivtrainer.data.hub import set_session_token
+
+        settings = AppSettings()
+        set_session_token("secret")
+        # It lives beside the settings object, never inside it, so dumping
+        # config to disk cannot leak the credential.
+        assert settings.hub.token is None
+        assert "secret" not in settings.model_dump_json()

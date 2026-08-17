@@ -171,6 +171,9 @@ def rollout_checkpoint_info(
         "layout_warning": _layout_warning(
             action_names, action_dim, runtime.get_active_sides()
         ),
+        # Mirror of layout_warning for the inferable case, so a correct arm mode
+        # is confirmed out loud instead of showing nothing at all.
+        "layout_ok": _layout_ok(action_names, action_dim, runtime.get_active_sides()),
     }
 
 
@@ -178,22 +181,56 @@ def _layout_warning(
     action_names: list[str] | None, action_dim: int | None, sides: list[str]
 ) -> str | None:
     """Explain up front why a rollout would refuse to start, or return None."""
-    if action_names is not None or action_dim is None or not sides:
+    if action_dim is None or not sides:
         return None
 
-    from flexivtrainer.rollout.executors.waypoint import canonical_action_names
+    from flexivtrainer.rollout.executors.waypoint import (
+        build_action_layout,
+        canonical_action_names,
+    )
 
+    # Recorded names skip inference but still face the arm-layout check, so
+    # both paths are exercised here rather than only the inferred one.
     try:
-        canonical_action_names(action_dim, sides)
-    except ValueError as exc:
-        return (
-            f"{exc}. This checkpoint does not record its action-axis names, so "
-            f"the layout cannot be inferred for the {len(sides)} arm(s) "
-            "currently configured. Check the arm mode matches the policy, or "
-            "supply action_names when starting the rollout."
+        names = (
+            canonical_action_names(action_dim, sides)
+            if action_names is None
+            else action_names
         )
-    # Inferable, so it will start; say so rather than leaving a vague caveat.
+        build_action_layout(names, sides, action_dim)
+    except ValueError as exc:
+        return f"{exc}."
+    # Usable, so it will start; say so rather than leaving a vague caveat.
     return None
+
+
+def _layout_ok(
+    action_names: list[str] | None, action_dim: int | None, sides: list[str]
+) -> str | None:
+    """Confirm a usable layout, structured like its warning counterpart."""
+    if action_dim is None or not sides:
+        return None
+
+    from flexivtrainer.rollout.executors.waypoint import (
+        build_action_layout,
+        canonical_action_names,
+        layout_confirmation,
+        recorded_layout_confirmation,
+    )
+
+    # Run the same validation the rollout will, so this never claims a match
+    # that the arm-layout check would go on to reject.
+    try:
+        if action_names is None:
+            names = canonical_action_names(action_dim, sides)
+            confirmation = layout_confirmation(action_dim, len(sides))
+        else:
+            names = action_names
+            confirmation = recorded_layout_confirmation(action_dim, len(sides))
+        build_action_layout(names, sides, action_dim)
+    except ValueError:
+        return None
+    return f"{confirmation}."
 
 
 @router.post("/stop")

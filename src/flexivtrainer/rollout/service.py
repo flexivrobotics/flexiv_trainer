@@ -23,9 +23,8 @@ from functools import partial
 from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
-from flexivtrainer.data.hub import ACTION_NAMES_FILENAME
 from flexivtrainer.jobs.train_policy import _encode_ui_log
-from flexivtrainer.observability import describe_exception, warn
+from flexivtrainer.observability import describe_exception, ok, warn
 from flexivtrainer.policies import act as act_policy
 from flexivtrainer.policies import bspline_diffusion as bspline_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
@@ -49,6 +48,8 @@ from flexivtrainer.rollout.executors.bspline import (
 from flexivtrainer.rollout.executors.waypoint import (
     build_action_layout,
     canonical_action_names,
+    layout_confirmation,
+    recorded_layout_confirmation,
 )
 from flexivtrainer.rollout.hardware import _default_robot_factory
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
@@ -469,15 +470,33 @@ class RolloutService:
                 )
             )
             if waypoint_layout_inferred:
+                confirmation = layout_confirmation(waypoint_action_dim, len(sides))
+                # OK, not WARNING: the width matched the configured arm count, so
+                # this confirms the inference rather than cautioning about it.
                 self._logs.append(
                     _encode_ui_log(
-                        "WARNING",
+                        "OK",
                         "ROLLOUT",
                         "Waypoint action layout inferred",
-                        f"output_dim={waypoint_action_dim} sides={'+'.join(sides)}; "
-                        "checkpoint training dataset metadata was unavailable",
+                        f"{confirmation}; sides={'+'.join(sides)}",
                     )
                 )
+                ok("Waypoint action layout inferred", confirmation)
+            else:
+                # Names were recorded, so the layout was read rather than
+                # guessed. Confirm it in the same shape as the inferred case.
+                confirmation = recorded_layout_confirmation(
+                    waypoint_action_dim, len(sides)
+                )
+                self._logs.append(
+                    _encode_ui_log(
+                        "OK",
+                        "ROLLOUT",
+                        "Waypoint action layout loaded",
+                        f"{confirmation}; sides={'+'.join(sides)}",
+                    )
+                )
+                ok("Waypoint action layout loaded", confirmation)
             if waypoint_gripper_sides:
                 self._logs.append(
                     _encode_ui_log(
@@ -681,11 +700,7 @@ class RolloutService:
                 try:
                     names = canonical_action_names(action_dim, sides)
                 except ValueError as exc:
-                    raise ValueError(
-                        f"{exc}. The checkpoint has no {ACTION_NAMES_FILENAME} "
-                        "sidecar and its training dataset is unavailable, so "
-                        "supply action_names explicitly when starting the rollout."
-                    ) from exc
+                    raise ValueError(f"{exc}.") from exc
             layout = build_action_layout(names, sides, action_dim)
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc

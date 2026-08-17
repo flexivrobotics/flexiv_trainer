@@ -1310,7 +1310,7 @@ def test_unknown_waypoint_action_width_fails_before_robot_initialization(
         resolve_device=lambda configured: "cpu",
     )
 
-    with pytest.raises(RuntimeError, match="Cannot infer waypoint"):
+    with pytest.raises(RuntimeError, match="action width is 27"):
         service.start(_checkpoint(tmp_path))
 
     assert initialized == []

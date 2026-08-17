@@ -72,7 +72,9 @@ def test_loading_state_renders_before_the_request() -> None:
 
     loading = body.index('state.rolloutHubLoadState = "loading"')
     render = body.index("renderRollout();", loading)
-    request = body.index("await api(")
+    # The fetch is wrapped for the token-retry flow, so match the await itself
+    # rather than a bare api( call.
+    request = body.index("await withHubToken(")
     assert loading < render < request
 
 
@@ -168,3 +170,72 @@ def test_training_dataset_hub_controls_exist() -> None:
     assert 'id="training-hub-repo"' in source
     assert 'dataset_source: "hub"' in source
     assert 'dataset_source: "local", dataset_path: state.mergedDatasetPath' in source
+
+
+def test_hub_token_prompt_is_wired() -> None:
+    # The prompt must exist in the markup and be reachable from every Hub call,
+    # or an operator hitting a private repo has no in-app way to recover.
+    html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for element_id in (
+        "hub-token-modal",
+        "hub-token-input",
+        "hub-token-reason",
+        "hub-token-submit",
+        "hub-token-cancel",
+    ):
+        assert f'id="{element_id}"' in html
+        assert f'byId("{element_id}")' in source
+    # A credential must never be a plain text field.
+    assert 'id="hub-token-input" type="password"' in html
+
+    # api() has to expose the status so the token case can be told apart from
+    # an ordinary failure.
+    assert "error.status = response.status" in source
+    assert "error.detail = detail" in source
+
+    # Every Hub-fetching call retries behind the prompt.
+    assert source.count("withHubToken(") >= 4
+    assert 'api("/system/hub-token"' in source
+
+
+def test_hub_token_prompt_only_triggers_on_auth_failure() -> None:
+    # Prompting on any error would ask for a token when the repo simply does
+    # not exist, so the trigger is pinned to the Hub's auth wording.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    start = source.index("function isHubTokenError(")
+    body = source[start : source.index("function promptForHubToken(", start)]
+
+    assert "no token is configured" in body
+    assert "is gated" in body
+    assert "authentication failed" in body
+    for status in ("401", "403", "404"):
+        assert status in body
+
+
+def test_ui_renders_layout_ok_verdict() -> None:
+    # The server returns layout_ok for a usable checkpoint. Reading only
+    # layout_warning left a successful load with nothing on screen at all.
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "info.layout_ok" in source
+    # Both loaders (local path and Hub repo) must set it, and both must clear
+    # it on failure, or a stale verdict outlives the checkpoint it described.
+    assert source.count("state.rolloutActionNamesOk = (info && info.layout_ok)") == 2
+    assert source.count('state.rolloutActionNamesOk = ""') >= 3
+    # It has to take part in the render key or the panel never repaints.
+    assert 'state.rolloutActionNamesOk || ""' in source
+    # A warning outranks the confirmation; they must never show together.
+    assert (
+        "!state.rolloutActionNamesWarning && state.rolloutActionNamesOk" in source
+    )
+
+
+def test_layout_ok_renders_green_not_as_an_error() -> None:
+    source = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (WEB_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    assert "rollout-ok" in source
+    assert ".rollout-ok {" in styles
+    assert "color: var(--success);" in styles.split(".rollout-ok {", 1)[1][:120]

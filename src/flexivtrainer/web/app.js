@@ -42,6 +42,9 @@ const state = {
     // Set when a checkpoint carries no recoverable action layout, so the user
     // is warned before starting rather than at the failure.
     rolloutActionNamesWarning: "",
+    // Positive counterpart to the warning: the server's confirmation that the
+    // checkpoint's action layout is usable with the configured arm mode.
+    rolloutActionNamesOk: "",
     // "idle" | "loading" | "loaded" | "error". The Hub fetch is synchronous and
     // a policy can be gigabytes, so the button has to show it is working.
     rolloutHubLoadState: "idle",
@@ -1759,7 +1762,12 @@ async function api(path, init, options = {}) {
         if (!response.ok) {
             const detail = await readErrorDetail(response);
             const baseMessage = `Request failed: ${response.status} ${response.statusText}`;
-            throw new Error(detail ? `${baseMessage} - ${detail}` : baseMessage);
+            const error = new Error(detail ? `${baseMessage} - ${detail}` : baseMessage);
+            // Carry the raw status and detail so callers can react to a specific
+            // failure (e.g. prompt for a Hub token) instead of parsing prose.
+            error.status = response.status;
+            error.detail = detail || "";
+            throw error;
         }
         return response.json();
     } catch (error) {
@@ -1771,6 +1779,94 @@ async function api(path, init, options = {}) {
         if (timer !== null) {
             window.clearTimeout(timer);
         }
+    }
+}
+
+// A Hub repo that is private, gated, or behind a bad token fails with 401/403,
+// or with 404 when the Hub hides a private repo's existence. Only the Hub's own
+// wording distinguishes those from an ordinary missing-repo error.
+function isHubTokenError(error) {
+    if (!error || (error.status !== 401 && error.status !== 403 && error.status !== 404)) {
+        return false;
+    }
+    const detail = String(error.detail || error.message || "").toLowerCase();
+    return (
+        detail.includes("no token is configured") ||
+        detail.includes("is gated") ||
+        detail.includes("authentication failed")
+    );
+}
+
+// Resolves to true when a token was submitted, so the caller can retry.
+function promptForHubToken(reason) {
+    const modal = byId("hub-token-modal");
+    const input = byId("hub-token-input");
+    if (!modal || !input) {
+        return Promise.resolve(false);
+    }
+    byId("hub-token-reason").textContent =
+        reason || "This repository requires a HuggingFace access token.";
+    input.value = "";
+    modal.classList.remove("hidden");
+    window.setTimeout(() => input.focus(), 0);
+
+    return new Promise((resolve) => {
+        const close = (result) => {
+            modal.classList.add("hidden");
+            byId("hub-token-submit").removeEventListener("click", onSubmit);
+            byId("hub-token-cancel").removeEventListener("click", onCancel);
+            input.removeEventListener("keydown", onKeyDown);
+            // Never leave the credential sitting in the DOM after the prompt.
+            input.value = "";
+            resolve(result);
+        };
+        const onSubmit = async () => {
+            const token = input.value.trim();
+            if (!token) {
+                showToast("Enter an access token", true);
+                return;
+            }
+            try {
+                await api("/system/hub-token", {
+                    method: "PUT",
+                    body: JSON.stringify({ token }),
+                });
+                close(true);
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        };
+        const onCancel = () => close(false);
+        const onKeyDown = (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                onSubmit();
+            } else if (event.key === "Escape") {
+                event.preventDefault();
+                onCancel();
+            }
+        };
+        byId("hub-token-submit").addEventListener("click", onSubmit);
+        byId("hub-token-cancel").addEventListener("click", onCancel);
+        input.addEventListener("keydown", onKeyDown);
+    });
+}
+
+// Run a Hub request; on an auth failure, prompt for a token and run it once
+// more. The retry is deliberate rather than automatic on every error, so a
+// genuinely missing repo still fails fast.
+async function withHubToken(attempt) {
+    try {
+        return await attempt();
+    } catch (error) {
+        if (!isHubTokenError(error)) {
+            throw error;
+        }
+        const supplied = await promptForHubToken(error.detail || error.message);
+        if (!supplied) {
+            throw error;
+        }
+        return attempt();
     }
 }
 
@@ -6006,31 +6102,34 @@ async function startTrainingRun(outputDir) {
     try {
         state.trainingStep = runStep;
         renderTraining();
-        state.trainingStatus = await api("/training/start", {
-            method: "POST",
-            body: JSON.stringify({
-                ...(state.trainingDatasetSource === "hub"
-                    ? {
-                        dataset_source: "hub",
-                        dataset_repo_id: (state.trainingDatasetRepoId || "").trim(),
-                        ...((state.trainingDatasetRevision || "").trim()
-                            ? { dataset_revision: state.trainingDatasetRevision.trim() }
-                            : {}),
-                    }
-                    : { dataset_source: "local", dataset_path: state.mergedDatasetPath }),
-                output_dir: outputDir,
-                policy_type: state.trainingMode === "fine_tune"
-                    ? state.trainingCheckpointInfo?.policy_type
-                    : state.selectedPolicy,
-                extra_args: state.trainingMode === "fine_tune"
-                    ? buildFineTuneExtraArgs()
-                    : buildTrainingExtraArgs(state.selectedPolicy),
-                training_mode: state.trainingMode || "new",
-                checkpoint_path: state.trainingMode === "fine_tune"
-                    ? state.trainingCheckpointPath
-                    : null,
-            }),
-        });
+        const trainingPayload = {
+            ...(state.trainingDatasetSource === "hub"
+                ? {
+                    dataset_source: "hub",
+                    dataset_repo_id: (state.trainingDatasetRepoId || "").trim(),
+                    ...((state.trainingDatasetRevision || "").trim()
+                        ? { dataset_revision: state.trainingDatasetRevision.trim() }
+                        : {}),
+                }
+                : { dataset_source: "local", dataset_path: state.mergedDatasetPath }),
+            output_dir: outputDir,
+            policy_type: state.trainingMode === "fine_tune"
+                ? state.trainingCheckpointInfo?.policy_type
+                : state.selectedPolicy,
+            extra_args: state.trainingMode === "fine_tune"
+                ? buildFineTuneExtraArgs()
+                : buildTrainingExtraArgs(state.selectedPolicy),
+            training_mode: state.trainingMode || "new",
+            checkpoint_path: state.trainingMode === "fine_tune"
+                ? state.trainingCheckpointPath
+                : null,
+        };
+        state.trainingStatus = await withHubToken(() =>
+            api("/training/start", {
+                method: "POST",
+                body: JSON.stringify(trainingPayload),
+            })
+        );
         // Register the self-healing poller before rendering the initial server
         // snapshot. Even if rendering fails, the next status tick can recover.
         startTrainingPolling();
@@ -6923,10 +7022,12 @@ function openCheckpointBrowser() {
                 state.rolloutTaskText = (info && info.task) || "";
                 state.rolloutRequiresTask = !(info && info.requires_task === false);
                 state.rolloutActionNamesWarning = (info && info.layout_warning) || "";
+                state.rolloutActionNamesOk = (info && info.layout_ok) || "";
             } catch (error) {
                 state.rolloutTaskText = "";
                 state.rolloutRequiresTask = true;
                 state.rolloutActionNamesWarning = "";
+                state.rolloutActionNamesOk = "";
             }
             closeBrowser();
             renderRollout();
@@ -6984,17 +7085,21 @@ async function loadHubCheckpointInfo() {
     state.rolloutHubLoadedRepoId = "";
     renderRollout();
     try {
-        const info = await api(`/rollout/checkpoint-info?${params.toString()}`);
+        const info = await withHubToken(() =>
+            api(`/rollout/checkpoint-info?${params.toString()}`)
+        );
         state.rolloutTaskText = (info && info.task) || "";
         state.rolloutRequiresTask = !(info && info.requires_task === false);
         // The server compares the checkpoint's action width against the active
         // arm count, so it reports a real blocker rather than a hypothetical.
         state.rolloutActionNamesWarning = (info && info.layout_warning) || "";
+        state.rolloutActionNamesOk = (info && info.layout_ok) || "";
         state.rolloutHubLoadState = "loaded";
         state.rolloutHubLoadedRepoId = repoId;
         showToast(`Loaded ${repoId}`);
     } catch (error) {
         state.rolloutActionNamesWarning = "";
+        state.rolloutActionNamesOk = "";
         state.rolloutHubLoadState = "error";
         showToast(error.message, true);
     }
@@ -7013,10 +7118,12 @@ async function startRolloutRun() {
     const payload = useHub
         ? { source: "hub", repo_id: repoId, task, ...(revision ? { revision } : {}) }
         : { source: "local", checkpoint_path: checkpoint, task };
-    state.rolloutStatus = await api("/rollout/start", {
-        method: "POST",
-        body: JSON.stringify(payload),
-    });
+    state.rolloutStatus = await withHubToken(() =>
+        api("/rollout/start", {
+            method: "POST",
+            body: JSON.stringify(payload),
+        })
+    );
     renderRollout();
 }
 
@@ -7144,6 +7251,7 @@ function renderRollout() {
         // Without these the local/Hub toggle changes state but the guard above
         // returns early, so the panel never redraws and the click looks dead.
         state.rolloutCheckpointSource, state.rolloutActionNamesWarning || "",
+        state.rolloutActionNamesOk || "",
         state.rolloutHubLoadState,
     ].join("|");
     if (container.dataset.renderKey === renderKey) {
@@ -7220,6 +7328,7 @@ function renderRollout() {
                     }
                     ${state.rolloutCheckpointSource !== "hub" && checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
                     ${state.rolloutActionNamesWarning ? `<p class="training-controls__state rollout-error">${escapeHtml(state.rolloutActionNamesWarning)}</p>` : ""}
+                    ${!state.rolloutActionNamesWarning && state.rolloutActionNamesOk ? `<p class="training-controls__state rollout-ok">${escapeHtml(state.rolloutActionNamesOk)}</p>` : ""}
                     <label class="field-label rollout-task-label" for="rollout-task">Task Instruction</label>
                     <textarea class="rollout-task-input" id="rollout-task" rows="3"
                         placeholder="${state.rolloutRequiresTask ? 'Task instruction (optional)' : 'This policy does not take a language input'}"
@@ -7264,6 +7373,7 @@ function renderRollout() {
             state.rolloutCheckpointSource =
                 state.rolloutCheckpointSource === "hub" ? "local" : "hub";
             state.rolloutActionNamesWarning = "";
+            state.rolloutActionNamesOk = "";
             state.rolloutHubLoadState = "idle";
             state.rolloutHubLoadedRepoId = "";
             renderRollout();
