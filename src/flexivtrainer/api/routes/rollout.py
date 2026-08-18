@@ -182,22 +182,12 @@ def _layout_warning(
     if action_dim is None or not sides:
         return None
 
-    from flexivtrainer.rollout.executors.waypoint import (
-        build_action_layout,
-        canonical_action_names,
-    )
+    from flexivtrainer.rollout.executors.waypoint import layout_problem
 
-    # Recorded names skip inference but still face the arm-layout check.
-    try:
-        names = (
-            canonical_action_names(action_dim, sides)
-            if action_names is None
-            else action_names
-        )
-        build_action_layout(names, sides, action_dim)
-    except ValueError as exc:
-        return f"{exc}."
-    return None
+    # This string is returned to an HTTP client, so it is composed from the
+    # arguments above rather than from caught exception text.
+    problem = layout_problem(action_names, action_dim, sides)
+    return f"{problem}." if problem else None
 
 
 def _layout_ok(

@@ -526,6 +526,38 @@ class TestLayoutWarning:
         assert _layout_warning(None, None, ["single_arm"]) is None
         assert _layout_warning(None, 26, []) is None
 
+    def test_warning_never_echoes_exception_text(self):
+        # CodeQL py/stack-trace-exposure: this string is returned in an HTTP
+        # response, so it must be composed from the caller's own values rather
+        # than from a caught exception.
+        import ast
+        import inspect
+        import textwrap
+
+        from flexivtrainer.api.routes import rollout
+
+        source = textwrap.dedent(inspect.getsource(rollout._layout_warning))
+        assert "layout_problem" in source
+        # No exception is caught here, so none can reach the response body.
+        handlers = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.ExceptHandler)
+        ]
+        assert handlers == []
+
+    def test_layout_problem_messages_are_unchanged(self):
+        # The wording moved out of the exception path; it must not regress.
+        from flexivtrainer.rollout.executors.waypoint import (
+            canonical_action_names,
+            layout_problem,
+        )
+
+        assert layout_problem(None, 26, ["left_arm", "right_arm"]) is None
+        dual = canonical_action_names(26, ["left_arm", "right_arm"])
+        assert "set dual-arm mode" in layout_problem(dual, 26, ["single_arm"])
+        assert "Supply action_names" in layout_problem(None, 15, ["single_arm"])
+
 
 class TestHubFineTuneCheckpoint:
     def test_requires_weights(self, tmp_path, monkeypatch):

@@ -119,10 +119,8 @@ def _arm_count_text(arm_count: int) -> str:
 
 def _canonical_widths_text(arm_count: int) -> str:
     """The two inferable widths for an arm count, as ``13 or 19``."""
-    return (
-        f"{arm_count * (_POSE_DIM + _TWIST_DIM)} or "
-        f"{arm_count * (_POSE_DIM + _TWIST_DIM + _WRENCH_DIM)}"
-    )
+    inferable, with_wrench = _canonical_widths(arm_count)
+    return f"{inferable} or {with_wrench}"
 
 
 def _sides_hint(checkpoint_sides: list[str], active_sides: list[str]) -> str:
@@ -150,6 +148,27 @@ def _sides_hint(checkpoint_sides: list[str], active_sides: list[str]) -> str:
         f"{preamble}. Arm layout mismatch: the checkpoint was trained for "
         "different arms than the ones configured"
     )
+
+
+def _canonical_widths(arm_count: int) -> tuple[int, int]:
+    """The two inferable action widths for an arm count."""
+    return (
+        arm_count * (_POSE_DIM + _TWIST_DIM),
+        arm_count * (_POSE_DIM + _TWIST_DIM + _WRENCH_DIM),
+    )
+
+
+def _pose_sides(action_names: list[str]) -> list[str]:
+    """Arm sides named by a flat action schema, in first-seen order."""
+    marker = ".tcp_pose."
+    sides: list[str] = []
+    for name in action_names:
+        if marker not in name:
+            continue
+        side = name.split(marker, 1)[0]
+        if side not in sides:
+            sides.append(side)
+    return sides
 
 
 def canonical_action_names(action_dim: int, sides: list[str]) -> list[str]:
@@ -189,14 +208,7 @@ def build_action_layout(
             f"output={expected_dim} names={len(action_names)}"
         )
 
-    pose_sides: list[str] = []
-    marker = ".tcp_pose."
-    for name in action_names:
-        if marker not in name:
-            continue
-        side = name.split(marker, 1)[0]
-        if side not in pose_sides:
-            pose_sides.append(side)
+    pose_sides = _pose_sides(action_names)
     if pose_sides != sides:
         raise ValueError(_sides_hint(pose_sides, sides))
 
@@ -274,6 +286,41 @@ def build_action_layout(
             "unsupported"
         )
     return layout
+
+
+def layout_problem(
+    action_names: list[str] | None, action_dim: int, sides: list[str]
+) -> str | None:
+    """Why a layout is unusable for the configured arms, or None when it is fine.
+
+    Negative counterpart to :func:`layout_confirmation`. Every message is built
+    from the caller's own values rather than from a caught exception, so an API
+    can report the cause without echoing internal error text back to a client.
+    """
+    if not sides:
+        return None
+    if action_names is None:
+        if action_dim not in _canonical_widths(len(sides)):
+            return _layout_hint(action_dim, len(sides))
+        names = canonical_action_names(action_dim, sides)
+    else:
+        names = action_names
+
+    checkpoint_sides = _pose_sides(names)
+    if checkpoint_sides != sides:
+        return _sides_hint(checkpoint_sides, sides)
+
+    try:
+        build_action_layout(names, sides, action_dim)
+    except ValueError as exc:
+        # Whatever remains is a schema fault in a foreign checkpoint. Keep the
+        # specifics in the server log instead of the response body.
+        warn("Rollout action schema is unusable", describe_exception(exc))
+        return (
+            "The checkpoint action schema is not usable with the configured "
+            "arms; see the server log for details"
+        )
+    return None
 
 
 def normalize_pose_quaternion(pose: list[float]) -> list[float]:
