@@ -34,6 +34,21 @@ const state = {
     // service status snapshot, and its device selection (reuses the training
     // device probe/state on the backend).
     rolloutCheckpointPath: "",
+    // "local" browses the filesystem; "hub" takes an owner/model repo id. The
+    // two never share an input, so a repo id cannot reach a path resolver.
+    rolloutCheckpointSource: "local",
+    rolloutCheckpointRepoId: "",
+    rolloutCheckpointRevision: "",
+    // Set when a checkpoint carries no recoverable action layout, so the user
+    // is warned before starting rather than at the failure.
+    rolloutActionNamesWarning: "",
+    // Positive counterpart to the warning above.
+    rolloutActionNamesOk: "",
+    // "idle" | "loading" | "loaded" | "error". The Hub fetch is synchronous and
+    // a policy can be gigabytes, so the button has to show it is working.
+    rolloutHubLoadState: "idle",
+    // Repo the current "loaded" state belongs to, so editing the id resets it.
+    rolloutHubLoadedRepoId: "",
     rolloutTaskText: "",
     rolloutRequiresTask: true,
     rolloutStatus: null,
@@ -70,6 +85,19 @@ const state = {
     mergedScopeCache: {},
     // Training page state
     mergedDatasetPath: "",
+    // "local" uses mergedDatasetPath; "hub" uses the repo id below. Kept on
+    // separate fields so a repo id never reaches the path resolver.
+    trainingDatasetSource: "local",
+    trainingDatasetRepoId: "",
+    trainingDatasetRevision: "",
+    // "idle" | "loading" | "loaded" | "error", mirroring rolloutHubLoadState.
+    // The loaded repo id and revision are kept so editing either invalidates it.
+    trainingHubLoadState: "idle",
+    trainingHubLoadedRepoId: "",
+    trainingHubLoadedRevision: "",
+    trainingHubDatasetInfo: null,
+    trainingDatasetVerdict: "",
+    trainingDatasetVerdictWarning: "",
     mergedDatasetPreview: null,
     mergedDatasetSeries: null,
     mergedDatasetFrame: 0,
@@ -1741,7 +1769,11 @@ async function api(path, init, options = {}) {
         if (!response.ok) {
             const detail = await readErrorDetail(response);
             const baseMessage = `Request failed: ${response.status} ${response.statusText}`;
-            throw new Error(detail ? `${baseMessage} - ${detail}` : baseMessage);
+            const error = new Error(detail ? `${baseMessage} - ${detail}` : baseMessage);
+            // Carried so callers can react to a status instead of parsing prose.
+            error.status = response.status;
+            error.detail = detail || "";
+            throw error;
         }
         return response.json();
     } catch (error) {
@@ -1753,6 +1785,91 @@ async function api(path, init, options = {}) {
         if (timer !== null) {
             window.clearTimeout(timer);
         }
+    }
+}
+
+// 404 is included because the Hub hides a private repo's existence. Only its
+// wording separates that from an ordinary missing repo.
+function isHubTokenError(error) {
+    if (!error || (error.status !== 401 && error.status !== 403 && error.status !== 404)) {
+        return false;
+    }
+    const detail = String(error.detail || error.message || "").toLowerCase();
+    return (
+        detail.includes("no token is configured") ||
+        detail.includes("is gated") ||
+        detail.includes("authentication failed")
+    );
+}
+
+// Resolves true when a token was submitted.
+function promptForHubToken(reason) {
+    const modal = byId("hub-token-modal");
+    const input = byId("hub-token-input");
+    if (!modal || !input) {
+        return Promise.resolve(false);
+    }
+    byId("hub-token-reason").textContent =
+        reason || "This repository requires a HuggingFace access token.";
+    input.value = "";
+    modal.classList.remove("hidden");
+    window.setTimeout(() => input.focus(), 0);
+
+    return new Promise((resolve) => {
+        const close = (result) => {
+            modal.classList.add("hidden");
+            byId("hub-token-submit").removeEventListener("click", onSubmit);
+            byId("hub-token-cancel").removeEventListener("click", onCancel);
+            input.removeEventListener("keydown", onKeyDown);
+            // Never leave the credential sitting in the DOM after the prompt.
+            input.value = "";
+            resolve(result);
+        };
+        const onSubmit = async () => {
+            const token = input.value.trim();
+            if (!token) {
+                showToast("Enter an access token", true);
+                return;
+            }
+            try {
+                await api("/system/hub-token", {
+                    method: "PUT",
+                    body: JSON.stringify({ token }),
+                });
+                close(true);
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        };
+        const onCancel = () => close(false);
+        const onKeyDown = (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                onSubmit();
+            } else if (event.key === "Escape") {
+                event.preventDefault();
+                onCancel();
+            }
+        };
+        byId("hub-token-submit").addEventListener("click", onSubmit);
+        byId("hub-token-cancel").addEventListener("click", onCancel);
+        input.addEventListener("keydown", onKeyDown);
+    });
+}
+
+// Retry only on auth failure, so a genuinely missing repo still fails fast.
+async function withHubToken(attempt) {
+    try {
+        return await attempt();
+    } catch (error) {
+        if (!isHubTokenError(error)) {
+            throw error;
+        }
+        const supplied = await promptForHubToken(error.detail || error.message);
+        if (!supplied) {
+            throw error;
+        }
+        return attempt();
     }
 }
 
@@ -5010,6 +5127,10 @@ function renderTraining() {
     const checkpointStep = isFineTune ? 1 : null;
     const datasetStep = isFineTune ? 2 : 1;
     const previewStep = isFineTune ? 3 : 2;
+    // A Hub dataset has only its metadata locally, so there are no frames to
+    // preview. Step over that page instead of showing an empty viewer.
+    const usingHubDataset = state.trainingDatasetSource === "hub";
+    const stepAfterDataset = usingHubDataset ? previewStep + 1 : previewStep;
     const configStep = isFineTune ? 4 : 3;
     const runStep = isFineTune ? 5 : 4;
     // The playback bar (and its bottom-padding reservation) only appears on
@@ -5071,12 +5192,116 @@ function renderTraining() {
     }
 
     if (state.trainingStep === datasetStep) {
-        const loaded = !!state.mergedDatasetPath;
-        const datasetName = loaded ? state.mergedDatasetPath.split("/").pop() : "";
+        const usingHub = state.trainingDatasetSource === "hub";
+        const hubRepoId = (state.trainingDatasetRepoId || "").trim();
+        const loaded = usingHub ? !!hubRepoId : !!state.mergedDatasetPath;
+        const datasetName = usingHub
+            ? hubRepoId
+            : (loaded ? state.mergedDatasetPath.split("/").pop() : "");
         const preview = state.mergedDatasetPreview;
         const meta = preview
             ? `${(preview.num_episodes || 0).toLocaleString()} episodes · ${(preview.num_frames || 0).toLocaleString()} frames`
             : "Loading dataset metadata…";
+
+        if (usingHub) {
+            const hubRevision = (state.trainingDatasetRevision || "").trim();
+            const hubLoading = state.trainingHubLoadState === "loading";
+            // Only meta/ is fetched, so "Loading" rather than "Downloading".
+            const hubLoadLabel = hubLoading
+                ? "Loading…"
+                : (state.trainingHubLoadState === "loaded" ? "Loaded" : "Load");
+            const hubLoaded = state.trainingHubLoadState === "loaded"
+                && state.trainingHubLoadedRepoId === hubRepoId
+                && state.trainingHubLoadedRevision === hubRevision
+                && !state.trainingDatasetVerdictWarning;
+            const hubInfo = state.trainingHubDatasetInfo;
+            const hubMeta = hubInfo && hubInfo.num_episodes && hubInfo.num_frames
+                ? `${hubInfo.num_episodes.toLocaleString()} episodes · ${hubInfo.num_frames.toLocaleString()} frames`
+                : "The dataset is downloaded by the training run; only its metadata is fetched now.";
+            const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
+            container.innerHTML = `
+                ${headerHtml}
+                <div class="merged-dataset-entry">
+                    <div class="rollout-hub-fields">
+                        <input class="rollout-hub-input" id="training-hub-repo" type="text"
+                            placeholder="owner/dataset (e.g. lerobot/pusht)"
+                            autocomplete="off" spellcheck="false">
+                        <input class="rollout-hub-input" id="training-hub-revision" type="text"
+                            placeholder="revision (optional)"
+                            autocomplete="off" spellcheck="false">
+                        <button class="secondary-button" id="training-hub-load" type="button"
+                            ${hubLoading ? "disabled" : ""}>${escapeHtml(hubLoadLabel)}</button>
+                    </div>
+                    <div class="episode-row__meta" id="training-hub-meta">${escapeHtml(hubMeta)}</div>
+                    ${state.trainingDatasetVerdictWarning ? `<p class="training-controls__state rollout-error" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdictWarning)}</p>` : ""}
+                    ${!state.trainingDatasetVerdictWarning && state.trainingDatasetVerdict ? `<p class="training-controls__state rollout-ok" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdict)}</p>` : ""}
+                </div>
+                <div class="control-bar control-bar--episode-step">
+                    <button class="secondary-button" id="training-dataset-source-toggle" type="button">Use Local</button>
+                </div>
+                <div class="control-bar control-bar--floating-step-nav">
+                    <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
+                    <button id="training-flow-next" type="button" ${hubLoaded ? "" : "disabled"}>Next</button>
+                </div>`;
+            // Editing either field invalidates the verdict in place: a rebuild
+            // mid-typing would steal focus.
+            const invalidateHubLoad = () => {
+                if (state.trainingHubLoadState === "idle") {
+                    return;
+                }
+                const repoChanged =
+                    state.trainingDatasetRepoId !== state.trainingHubLoadedRepoId;
+                const revisionChanged =
+                    (state.trainingDatasetRevision || "").trim()
+                    !== state.trainingHubLoadedRevision;
+                if (!repoChanged && !revisionChanged) {
+                    return;
+                }
+                state.trainingHubLoadState = "idle";
+                state.trainingHubLoadedRepoId = "";
+                state.trainingHubLoadedRevision = "";
+                state.trainingHubDatasetInfo = null;
+                state.trainingDatasetVerdict = "";
+                state.trainingDatasetVerdictWarning = "";
+                const nextBtn = byId("training-flow-next");
+                if (nextBtn) nextBtn.disabled = true;
+                const loadBtn = byId("training-hub-load");
+                if (loadBtn) loadBtn.textContent = "Load";
+                const verdict = byId("training-hub-verdict");
+                if (verdict) verdict.remove();
+            };
+            const repoInput = byId("training-hub-repo");
+            repoInput.value = state.trainingDatasetRepoId || "";
+            repoInput.oninput = () => {
+                state.trainingDatasetRepoId = repoInput.value.trim();
+                invalidateHubLoad();
+            };
+            const revisionInput = byId("training-hub-revision");
+            revisionInput.value = state.trainingDatasetRevision || "";
+            revisionInput.oninput = () => {
+                state.trainingDatasetRevision = revisionInput.value.trim();
+                invalidateHubLoad();
+            };
+            byId("training-hub-load").onclick = () => loadHubDatasetInfo();
+            byId("training-dataset-source-toggle").onclick = () => {
+                state.trainingDatasetSource = "local";
+                resetHubDatasetLoad();
+                renderTraining();
+            };
+            byId("training-dataset-back").onclick = () => {
+                if (isFineTune) {
+                    state.trainingStep = checkpointStep;
+                } else {
+                    state.trainingMode = null;
+                }
+                renderTraining();
+            };
+            byId("training-flow-next").onclick = () => {
+                state.trainingStep = stepAfterDataset;
+                renderTraining();
+            };
+            return;
+        }
 
         const bodyHtml = loaded
             ? `
@@ -5100,6 +5325,7 @@ function renderTraining() {
         const controlHtml = `
             <div class="control-bar control-bar--episode-step">
                 <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
+                <button class="secondary-button" id="training-dataset-source-toggle" type="button">Use HuggingFace</button>
             </div>
             <div class="control-bar control-bar--floating-step-nav">
                 <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
@@ -5115,6 +5341,11 @@ function renderTraining() {
         `;
 
         byId("training-browse-merged").onclick = () => openMergedDatasetBrowser();
+        byId("training-dataset-source-toggle").onclick = () => {
+            state.trainingDatasetSource = "hub";
+            resetHubDatasetLoad();
+            renderTraining();
+        };
         byId("training-dataset-back").onclick = () => {
             if (isFineTune) {
                 state.trainingStep = checkpointStep;
@@ -5218,7 +5449,7 @@ function renderTraining() {
             renderPolicyConfigPanel(catalog.policies[state.selectedPolicy]);
         }
         byId("policy-prev").onclick = () => {
-            state.trainingStep = previewStep;
+            state.trainingStep = usingHubDataset ? datasetStep : previewStep;
             renderTraining();
         };
         byId("policy-start").onclick = () => {
@@ -5725,7 +5956,11 @@ function applyMergedDatasetToTraining() {
 
 function getTrainingOutputDir() {
     const trainingRoot = (state.summary && state.summary.storage && state.summary.storage.training) || "";
-    const datasetName = state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "";
+    // A Hub dataset has no local path, so name the run after the repo id. The
+    // "/" and any other separator must not survive into a directory name.
+    const datasetName = state.trainingDatasetSource === "hub"
+        ? (state.trainingDatasetRepoId || "").trim().replace(/[^A-Za-z0-9._-]+/g, "_")
+        : (state.mergedDatasetPath ? state.mergedDatasetPath.split("/").pop() : "");
     const policyType = state.trainingMode === "fine_tune"
         ? state.trainingCheckpointInfo?.policy_type
         : state.selectedPolicy;
@@ -5745,9 +5980,18 @@ function policyFieldValue(policy, field) {
     return field.name in edits ? edits[field.name] : field.default;
 }
 
+// Without the Hub branch a Hub run computes 0 steps and ships no --steps at
+// all, silently falling back to LeRobot's default.
+function trainingDatasetFrames() {
+    if (state.trainingDatasetSource === "hub") {
+        return (state.trainingHubDatasetInfo && state.trainingHubDatasetInfo.num_frames) || 0;
+    }
+    return (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+}
+
 // steps = epochs * ceil(frames / batch_size); shown live under the epochs box.
 function computeTrainingSteps(policy, editsOverride = null) {
-    const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+    const frames = trainingDatasetFrames();
     const edits = editsOverride || state.policyConfig[policy] || {};
     const batch = Number(edits.batch_size ?? 64);
     const epochs = Number(edits.epochs ?? 100);
@@ -5813,7 +6057,7 @@ function renderPolicyConfigPanel(policy, options = {}) {
         const el = byId("steps-readout");
         if (!el) return;
         const steps = computeTrainingSteps(key, edits);
-        const frames = (state.mergedDatasetPreview && state.mergedDatasetPreview.num_frames) || 0;
+        const frames = trainingDatasetFrames();
         el.textContent = steps
             ? `= ${steps.toLocaleString()} steps (${edits.epochs ?? 100} epochs × ⌈${frames.toLocaleString()} frames / batch⌉)`
             : "load a dataset to compute steps";
@@ -5911,6 +6155,63 @@ function buildFineTuneExtraArgs() {
     return args;
 }
 
+// So a verdict never outlives the repo it described.
+function resetHubDatasetLoad() {
+    state.trainingHubLoadState = "idle";
+    state.trainingHubLoadedRepoId = "";
+    state.trainingHubLoadedRevision = "";
+    state.trainingHubDatasetInfo = null;
+    state.trainingDatasetVerdict = "";
+    state.trainingDatasetVerdictWarning = "";
+}
+
+// Only meta/ is fetched, so problems surface here instead of at Start.
+async function loadHubDatasetInfo() {
+    const repoId = (state.trainingDatasetRepoId || "").trim();
+    if (!repoId) {
+        showToast("Enter a HuggingFace repo id (owner/dataset)", true);
+        return;
+    }
+    const revision = (state.trainingDatasetRevision || "").trim();
+    const params = new URLSearchParams({ repo_id: repoId });
+    if (revision) {
+        params.set("revision", revision);
+    }
+    if (state.trainingMode === "fine_tune" && state.trainingCheckpointPath) {
+        params.set("checkpoint_path", state.trainingCheckpointPath);
+    }
+    state.trainingHubLoadState = "loading";
+    state.trainingHubLoadedRepoId = "";
+    state.trainingHubDatasetInfo = null;
+    state.trainingDatasetVerdict = "";
+    state.trainingDatasetVerdictWarning = "";
+    renderTraining();
+    try {
+        const info = await withHubToken(() =>
+            api(`/training/hub-dataset-info?${params.toString()}`)
+        );
+        state.trainingHubDatasetInfo = info || null;
+        state.trainingDatasetVerdict = (info && info.dataset_ok) || "";
+        state.trainingDatasetVerdictWarning = (info && info.dataset_warning) || "";
+        state.trainingHubLoadedRepoId = repoId;
+        state.trainingHubLoadedRevision = revision;
+        if (state.trainingDatasetVerdictWarning) {
+            state.trainingHubLoadState = "error";
+        } else {
+            state.trainingHubLoadState = "loaded";
+            showToast(`Loaded ${repoId}`);
+        }
+    } catch (error) {
+        state.trainingHubDatasetInfo = null;
+        state.trainingDatasetVerdict = "";
+        // detail is the server's sentence; message carries the HTTP preamble.
+        state.trainingDatasetVerdictWarning = error.detail || error.message;
+        state.trainingHubLoadState = "error";
+        showToast(error.message, true);
+    }
+    renderTraining();
+}
+
 async function startTrainingRun(outputDir) {
     state.trainingOutputStamp = "";
     const runStep = state.trainingMode === "fine_tune" ? 5 : 4;
@@ -5918,23 +6219,34 @@ async function startTrainingRun(outputDir) {
     try {
         state.trainingStep = runStep;
         renderTraining();
-        state.trainingStatus = await api("/training/start", {
-            method: "POST",
-            body: JSON.stringify({
-                dataset_path: state.mergedDatasetPath,
-                output_dir: outputDir,
-                policy_type: state.trainingMode === "fine_tune"
-                    ? state.trainingCheckpointInfo?.policy_type
-                    : state.selectedPolicy,
-                extra_args: state.trainingMode === "fine_tune"
-                    ? buildFineTuneExtraArgs()
-                    : buildTrainingExtraArgs(state.selectedPolicy),
-                training_mode: state.trainingMode || "new",
-                checkpoint_path: state.trainingMode === "fine_tune"
-                    ? state.trainingCheckpointPath
-                    : null,
-            }),
-        });
+        const trainingPayload = {
+            ...(state.trainingDatasetSource === "hub"
+                ? {
+                    dataset_source: "hub",
+                    dataset_repo_id: (state.trainingDatasetRepoId || "").trim(),
+                    ...((state.trainingDatasetRevision || "").trim()
+                        ? { dataset_revision: state.trainingDatasetRevision.trim() }
+                        : {}),
+                }
+                : { dataset_source: "local", dataset_path: state.mergedDatasetPath }),
+            output_dir: outputDir,
+            policy_type: state.trainingMode === "fine_tune"
+                ? state.trainingCheckpointInfo?.policy_type
+                : state.selectedPolicy,
+            extra_args: state.trainingMode === "fine_tune"
+                ? buildFineTuneExtraArgs()
+                : buildTrainingExtraArgs(state.selectedPolicy),
+            training_mode: state.trainingMode || "new",
+            checkpoint_path: state.trainingMode === "fine_tune"
+                ? state.trainingCheckpointPath
+                : null,
+        };
+        state.trainingStatus = await withHubToken(() =>
+            api("/training/start", {
+                method: "POST",
+                body: JSON.stringify(trainingPayload),
+            })
+        );
         // Register the self-healing poller before rendering the initial server
         // snapshot. Even if rendering fails, the next status tick can recover.
         startTrainingPolling();
@@ -6826,9 +7138,13 @@ function openCheckpointBrowser() {
                 const info = await api(`/rollout/checkpoint-info?path=${encodeURIComponent(path)}`);
                 state.rolloutTaskText = (info && info.task) || "";
                 state.rolloutRequiresTask = !(info && info.requires_task === false);
+                state.rolloutActionNamesWarning = (info && info.layout_warning) || "";
+                state.rolloutActionNamesOk = (info && info.layout_ok) || "";
             } catch (error) {
                 state.rolloutTaskText = "";
                 state.rolloutRequiresTask = true;
+                state.rolloutActionNamesWarning = "";
+                state.rolloutActionNamesOk = "";
             }
             closeBrowser();
             renderRollout();
@@ -6867,16 +7183,64 @@ function openTrainingCheckpointBrowser() {
     }).catch((error) => showToast(error.message, true));
 }
 
+// Pre-flight a Hub checkpoint: fills the task field and warns up front when the
+// action layout cannot be recovered, rather than failing at Start.
+async function loadHubCheckpointInfo() {
+    const repoId = (state.rolloutCheckpointRepoId || "").trim();
+    if (!repoId) {
+        showToast("Enter a HuggingFace repo id (owner/model)", true);
+        return;
+    }
+    const params = new URLSearchParams({ source: "hub", repo_id: repoId });
+    const revision = (state.rolloutCheckpointRevision || "").trim();
+    if (revision) {
+        params.set("revision", revision);
+    }
+    // The checkpoint is downloaded into the local cache before it can be
+    // inspected, so this request can run for minutes on a large policy.
+    state.rolloutHubLoadState = "loading";
+    state.rolloutHubLoadedRepoId = "";
+    renderRollout();
+    try {
+        const info = await withHubToken(() =>
+            api(`/rollout/checkpoint-info?${params.toString()}`)
+        );
+        state.rolloutTaskText = (info && info.task) || "";
+        state.rolloutRequiresTask = !(info && info.requires_task === false);
+        // The server compares the checkpoint's action width against the active
+        // arm count, so it reports a real blocker rather than a hypothetical.
+        state.rolloutActionNamesWarning = (info && info.layout_warning) || "";
+        state.rolloutActionNamesOk = (info && info.layout_ok) || "";
+        state.rolloutHubLoadState = "loaded";
+        state.rolloutHubLoadedRepoId = repoId;
+        showToast(`Loaded ${repoId}`);
+    } catch (error) {
+        state.rolloutActionNamesWarning = "";
+        state.rolloutActionNamesOk = "";
+        state.rolloutHubLoadState = "error";
+        showToast(error.message, true);
+    }
+    renderRollout();
+}
+
 async function startRolloutRun() {
+    const useHub = state.rolloutCheckpointSource === "hub";
+    const repoId = (state.rolloutCheckpointRepoId || "").trim();
     const checkpoint = state.rolloutCheckpointPath;
-    if (!checkpoint) {
+    if (useHub ? !repoId : !checkpoint) {
         return;
     }
     const task = state.rolloutRequiresTask ? state.rolloutTaskText || "" : "";
-    state.rolloutStatus = await api("/rollout/start", {
-        method: "POST",
-        body: JSON.stringify({ checkpoint_path: checkpoint, task }),
-    });
+    const revision = (state.rolloutCheckpointRevision || "").trim();
+    const payload = useHub
+        ? { source: "hub", repo_id: repoId, task, ...(revision ? { revision } : {}) }
+        : { source: "local", checkpoint_path: checkpoint, task };
+    state.rolloutStatus = await withHubToken(() =>
+        api("/rollout/start", {
+            method: "POST",
+            body: JSON.stringify(payload),
+        })
+    );
     renderRollout();
 }
 
@@ -6952,7 +7316,16 @@ function renderRollout() {
     const isRunning = status.status === "running";
     const checkpoint = state.rolloutCheckpointPath;
     const checkpointName = checkpoint ? checkpoint.split("/").pop() : "";
-    const canStart = !!checkpoint && !isRunning;
+    const hasCheckpointSelection = state.rolloutCheckpointSource === "hub"
+        ? !!(state.rolloutCheckpointRepoId || "").trim()
+        : !!checkpoint;
+    const hubLoading = state.rolloutHubLoadState === "loading";
+    const hubLoadLabel = hubLoading
+        ? "Downloading…"
+        : state.rolloutHubLoadState === "loaded"
+            ? "Loaded"
+            : "Load";
+    const canStart = hasCheckpointSelection && !isRunning && !hubLoading;
 
     const devices = state.rolloutDevices || { configured: "auto", resolved: "cpu", devices: [] };
     const configuredDevice = devices.configured || "auto";
@@ -6992,6 +7365,11 @@ function renderRollout() {
         status.status, status.stop_reason || "", status.error || "",
         checkpoint, configuredDevice, deviceOptions, deviceDetail,
         state.rolloutRequiresTask, rolloutServiceKey, rolloutServiceBusyKey,
+        // Without these the local/Hub toggle changes state but the guard above
+        // returns early, so the panel never redraws and the click looks dead.
+        state.rolloutCheckpointSource, state.rolloutActionNamesWarning || "",
+        state.rolloutActionNamesOk || "",
+        state.rolloutHubLoadState,
     ].join("|");
     if (container.dataset.renderKey === renderKey) {
         renderRolloutCameras();
@@ -7036,10 +7414,38 @@ function renderRollout() {
                 <section class="panel panel--soft">
                     <div class="panel-header"><h3>Policy Checkpoint</h3></div>
                     <div class="rollout-checkpoint">
-                        <code class="rollout-checkpoint__path">${checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected"}</code>
-                        <button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>
+                        <code class="rollout-checkpoint__path">${
+                            state.rolloutCheckpointSource === "hub"
+                                ? (state.rolloutCheckpointRepoId ? escapeHtml(state.rolloutCheckpointRepoId) : "No Hub repo entered")
+                                : (checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected")
+                        }</code>
+                        <button class="secondary-button" id="rollout-source-toggle" type="button" ${isRunning ? "disabled" : ""}>${
+                            state.rolloutCheckpointSource === "hub" ? "Use Local" : "Use HuggingFace"
+                        }</button>
+                        ${
+                            state.rolloutCheckpointSource === "hub"
+                                ? ""
+                                : `<button class="secondary-button" id="rollout-browse" type="button" ${isRunning ? "disabled" : ""}>Browse</button>`
+                        }
                     </div>
-                    ${checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
+                    ${
+                        state.rolloutCheckpointSource === "hub"
+                            ? `<div class="rollout-hub-fields">
+                                <input class="rollout-hub-input" id="rollout-hub-repo" type="text"
+                                    placeholder="owner/model (e.g. lerobot/pi0)"
+                                    autocomplete="off" spellcheck="false" ${isRunning ? "disabled" : ""}>
+                                <input class="rollout-hub-input" id="rollout-hub-revision" type="text"
+                                    placeholder="revision (optional)"
+                                    autocomplete="off" spellcheck="false" ${isRunning ? "disabled" : ""}>
+                                <button class="secondary-button" id="rollout-hub-load" type="button" ${
+                                    isRunning || hubLoading ? "disabled" : ""
+                                }>${escapeHtml(hubLoadLabel)}</button>
+                            </div>`
+                            : ""
+                    }
+                    ${state.rolloutCheckpointSource !== "hub" && checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
+                    ${state.rolloutActionNamesWarning ? `<p class="training-controls__state rollout-error">${escapeHtml(state.rolloutActionNamesWarning)}</p>` : ""}
+                    ${!state.rolloutActionNamesWarning && state.rolloutActionNamesOk ? `<p class="training-controls__state rollout-ok">${escapeHtml(state.rolloutActionNamesOk)}</p>` : ""}
                     <label class="field-label rollout-task-label" for="rollout-task">Task Instruction</label>
                     <textarea class="rollout-task-input" id="rollout-task" rows="3"
                         placeholder="${state.rolloutRequiresTask ? 'Task instruction (optional)' : 'This policy does not take a language input'}"
@@ -7077,6 +7483,57 @@ function renderRollout() {
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {
         browseBtn.onclick = () => openCheckpointBrowser();
+    }
+    const sourceToggle = byId("rollout-source-toggle");
+    if (sourceToggle) {
+        sourceToggle.onclick = () => {
+            state.rolloutCheckpointSource =
+                state.rolloutCheckpointSource === "hub" ? "local" : "hub";
+            state.rolloutActionNamesWarning = "";
+            state.rolloutActionNamesOk = "";
+            state.rolloutHubLoadState = "idle";
+            state.rolloutHubLoadedRepoId = "";
+            renderRollout();
+        };
+    }
+    const hubRepoInput = byId("rollout-hub-repo");
+    if (hubRepoInput) {
+        hubRepoInput.value = state.rolloutCheckpointRepoId || "";
+        // The repo id is deliberately kept out of the render key so the 1s poll
+        // cannot rebuild the panel mid-typing and steal focus, so enable the
+        // Start button directly instead of relying on a rebuild.
+        hubRepoInput.oninput = () => {
+            state.rolloutCheckpointRepoId = hubRepoInput.value.trim();
+            const primary = byId("rollout-primary-action");
+            if (primary && state.rolloutStatus?.status !== "running") {
+                primary.disabled = !state.rolloutCheckpointRepoId;
+            }
+            // "Loaded" refers to one specific repo; editing the id invalidates
+            // it. Update the label in place rather than via a rebuild, which
+            // would steal focus mid-typing.
+            if (
+                state.rolloutHubLoadState === "loaded"
+                && state.rolloutCheckpointRepoId !== state.rolloutHubLoadedRepoId
+            ) {
+                state.rolloutHubLoadState = "idle";
+                state.rolloutHubLoadedRepoId = "";
+                const loadBtn = byId("rollout-hub-load");
+                if (loadBtn) {
+                    loadBtn.textContent = "Load";
+                }
+            }
+        };
+    }
+    const hubRevisionInput = byId("rollout-hub-revision");
+    if (hubRevisionInput) {
+        hubRevisionInput.value = state.rolloutCheckpointRevision || "";
+        hubRevisionInput.oninput = () => {
+            state.rolloutCheckpointRevision = hubRevisionInput.value.trim();
+        };
+    }
+    const hubLoadBtn = byId("rollout-hub-load");
+    if (hubLoadBtn) {
+        hubLoadBtn.onclick = () => loadHubCheckpointInfo();
     }
     const taskInput = byId("rollout-task");
     if (taskInput) {

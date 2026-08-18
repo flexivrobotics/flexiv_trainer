@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from flexivtrainer.config import EndEffectorSideConfig, RobotSerialConfig
+from flexivtrainer.data.hub import has_session_token, hub_token, set_session_token
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -40,9 +41,40 @@ class RobotConfigRequest(BaseModel):
     record_resolution: str = ""
 
 
+class HubTokenRequest(BaseModel):
+    # Empty string clears the stored token.
+    token: str = ""
+
+
 @router.get("/summary")
 def get_system_summary(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return runtime.system_summary()
+
+
+def _hub_token_state(runtime: RuntimeManager) -> dict:
+    """Whether a token is available, never the token itself."""
+    return {
+        "session_token_set": has_session_token(),
+        # True when a configured or environment token already covers the request.
+        "token_available": hub_token(runtime.settings) is not None,
+    }
+
+
+@router.get("/hub-token")
+def get_hub_token_state(
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    return _hub_token_state(runtime)
+
+
+@router.put("/hub-token")
+def set_hub_token(
+    request: HubTokenRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    """Hold an operator-supplied Hub token for this server process only."""
+    set_session_token(request.token)
+    return _hub_token_state(runtime)
 
 
 @router.put("/robot-config")

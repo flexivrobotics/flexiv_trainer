@@ -29,6 +29,8 @@ _WRENCH_DIM = 6
 _POSE_AXES = ("x", "y", "z", "q_w", "q_x", "q_y", "q_z")
 _TWIST_AXES = ("vx", "vy", "vz", "wx", "wy", "wz")
 _WRENCH_AXES = ("fx", "fy", "fz", "mx", "my", "mz")
+# Keyed by active arm count; values match the ``arm_mode`` setting operators see.
+_ARM_MODES = {1: "single-arm", 2: "dual-arm"}
 
 
 def _group_slice(
@@ -54,6 +56,121 @@ def _group_slice(
     return slice(start, start + len(axes))
 
 
+def _layout_hint(action_dim: int, arm_count: int) -> str:
+    """Explain a width mismatch, naming the fix when there is one.
+
+    A width that divides cleanly by 13 or 19 points at a different arm count --
+    the common case, and the only one with a one-step fix.
+    """
+    for per_arm in (_POSE_DIM + _TWIST_DIM, _POSE_DIM + _TWIST_DIM + _WRENCH_DIM):
+        if action_dim % per_arm:
+            continue
+        needed = action_dim // per_arm
+        if needed == arm_count or needed not in _ARM_MODES:
+            continue
+        return (
+            f"{_width_preamble(action_dim, arm_count)}. Width {action_dim} "
+            f"corresponds to {_ARM_MODES[needed]} ({needed} x {per_arm}). "
+            f"Arm mode mismatch: set {_ARM_MODES[needed]} mode and restart "
+            "the rollout"
+        )
+    return (
+        f"{_width_preamble(action_dim, arm_count)}. The checkpoint does not "
+        "record action-axis names and the width is not inferable. Supply "
+        "action_names when starting the rollout"
+    )
+
+
+def layout_confirmation(action_dim: int, arm_count: int) -> str:
+    """Positive counterpart to :func:`_layout_hint`, same sentence structure."""
+    mode = _ARM_MODES.get(arm_count, f"{arm_count}-arm")
+    return (
+        f"{_width_preamble(action_dim, arm_count)}. The checkpoint does not "
+        "record action-axis names, so the layout was inferred from its width. "
+        f"Arm mode matches: {mode}"
+    )
+
+
+def recorded_layout_confirmation(action_dim: int, arm_count: int) -> str:
+    """Confirmation for a checkpoint that records its own action-axis names.
+
+    Omits the canonical widths: a named checkpoint is not bound to them (a
+    gripper axis makes 14 valid), so quoting "13 or 19" would contradict it.
+    """
+    mode = _ARM_MODES.get(arm_count, f"{arm_count}-arm")
+    return (
+        f"Policy action width is {action_dim}. The checkpoint records its "
+        "action-axis names, so the layout was read from the checkpoint. "
+        f"Arm mode matches: {mode}. Policy loaded successfully"
+    )
+
+
+def _width_preamble(action_dim: int, arm_count: int) -> str:
+    """Shared opening clause: the observed width against the canonical ones."""
+    return (
+        f"Policy action width is {action_dim}; canonical widths for "
+        f"{_arm_count_text(arm_count)} are {_canonical_widths_text(arm_count)}"
+    )
+
+
+def _arm_count_text(arm_count: int) -> str:
+    return f"{arm_count} arm" if arm_count == 1 else f"{arm_count} arms"
+
+
+def _canonical_widths_text(arm_count: int) -> str:
+    """The two inferable widths for an arm count, as ``13 or 19``."""
+    inferable, with_wrench = _canonical_widths(arm_count)
+    return f"{inferable} or {with_wrench}"
+
+
+def _sides_hint(checkpoint_sides: list[str], active_sides: list[str]) -> str:
+    """Counterpart to :func:`_layout_hint` for checkpoints with recorded names.
+
+    A differing arm *count* has the same one-step fix. A matching count with
+    different side names cannot come from this recorder (it emits only
+    ``single_arm`` or ``left_arm``+``right_arm``), so it is a foreign checkpoint
+    that switching arm mode would not resolve.
+    """
+    checkpoint_text = ", ".join(checkpoint_sides) or "none"
+    active_text = ", ".join(active_sides) or "none"
+    preamble = (
+        f"Policy records {_arm_count_text(len(checkpoint_sides))} "
+        f"({checkpoint_text}); {_arm_count_text(len(active_sides))} "
+        f"configured ({active_text})"
+    )
+    needed = len(checkpoint_sides)
+    if needed != len(active_sides) and needed in _ARM_MODES:
+        return (
+            f"{preamble}. Arm mode mismatch: set {_ARM_MODES[needed]} mode "
+            "and restart the rollout"
+        )
+    return (
+        f"{preamble}. Arm layout mismatch: the checkpoint was trained for "
+        "different arms than the ones configured"
+    )
+
+
+def _canonical_widths(arm_count: int) -> tuple[int, int]:
+    """The two inferable action widths for an arm count."""
+    return (
+        arm_count * (_POSE_DIM + _TWIST_DIM),
+        arm_count * (_POSE_DIM + _TWIST_DIM + _WRENCH_DIM),
+    )
+
+
+def _pose_sides(action_names: list[str]) -> list[str]:
+    """Arm sides named by a flat action schema, in first-seen order."""
+    marker = ".tcp_pose."
+    sides: list[str] = []
+    for name in action_names:
+        if marker not in name:
+            continue
+        side = name.split(marker, 1)[0]
+        if side not in sides:
+            sides.append(side)
+    return sides
+
+
 def canonical_action_names(action_dim: int, sides: list[str]) -> list[str]:
     """Infer only the recorder's unambiguous legacy waypoint layouts."""
 
@@ -68,17 +185,7 @@ def canonical_action_names(action_dim: int, sides: list[str]) -> list[str]:
     elif action_dim == len(sides) * (_POSE_DIM + _TWIST_DIM):
         groups = (("tcp_pose", _POSE_AXES), ("tcp_twist", _TWIST_AXES))
     else:
-        supported = sorted(
-            {
-                len(sides) * (_POSE_DIM + _TWIST_DIM),
-                len(sides) * (_POSE_DIM + _TWIST_DIM + _WRENCH_DIM),
-            }
-        )
-        raise ValueError(
-            "Cannot infer waypoint action layout from "
-            f"width {action_dim}; canonical widths for {len(sides)} arm(s) "
-            f"are {supported}"
-        )
+        raise ValueError(_layout_hint(action_dim, len(sides)))
     return [
         f"{side}.{group}.{axis}"
         for side in sides
@@ -101,19 +208,9 @@ def build_action_layout(
             f"output={expected_dim} names={len(action_names)}"
         )
 
-    pose_sides: list[str] = []
-    marker = ".tcp_pose."
-    for name in action_names:
-        if marker not in name:
-            continue
-        side = name.split(marker, 1)[0]
-        if side not in pose_sides:
-            pose_sides.append(side)
+    pose_sides = _pose_sides(action_names)
     if pose_sides != sides:
-        raise ValueError(
-            "Checkpoint arm layout does not match active sides: "
-            f"checkpoint={pose_sides} active={sides}"
-        )
+        raise ValueError(_sides_hint(pose_sides, sides))
 
     layout: list[dict[str, Any]] = []
     for side in sides:
@@ -189,6 +286,41 @@ def build_action_layout(
             "unsupported"
         )
     return layout
+
+
+def layout_problem(
+    action_names: list[str] | None, action_dim: int, sides: list[str]
+) -> str | None:
+    """Why a layout is unusable for the configured arms, or None when it is fine.
+
+    Negative counterpart to :func:`layout_confirmation`. Every message is built
+    from the caller's own values rather than from a caught exception, so an API
+    can report the cause without echoing internal error text back to a client.
+    """
+    if not sides:
+        return None
+    if action_names is None:
+        if action_dim not in _canonical_widths(len(sides)):
+            return _layout_hint(action_dim, len(sides))
+        names = canonical_action_names(action_dim, sides)
+    else:
+        names = action_names
+
+    checkpoint_sides = _pose_sides(names)
+    if checkpoint_sides != sides:
+        return _sides_hint(checkpoint_sides, sides)
+
+    try:
+        build_action_layout(names, sides, action_dim)
+    except ValueError as exc:
+        # Whatever remains is a schema fault in a foreign checkpoint. Keep the
+        # specifics in the server log instead of the response body.
+        warn("Rollout action schema is unusable", describe_exception(exc))
+        return (
+            "The checkpoint action schema is not usable with the configured "
+            "arms; see the server log for details"
+        )
+    return None
 
 
 def normalize_pose_quaternion(pose: list[float]) -> list[float]:
