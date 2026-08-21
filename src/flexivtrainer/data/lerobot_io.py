@@ -22,6 +22,8 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.data.quaternion import QuaternionSignCanonicalizer
+
 logger = logging.getLogger(__name__)
 
 # Camera MP4s are previewed in the browser across Ubuntu/macOS/Windows on
@@ -434,15 +436,22 @@ def extract_recording_frame_values(
     robot_snapshot: dict[str, Any],
     entries: list[str] | None = None,
     sides: list[str] | None = None,
+    canonicalizer: QuaternionSignCanonicalizer | None = None,
 ) -> dict[str, list[float]]:
-    """Per-frame vectors keyed by feature (``observation.state`` and ``action``)."""
+    """Per-frame vectors keyed by feature (``observation.state`` and ``action``).
+
+    ``canonicalizer`` makes each arm's ``tcp_pose`` quaternion sign continuous.
+    """
     resolved_entries = set(resolve_recording_entries(entries, sides))
-    return {
-        key: values
-        for key, values, _ in _iter_combined_features(
-            robot_snapshot, resolved_entries, sides
-        )
-    }
+    result: dict[str, list[float]] = {}
+    for key, values, names in _iter_combined_features(
+        robot_snapshot, resolved_entries, sides
+    ):
+        if canonicalizer is not None:
+            kind = "state" if key == "observation.state" else "action"
+            values = canonicalizer.apply(values, names, kind)
+        result[key] = values
+    return result
 
 
 def build_features_from_sample(
@@ -536,7 +545,7 @@ class EpisodeManifest:
     fps: int | None = None
 
     @classmethod
-    def from_path(cls, root: Path) -> "EpisodeManifest":
+    def from_path(cls, root: Path) -> EpisodeManifest:
         dataset_root = Path(root).expanduser().resolve()
         if not dataset_root.exists():
             raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")

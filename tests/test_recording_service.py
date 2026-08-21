@@ -299,6 +299,78 @@ def test_records_gripper_state_and_target_command_into_saved_episode(tmp_path) -
     }
 
 
+class _FakeTeleopWithQuaternionFlips:
+    """Reported quaternion sign alternates every call; the action is reported
+    with the opposite sign of the state."""
+
+    _QUAT = (0.0137, -0.4582, 0.8885, 0.0201)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def robot_data_snapshot(self, *, include_states=True, include_actions=True):
+        sign = -1.0 if self.calls % 2 else 1.0
+        self.calls += 1
+        quat = [sign * component for component in self._QUAT]
+        quat_d = [-component for component in quat]
+        return {
+            "robots": {
+                "FOLLOWER_A": {
+                    "connected": True,
+                    "states": {"tcp_pose": [0.1, 0.2, 0.3, *quat]},
+                    "actions": {"tcp_pose_d": [0.1, 0.2, 0.31, *quat_d]},
+                }
+            }
+        }
+
+    def gripper_command_metadata(self):
+        return None
+
+
+def test_recorded_quaternions_are_sign_continuous_and_action_matches_state(
+    tmp_path,
+) -> None:
+    pytest.importorskip("lerobot")
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    service = RecordingService(
+        settings,
+        teleop=_FakeTeleopWithQuaternionFlips(),
+        cameras=SimpleNamespace(),
+        get_active_sides=lambda: ["single_arm"],
+    )
+    entries = ["observation.state.single_arm.tcp_pose", "action.single_arm.tcp_pose"]
+
+    service.start(task="quaternion sign test", fps=30, recording_entries=entries)
+    try:
+        _drive_capture(service, frames=6)
+    finally:
+        service.stop()
+    result = service.save()
+
+    dataset = LeRobotDataset(f"local/{result['episode_name']}", root=result["path"])
+    names = dataset.features["observation.state"]["names"]
+    q_slice = slice(
+        names.index("single_arm.tcp_pose.q_w"),
+        names.index("single_arm.tcp_pose.q_z") + 1,
+    )
+    states = np.stack(
+        [np.asarray(dataset[i]["observation.state"]) for i in range(len(dataset))]
+    )
+    actions = np.stack([np.asarray(dataset[i]["action"]) for i in range(len(dataset))])
+    q_state = states[:, q_slice]
+    q_action = actions[:, q_slice]
+
+    assert np.all(np.sum(q_state[1:] * q_state[:-1], axis=1) > 0.0)
+    assert np.all(np.sum(q_state * q_action, axis=1) > 0.0)
+    assert np.allclose(
+        np.abs(q_state), np.abs(_FakeTeleopWithQuaternionFlips._QUAT), atol=1e-6
+    )
+    assert np.allclose(states[:, :3], [0.1, 0.2, 0.3], atol=1e-6)
+
+
 def test_recording_rejects_gripper_action_before_first_command(tmp_path) -> None:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     settings.ensure_storage()

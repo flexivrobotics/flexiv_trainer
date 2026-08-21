@@ -293,6 +293,11 @@ class AppSettings(BaseSettings):
     # colorized previews. The 2 m default focuses the available range on a
     # tabletop workspace; farther pixels are clamped.
     depth_max_m: float = Field(default=2.0, gt=0)
+    # Per-side [q_w, q_x, q_y, q_z] seeding the sign of each episode's first
+    # recorded TCP quaternion; see data/quaternion.py.
+    recording_quaternion_reference: dict[str, list[float]] = Field(
+        default_factory=dict
+    )
     network_interface_whitelist: list[str] = Field(default_factory=list)
     teleop_robot_pairs: list[TeleopRobotPair] = Field(default_factory=list)
     cameras: list[CameraConfig] = Field(
