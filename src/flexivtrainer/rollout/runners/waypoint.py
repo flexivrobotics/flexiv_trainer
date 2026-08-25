@@ -41,7 +41,7 @@ from flexivtrainer.rollout.executors.gripper import (
 )
 from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
-    normalize_pose_quaternion,
+    pose_command,
 )
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
@@ -510,11 +510,7 @@ class WaypointRunner:
             )
             pose_slice = plan["pose"]
             twist_slice = plan["twist"]
-            commanded = (
-                normalize_pose_quaternion(action[pose_slice])
-                if pose_slice is not None
-                else []
-            )
+            commanded = pose_command(plan, action) if pose_slice is not None else []
             commanded_twist = (
                 list(action[twist_slice]) if twist_slice is not None else []
             )

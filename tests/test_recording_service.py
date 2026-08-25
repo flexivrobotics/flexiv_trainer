@@ -299,6 +299,83 @@ def test_records_gripper_state_and_target_command_into_saved_episode(tmp_path) -
     }
 
 
+class _FakeTeleopWithQuaternionFlips:
+    """Reported quaternion sign alternates every call; the action is reported
+    with the opposite sign of the state."""
+
+    _QUAT = (0.0137, -0.4582, 0.8885, 0.0201)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def robot_data_snapshot(self, *, include_states=True, include_actions=True):
+        sign = -1.0 if self.calls % 2 else 1.0
+        self.calls += 1
+        quat = [sign * component for component in self._QUAT]
+        quat_d = [-component for component in quat]
+        return {
+            "robots": {
+                "FOLLOWER_A": {
+                    "connected": True,
+                    "states": {"tcp_pose": [0.1, 0.2, 0.3, *quat]},
+                    "actions": {"tcp_pose_d": [0.1, 0.2, 0.31, *quat_d]},
+                }
+            }
+        }
+
+    def gripper_command_metadata(self):
+        return None
+
+
+def test_recorded_rotation_is_identical_despite_driver_sign_flips(
+    tmp_path,
+) -> None:
+    pytest.importorskip("lerobot")
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    from flexivtrainer.data.lerobot_io import rotation_6d_to_quaternion_wxyz
+
+    settings = AppSettings(storage=StorageConfig(root=tmp_path))
+    settings.ensure_storage()
+    service = RecordingService(
+        settings,
+        teleop=_FakeTeleopWithQuaternionFlips(),
+        cameras=SimpleNamespace(),
+        get_active_sides=lambda: ["single_arm"],
+    )
+    entries = ["observation.state.single_arm.tcp_pose", "action.single_arm.tcp_pose"]
+
+    service.start(task="rotation sign test", fps=30, recording_entries=entries)
+    try:
+        _drive_capture(service, frames=6)
+    finally:
+        service.stop()
+    result = service.save()
+
+    dataset = LeRobotDataset(f"local/{result['episode_name']}", root=result["path"])
+    names = dataset.features["observation.state"]["names"]
+    rotation = slice(
+        names.index("single_arm.tcp_rotation_6d.r1_x"),
+        names.index("single_arm.tcp_rotation_6d.r2_z") + 1,
+    )
+    states = np.stack(
+        [np.asarray(dataset[i]["observation.state"]) for i in range(len(dataset))]
+    )
+    actions = np.stack([np.asarray(dataset[i]["action"]) for i in range(len(dataset))])
+
+    # The driver alternates q / -q and reports the action with the opposite sign
+    # of the state; rotation-6D cannot represent either difference.
+    assert np.allclose(states[:, rotation], states[0, rotation], atol=1e-6)
+    assert np.allclose(states[:, rotation], actions[:, rotation], atol=1e-6)
+    assert np.allclose(states[:, rotation].std(axis=0), 0.0, atol=1e-6)
+
+    recovered = rotation_6d_to_quaternion_wxyz(states[0, rotation].astype(np.float64))
+    expected = np.asarray(_FakeTeleopWithQuaternionFlips._QUAT)
+    expected = expected / np.linalg.norm(expected)
+    assert np.allclose(np.abs(recovered), np.abs(expected), atol=1e-6)
+    assert np.allclose(states[:, :3], [0.1, 0.2, 0.3], atol=1e-6)
+
+
 def test_recording_rejects_gripper_action_before_first_command(tmp_path) -> None:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     settings.ensure_storage()

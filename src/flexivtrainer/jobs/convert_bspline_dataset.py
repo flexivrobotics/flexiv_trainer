@@ -36,9 +36,9 @@ from flexivtrainer.data.bspline import (
     extract_cartesian_controls,
     parameter_feature_names,
     parameter_matrix_shape,
-    rotation_6d_to_matrix,
     validate_parameter_matrix_shape,
 )
+from flexivtrainer.data.lerobot_io import rotation_6d_to_matrix
 from flexivtrainer.observability import Pulse, section
 
 _INFO_PATH = Path("meta/info.json")

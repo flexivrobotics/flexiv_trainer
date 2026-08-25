@@ -15,10 +15,24 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from flexivtrainer.cameras import service as camera_module
 from flexivtrainer.cameras.service import CameraService
 from flexivtrainer.config import AppSettings, CameraConfig, StorageConfig
+
+
+@pytest.fixture(autouse=True)
+def _isolate_camera_sdks(monkeypatch):
+    """Keep every test in this module off real hardware.
+
+    The service resolves each vendor SDK through an attribute of
+    ``cameras.service``, so blanking both leaves discovery empty until a test
+    installs its own fake. Stubbing only ``rs`` let a physically attached Orbbec
+    camera enumerate alongside the fakes.
+    """
+    monkeypatch.setattr(camera_module, "rs", None)
+    monkeypatch.setattr(camera_module, "ob", None)
 
 
 def make_fake_rs(devices, start_calls: list[str | None]):

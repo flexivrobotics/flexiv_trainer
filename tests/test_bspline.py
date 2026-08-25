@@ -9,9 +9,12 @@ from flexivtrainer.data.bspline import (
     extract_cartesian_controls,
     parameter_feature_names,
     parameter_matrix_shape,
+    validate_parameter_matrix_shape,
+)
+from flexivtrainer.data.lerobot_io import (
+    ROTATION_6D_AXES,
     quaternion_wxyz_to_rotation_6d,
     rotation_6d_to_quaternion_wxyz,
-    validate_parameter_matrix_shape,
 )
 
 
@@ -27,6 +30,52 @@ def _pose_names(side: str) -> list[str]:
     ]
 
 
+def _pose_names_6d(side: str) -> list[str]:
+    return [f"{side}.tcp_pose.{axis}" for axis in ("x", "y", "z")] + [
+        f"{side}.tcp_rotation_6d.{axis}" for axis in ROTATION_6D_AXES
+    ]
+
+
+def test_detect_tcp_action_layouts_reads_rotation_6d_axes() -> None:
+    names = ["left_arm.tcp_twist.vx", *_pose_names_6d("left_arm")]
+
+    (layout,) = detect_tcp_action_layouts(names, sides=["left_arm"])
+
+    assert layout.pose_indices == (1, 2, 3)
+    assert layout.rotation_indices == tuple(range(4, 10))
+    assert layout.control_names == tuple(_pose_names_6d("left_arm"))
+
+
+def test_rotation_6d_and_quaternion_schemas_yield_identical_controls() -> None:
+    rng = np.random.default_rng(3)
+    quaternion = rng.normal(size=(5, 4))
+    quaternion /= np.linalg.norm(quaternion, axis=1, keepdims=True)
+    position = rng.normal(size=(5, 3))
+
+    legacy = np.concatenate([position, quaternion], axis=1)
+    rotation_6d = quaternion_wxyz_to_rotation_6d(quaternion)
+    modern = np.concatenate([position, rotation_6d], axis=1)
+
+    legacy_controls = extract_cartesian_controls(
+        legacy, detect_tcp_action_layouts(_pose_names("single_arm"))
+    )
+    modern_controls = extract_cartesian_controls(
+        modern, detect_tcp_action_layouts(_pose_names_6d("single_arm"))
+    )
+    assert np.allclose(legacy_controls, modern_controls)
+
+    # A rotation-6D dataset cannot record the driver's sign flip at all.
+    flipped = np.concatenate(
+        [position, quaternion_wxyz_to_rotation_6d(-quaternion)], axis=1
+    )
+    assert np.allclose(
+        extract_cartesian_controls(
+            flipped, detect_tcp_action_layouts(_pose_names_6d("single_arm"))
+        ),
+        modern_controls,
+    )
+
+
 def test_detect_tcp_action_layouts_uses_named_axes() -> None:
     names = [
         "left_arm.tcp_twist.vx",
@@ -39,6 +88,7 @@ def test_detect_tcp_action_layouts_uses_named_axes() -> None:
     assert [layout.side for layout in layouts] == ["left_arm", "right_arm"]
     assert layouts[0].pose_indices == tuple(range(8, 15))
     assert layouts[1].pose_indices == tuple(range(1, 8))
+    assert all(layout.rotation_indices is None for layout in layouts)
 
 
 def test_detect_tcp_action_layouts_rejects_incomplete_pose() -> None:
