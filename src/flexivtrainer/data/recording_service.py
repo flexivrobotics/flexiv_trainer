@@ -43,7 +43,6 @@ from flexivtrainer.data.lerobot_io import (
     resolve_recording_image_names,
     resolve_recording_vcodec,
 )
-from flexivtrainer.data.quaternion import QuaternionSignCanonicalizer
 from flexivtrainer.observability import warn
 
 # Default training job name shown in the recording panel's Job name box and
@@ -109,9 +108,6 @@ class RecordingService:
         self._teleop = teleop
         self._cameras = cameras
         self._get_active_sides = get_active_sides
-        self._quaternion_canonicalizer = QuaternionSignCanonicalizer(
-            reference=settings.recording_quaternion_reference
-        )
 
         self._lock = threading.Lock()
         self._active = False
@@ -256,8 +252,6 @@ class RecordingService:
             if isinstance(exc, RuntimeError):
                 raise
             raise RuntimeError(f"Failed to create dataset: {exc}") from exc
-
-        self._quaternion_canonicalizer.begin_episode()
 
         with self._lock:
             self._active = True
@@ -705,10 +699,7 @@ class RecordingService:
 
                 if requires_robot_values:
                     arm_values = extract_recording_frame_values(
-                        robot_snapshot,
-                        entries,
-                        sides,
-                        canonicalizer=self._quaternion_canonicalizer,
+                        robot_snapshot, entries, sides
                     )
                     for key, vector in arm_values.items():
                         frame[key] = np.array(vector, dtype=np.float32)

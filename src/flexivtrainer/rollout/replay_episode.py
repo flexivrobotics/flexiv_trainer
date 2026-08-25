@@ -54,12 +54,15 @@ import numpy as np
 import pandas as pd
 import scipy.spatial.transform as st
 
+from flexivtrainer.data.lerobot_io import rotation_6d_to_quaternion_wxyz
 from flexivtrainer.rollout.pose_interpolator import PoseTrajectoryInterpolator
 
-# Scalars per metric: tcp_pose is [x,y,z,qw,qx,qy,qz]; tcp_twist (velocity) is
-# 6-axis [vx,vy,vz, wx,wy,wz]. Matches the layout in service.py.
+# Scalars per metric: a driver pose is [x,y,z,qw,qx,qy,qz]; tcp_twist (velocity)
+# is 6-axis [vx,vy,vz, wx,wy,wz]. Matches the layout in service.py.
 _POSE_DIM = 7
 _TWIST_DIM = 6
+_POSITION_DIM = 3
+_ROTATION_6D_DIM = 6
 
 # Default motion limits, mirroring RolloutConfig so the two modes drive the arm
 # under identical constraints.
@@ -105,6 +108,18 @@ def _normalize_pose_quaternion(pose: list[float]) -> list[float]:
     if norm > 1e-6:
         pose[3:7] = [component / norm for component in quat]
     return pose
+
+
+def _replay_pose(
+    row: np.ndarray, pose_slice: slice, rotation_slice: slice | None
+) -> np.ndarray:
+    """Driver pose from one recorded action row, for either pose schema."""
+    if rotation_slice is None:
+        return np.asarray(_normalize_pose_quaternion(list(row[pose_slice])))
+    quaternion = rotation_6d_to_quaternion_wxyz(
+        np.asarray(row[rotation_slice], dtype=np.float64)
+    )
+    return np.concatenate([np.asarray(row[pose_slice], dtype=np.float64), quaternion])
 
 
 def _find_run(names: list[str], prefix: str) -> int | None:
@@ -208,7 +223,16 @@ def _build_timeline(
     twist_start = _find_run(action_names, f"{side}.tcp_twist.")
     if pose_start is None:
         raise ValueError(f"no '{side}.tcp_pose.*' run in action names")
-    pose_slice = slice(pose_start, pose_start + _POSE_DIM)
+    rotation_start = _find_run(action_names, f"{side}.tcp_rotation_6d.")
+    pose_slice = slice(
+        pose_start,
+        pose_start + (_POSITION_DIM if rotation_start is not None else _POSE_DIM),
+    )
+    rotation_slice = (
+        None
+        if rotation_start is None
+        else slice(rotation_start, rotation_start + _ROTATION_6D_DIM)
+    )
     twist_slice = (
         None if twist_start is None else slice(twist_start, twist_start + _TWIST_DIM)
     )
@@ -217,10 +241,7 @@ def _build_timeline(
     n = len(action)
     times = np.arange(n, dtype=np.float64) * dt
     poses = np.stack(
-        [
-            np.asarray(_normalize_pose_quaternion(list(action[k, pose_slice])))
-            for k in range(n)
-        ]
+        [_replay_pose(action[k], pose_slice, rotation_slice) for k in range(n)]
     )
 
     if velocity_mode == "twist":

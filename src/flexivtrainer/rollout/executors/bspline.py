@@ -26,12 +26,14 @@ import numpy as np
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize_scalar
 
-from flexivtrainer.data.bspline import rotation_6d_to_quaternion_wxyz
+from flexivtrainer.data.lerobot_io import (
+    ROTATION_6D_AXES,
+    rotation_6d_to_quaternion_wxyz,
+)
 from flexivtrainer.observability import describe_exception
 
 _FEATURE_PATTERN = re.compile(r"^bspline\.row_(\d+)\.(.+)$")
 _POSITION_AXES = ("x", "y", "z")
-_ROTATION_AXES = ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
 _ZERO_VECTOR = [0.0] * 6
 
 
@@ -202,7 +204,7 @@ def _parse_layout(
     layouts: list[_ArmLayout] = []
     for side in sides:
         position = tuple(f"{side}.tcp_pose.{axis}" for axis in _POSITION_AXES)
-        rotation = tuple(f"{side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_AXES)
+        rotation = tuple(f"{side}.tcp_rotation_6d.{axis}" for axis in ROTATION_6D_AXES)
         gripper = f"{side}.gripper.width"
         gripper_target_width = f"{side}.gripper.target_width"
         gripper_close = f"{side}.gripper.close"

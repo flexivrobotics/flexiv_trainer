@@ -27,6 +27,7 @@ from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     build_action_layout,
     normalize_pose_quaternion,
+    pose_command,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "WaypointExecutor",
     "build_action_layout",
     "normalize_pose_quaternion",
+    "pose_command",
 ]

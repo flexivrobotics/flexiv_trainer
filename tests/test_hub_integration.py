@@ -509,14 +509,14 @@ class TestLayoutWarning:
         message = _layout_warning(None, 26, ["single_arm"])
         assert message is not None
         assert "action width is 26" in message
-        assert "for 1 arm are 13 or 19" in message
+        assert "for 1 arm are 15 or 21" in message
         assert "Arm mode mismatch: set dual-arm mode" in message
         assert "gripper" not in message.lower()
 
     def test_warns_on_unknown_gripper_width(self):
         from flexivtrainer.api.routes.rollout import _layout_warning
 
-        message = _layout_warning(None, 15, ["single_arm"])
+        message = _layout_warning(None, 16, ["single_arm"])
         assert message is not None
         assert "action_names" in message
 
@@ -556,7 +556,7 @@ class TestLayoutWarning:
         assert layout_problem(None, 26, ["left_arm", "right_arm"]) is None
         dual = canonical_action_names(26, ["left_arm", "right_arm"])
         assert "set dual-arm mode" in layout_problem(dual, 26, ["single_arm"])
-        assert "Supply action_names" in layout_problem(None, 15, ["single_arm"])
+        assert "Supply action_names" in layout_problem(None, 16, ["single_arm"])
 
 
 class TestHubFineTuneCheckpoint:

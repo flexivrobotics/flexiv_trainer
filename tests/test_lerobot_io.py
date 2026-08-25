@@ -22,11 +22,19 @@ from flexivtrainer.data.lerobot_io import (
     extract_recording_depths,
     extract_recording_frame_values,
     extract_recording_images,
+    quaternion_wxyz_to_rotation_6d,
     resolve_recording_depth_names,
     resolve_recording_entries,
     resolve_recording_image_names,
     resolve_recording_vcodec,
 )
+
+
+def _pose_6d(base: int) -> list[float]:
+    """Recorded pose for _arm_payload: position then rotation-6D."""
+    pose = list(range(base, base + 7))
+    rotation = quaternion_wxyz_to_rotation_6d(np.asarray(pose[3:], dtype=float))
+    return [float(value) for value in pose[:3]] + rotation.tolist()
 
 
 def _arm_payload(base: int) -> dict:
@@ -152,11 +160,11 @@ def test_extract_recording_frame_values_groups_selected_metrics() -> None:
 
     # Every arm's selected metrics are concatenated into a single
     # observation.state / action vector (the layout stock LeRobot policies
-    # require). Here one arm: pose 7 + twist 6 + wrench 6 = 19 for state.
+    # require). Here one arm: pose 9 + twist 6 + wrench 6 = 21 for state.
     assert set(values) == {"observation.state", "action"}
-    assert values["observation.state"] == list(range(0, 7)) + list(
-        range(10, 16)
-    ) + list(range(20, 26))
+    assert values["observation.state"] == _pose_6d(0) + list(range(10, 16)) + list(
+        range(20, 26)
+    )
     # Only the wrench action metric was selected.
     assert values["action"] == list(range(50, 56))
 
@@ -172,7 +180,7 @@ def test_extract_recording_frame_values_drops_unselected_metrics() -> None:
     )
 
     assert set(values) == {"observation.state"}
-    assert values["observation.state"] == list(range(0, 7)) + list(range(20, 26))
+    assert values["observation.state"] == _pose_6d(0) + list(range(20, 26))
 
 
 def test_extract_recording_frame_values_concatenates_both_arms() -> None:
@@ -186,15 +194,7 @@ def test_extract_recording_frame_values_concatenates_both_arms() -> None:
 
     # Both arms fold into one observation.state vector, left then right.
     assert set(values) == {"observation.state"}
-    assert values["observation.state"] == [0, 1, 2, 3, 4, 5, 6] + [
-        100,
-        101,
-        102,
-        103,
-        104,
-        105,
-        106,
-    ]
+    assert values["observation.state"] == _pose_6d(0) + _pose_6d(100)
 
 
 def test_gripper_state_and_accepted_command_use_separate_vectors() -> None:
@@ -217,8 +217,8 @@ def test_gripper_state_and_accepted_command_use_separate_vectors() -> None:
         ],
     )
 
-    assert values["observation.state"] == list(range(0, 7)) + [0.03, -2.0]
-    assert values["action"] == list(range(30, 37)) + [0.01]
+    assert values["observation.state"] == _pose_6d(0) + [0.03, -2.0]
+    assert values["action"] == _pose_6d(30) + [0.01]
 
 
 def test_gripper_entry_is_in_defaults_and_features_named() -> None:
@@ -249,7 +249,7 @@ def test_gripper_entry_is_in_defaults_and_features_named() -> None:
     )
 
     state_feature = features["observation.state"]
-    assert state_feature["shape"] == (9,)  # pose 7 + gripper 2
+    assert state_feature["shape"] == (11,)  # pose 9 + gripper 2
     assert state_feature["names"][-2:] == [
         "left_arm.gripper.width",
         "left_arm.gripper.force",
@@ -287,7 +287,7 @@ def test_gripper_entry_omitted_when_no_gripper_telemetry() -> None:
             "observation.state.left_arm.gripper",
         ],
     )
-    assert values["observation.state"] == list(range(0, 7))
+    assert values["observation.state"] == _pose_6d(0)
 
 
 def test_resolve_recording_image_names_filters_selected_cameras() -> None:
@@ -340,21 +340,23 @@ def test_build_features_from_sample_combines_arms_with_named_axes() -> None:
     assert state_keys == ["observation.state"]
     assert action_keys == ["action"]
 
-    # All three state metrics selected -> one 19-dim vector (7 + 6 + 6), with
+    # All three state metrics selected -> one 21-dim vector (9 + 6 + 6), with
     # axis names prefixed by the arm side.
     state_feature = features["observation.state"]
     assert state_feature["dtype"] == "float32"
-    assert state_feature["shape"] == (19,)
-    assert state_feature["names"][:7] == [
+    assert state_feature["shape"] == (21,)
+    assert state_feature["names"][:9] == [
         "left_arm.tcp_pose.x",
         "left_arm.tcp_pose.y",
         "left_arm.tcp_pose.z",
-        "left_arm.tcp_pose.q_w",
-        "left_arm.tcp_pose.q_x",
-        "left_arm.tcp_pose.q_y",
-        "left_arm.tcp_pose.q_z",
+        "left_arm.tcp_rotation_6d.r1_x",
+        "left_arm.tcp_rotation_6d.r1_y",
+        "left_arm.tcp_rotation_6d.r1_z",
+        "left_arm.tcp_rotation_6d.r2_x",
+        "left_arm.tcp_rotation_6d.r2_y",
+        "left_arm.tcp_rotation_6d.r2_z",
     ]
-    assert state_feature["names"][7] == "left_arm.tcp_twist.vx"
+    assert state_feature["names"][9] == "left_arm.tcp_twist.vx"
     assert state_feature["names"][-1] == "left_arm.tcp_wrench.mz"
 
     # Only the wrench action metric selected -> a 6-dim action vector.

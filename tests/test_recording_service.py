@@ -327,11 +327,13 @@ class _FakeTeleopWithQuaternionFlips:
         return None
 
 
-def test_recorded_quaternions_are_sign_continuous_and_action_matches_state(
+def test_recorded_rotation_is_identical_despite_driver_sign_flips(
     tmp_path,
 ) -> None:
     pytest.importorskip("lerobot")
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    from flexivtrainer.data.lerobot_io import rotation_6d_to_quaternion_wxyz
 
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     settings.ensure_storage()
@@ -343,7 +345,7 @@ def test_recorded_quaternions_are_sign_continuous_and_action_matches_state(
     )
     entries = ["observation.state.single_arm.tcp_pose", "action.single_arm.tcp_pose"]
 
-    service.start(task="quaternion sign test", fps=30, recording_entries=entries)
+    service.start(task="rotation sign test", fps=30, recording_entries=entries)
     try:
         _drive_capture(service, frames=6)
     finally:
@@ -352,22 +354,25 @@ def test_recorded_quaternions_are_sign_continuous_and_action_matches_state(
 
     dataset = LeRobotDataset(f"local/{result['episode_name']}", root=result["path"])
     names = dataset.features["observation.state"]["names"]
-    q_slice = slice(
-        names.index("single_arm.tcp_pose.q_w"),
-        names.index("single_arm.tcp_pose.q_z") + 1,
+    rotation = slice(
+        names.index("single_arm.tcp_rotation_6d.r1_x"),
+        names.index("single_arm.tcp_rotation_6d.r2_z") + 1,
     )
     states = np.stack(
         [np.asarray(dataset[i]["observation.state"]) for i in range(len(dataset))]
     )
     actions = np.stack([np.asarray(dataset[i]["action"]) for i in range(len(dataset))])
-    q_state = states[:, q_slice]
-    q_action = actions[:, q_slice]
 
-    assert np.all(np.sum(q_state[1:] * q_state[:-1], axis=1) > 0.0)
-    assert np.all(np.sum(q_state * q_action, axis=1) > 0.0)
-    assert np.allclose(
-        np.abs(q_state), np.abs(_FakeTeleopWithQuaternionFlips._QUAT), atol=1e-6
-    )
+    # The driver alternates q / -q and reports the action with the opposite sign
+    # of the state; rotation-6D cannot represent either difference.
+    assert np.allclose(states[:, rotation], states[0, rotation], atol=1e-6)
+    assert np.allclose(states[:, rotation], actions[:, rotation], atol=1e-6)
+    assert np.allclose(states[:, rotation].std(axis=0), 0.0, atol=1e-6)
+
+    recovered = rotation_6d_to_quaternion_wxyz(states[0, rotation].astype(np.float64))
+    expected = np.asarray(_FakeTeleopWithQuaternionFlips._QUAT)
+    expected = expected / np.linalg.norm(expected)
+    assert np.allclose(np.abs(recovered), np.abs(expected), atol=1e-6)
     assert np.allclose(states[:, :3], [0.1, 0.2, 0.3], atol=1e-6)
 
 

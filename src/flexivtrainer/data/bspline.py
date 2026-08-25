@@ -36,10 +36,15 @@ from scipy.interpolate import (
     make_interp_spline,
     make_lsq_spline,
 )
-from scipy.spatial.transform import Rotation
 
-_POSE_AXES = ("x", "y", "z", "q_w", "q_x", "q_y", "q_z")
-_ROTATION_6D_AXES = ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
+from flexivtrainer.data.lerobot_io import (
+    ROTATION_6D_AXES,
+    quaternion_wxyz_to_rotation_6d,
+)
+
+_POSITION_AXES = ("x", "y", "z")
+# Poses recorded before rotation-6D; converted on read so both train the same.
+_LEGACY_POSE_AXES = ("x", "y", "z", "q_w", "q_x", "q_y", "q_z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +53,7 @@ class TCPActionLayout:
 
     side: str
     pose_indices: tuple[int, ...]
+    rotation_indices: tuple[int, ...] | None = None
     gripper_width_index: int | None = None
     gripper_target_width_index: int | None = None
 
@@ -61,9 +67,9 @@ class TCPActionLayout:
 
     @property
     def control_names(self) -> tuple[str, ...]:
-        position = tuple(f"{self.side}.tcp_pose.{axis}" for axis in _POSE_AXES[:3])
+        position = tuple(f"{self.side}.tcp_pose.{axis}" for axis in _POSITION_AXES)
         rotation = tuple(
-            f"{self.side}.tcp_rotation_6d.{axis}" for axis in _ROTATION_6D_AXES
+            f"{self.side}.tcp_rotation_6d.{axis}" for axis in ROTATION_6D_AXES
         )
         if self.gripper_width_index is not None:
             gripper = (f"{self.side}.gripper.width",)
@@ -124,8 +130,17 @@ def detect_tcp_action_layouts(
 
     layouts: list[TCPActionLayout] = []
     for side in selected:
-        expected = [f"{side}.tcp_pose.{axis}" for axis in _POSE_AXES]
-        missing = [name for name in expected if name not in name_to_index]
+        rotation = [f"{side}.tcp_rotation_6d.{axis}" for axis in ROTATION_6D_AXES]
+        is_6d = all(name in name_to_index for name in rotation)
+        expected = [
+            f"{side}.tcp_pose.{axis}"
+            for axis in (_POSITION_AXES if is_6d else _LEGACY_POSE_AXES)
+        ]
+        missing = [
+            name
+            for name in (expected + rotation if is_6d else expected)
+            if name not in name_to_index
+        ]
         if missing:
             raise ValueError(
                 f"Incomplete TCP pose action for side '{side}'; missing {missing}"
@@ -146,6 +161,9 @@ def detect_tcp_action_layouts(
             TCPActionLayout(
                 side=side,
                 pose_indices=tuple(name_to_index[name] for name in expected),
+                rotation_indices=(
+                    tuple(name_to_index[name] for name in rotation) if is_6d else None
+                ),
                 gripper_width_index=width_index,
                 gripper_target_width_index=target_width_index,
             )
@@ -163,66 +181,6 @@ def detect_tcp_action_layouts(
     return layouts
 
 
-def quaternion_wxyz_to_rotation_6d(quaternion: np.ndarray) -> np.ndarray:
-    """Convert unit quaternions to the first two rows of rotation matrices."""
-
-    quaternion = np.asarray(quaternion, dtype=np.float64)
-    if quaternion.shape[-1] != 4:
-        raise ValueError(f"Expected quaternion shape (..., 4), got {quaternion.shape}")
-    norms = np.linalg.norm(quaternion, axis=-1, keepdims=True)
-    if np.any(~np.isfinite(norms)) or np.any(norms < 1e-8):
-        raise ValueError("TCP pose contains a non-finite or near-zero quaternion")
-    normalized = quaternion / norms
-    quaternion_xyzw = np.concatenate(
-        [normalized[..., 1:], normalized[..., :1]], axis=-1
-    )
-    matrices = Rotation.from_quat(quaternion_xyzw.reshape(-1, 4)).as_matrix()
-    rotation_6d = matrices[:, :2, :].reshape(-1, 6)
-    return rotation_6d.reshape(quaternion.shape[:-1] + (6,))
-
-
-def rotation_6d_to_matrix(rotation_6d: np.ndarray) -> np.ndarray:
-    """Project rotation-6D values onto SO(3) using Gram-Schmidt."""
-
-    rotation_6d = np.asarray(rotation_6d, dtype=np.float64)
-    if rotation_6d.shape[-1] != 6:
-        raise ValueError(
-            f"Expected rotation-6D shape (..., 6), got {rotation_6d.shape}"
-        )
-    flat = rotation_6d.reshape(-1, 6)
-    first = flat[:, :3]
-    second = flat[:, 3:]
-
-    first_norm = np.linalg.norm(first, axis=1, keepdims=True)
-    if np.any(~np.isfinite(first_norm)) or np.any(first_norm < 1e-8):
-        raise ValueError("Rotation-6D first basis vector is degenerate")
-    basis_1 = first / first_norm
-
-    orthogonal = second - np.sum(basis_1 * second, axis=1, keepdims=True) * basis_1
-    second_norm = np.linalg.norm(orthogonal, axis=1, keepdims=True)
-    if np.any(~np.isfinite(second_norm)) or np.any(second_norm < 1e-8):
-        raise ValueError("Rotation-6D second basis vector is degenerate")
-    basis_2 = orthogonal / second_norm
-    basis_3 = np.cross(basis_1, basis_2)
-
-    matrices = np.stack([basis_1, basis_2, basis_3], axis=1)
-    return matrices.reshape(rotation_6d.shape[:-1] + (3, 3))
-
-
-def rotation_6d_to_quaternion_wxyz(rotation_6d: np.ndarray) -> np.ndarray:
-    """Convert rotation-6D values to normalized ``[qw, qx, qy, qz]``."""
-
-    matrices = rotation_6d_to_matrix(rotation_6d)
-    quaternion_xyzw = Rotation.from_matrix(matrices.reshape(-1, 3, 3)).as_quat()
-    quaternion_wxyz = np.concatenate(
-        [quaternion_xyzw[:, 3:4], quaternion_xyzw[:, :3]], axis=1
-    )
-    # Choose one deterministic representative of q == -q.
-    flip = quaternion_wxyz[:, :1] < 0
-    quaternion_wxyz = np.where(flip, -quaternion_wxyz, quaternion_wxyz)
-    return quaternion_wxyz.reshape(matrices.shape[:-2] + (4,))
-
-
 def extract_cartesian_controls(
     actions: np.ndarray,
     layouts: Sequence[TCPActionLayout],
@@ -238,8 +196,12 @@ def extract_cartesian_controls(
     controls: list[np.ndarray] = []
     for layout in layouts:
         pose = actions[:, layout.pose_indices]
-        position = pose[:, :3]
-        rotation_6d = quaternion_wxyz_to_rotation_6d(pose[:, 3:7])
+        if layout.rotation_indices is None:
+            position = pose[:, :3]
+            rotation_6d = quaternion_wxyz_to_rotation_6d(pose[:, 3:7])
+        else:
+            position = pose
+            rotation_6d = actions[:, layout.rotation_indices]
         arm_controls = [position, rotation_6d]
         if layout.gripper_width_index is not None:
             arm_controls.append(actions[:, layout.gripper_width_index, None])

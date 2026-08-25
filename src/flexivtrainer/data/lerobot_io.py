@@ -16,15 +16,81 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from flexivtrainer.data.quaternion import QuaternionSignCanonicalizer
+from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)
+
+# Rotation-6D is the shared orientation representation for recorded poses
+# and every policy that consumes them: it is a function of the rotation
+# matrix, so the driver's interchangeable q / -q collapse to one value.
+ROTATION_6D_AXES = ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
+
+
+def quaternion_wxyz_to_rotation_6d(quaternion: np.ndarray) -> np.ndarray:
+    """Convert unit quaternions to the first two rows of rotation matrices."""
+
+    quaternion = np.asarray(quaternion, dtype=np.float64)
+    if quaternion.shape[-1] != 4:
+        raise ValueError(f"Expected quaternion shape (..., 4), got {quaternion.shape}")
+    norms = np.linalg.norm(quaternion, axis=-1, keepdims=True)
+    if np.any(~np.isfinite(norms)) or np.any(norms < 1e-8):
+        raise ValueError("TCP pose contains a non-finite or near-zero quaternion")
+    normalized = quaternion / norms
+    quaternion_xyzw = np.concatenate(
+        [normalized[..., 1:], normalized[..., :1]], axis=-1
+    )
+    matrices = Rotation.from_quat(quaternion_xyzw.reshape(-1, 4)).as_matrix()
+    rotation_6d = matrices[:, :2, :].reshape(-1, 6)
+    return rotation_6d.reshape(quaternion.shape[:-1] + (6,))
+
+
+def rotation_6d_to_matrix(rotation_6d: np.ndarray) -> np.ndarray:
+    """Project rotation-6D values onto SO(3) using Gram-Schmidt."""
+
+    rotation_6d = np.asarray(rotation_6d, dtype=np.float64)
+    if rotation_6d.shape[-1] != 6:
+        raise ValueError(
+            f"Expected rotation-6D shape (..., 6), got {rotation_6d.shape}"
+        )
+    flat = rotation_6d.reshape(-1, 6)
+    first = flat[:, :3]
+    second = flat[:, 3:]
+
+    first_norm = np.linalg.norm(first, axis=1, keepdims=True)
+    if np.any(~np.isfinite(first_norm)) or np.any(first_norm < 1e-8):
+        raise ValueError("Rotation-6D first basis vector is degenerate")
+    basis_1 = first / first_norm
+
+    orthogonal = second - np.sum(basis_1 * second, axis=1, keepdims=True) * basis_1
+    second_norm = np.linalg.norm(orthogonal, axis=1, keepdims=True)
+    if np.any(~np.isfinite(second_norm)) or np.any(second_norm < 1e-8):
+        raise ValueError("Rotation-6D second basis vector is degenerate")
+    basis_2 = orthogonal / second_norm
+    basis_3 = np.cross(basis_1, basis_2)
+
+    matrices = np.stack([basis_1, basis_2, basis_3], axis=1)
+    return matrices.reshape(rotation_6d.shape[:-1] + (3, 3))
+
+
+def rotation_6d_to_quaternion_wxyz(rotation_6d: np.ndarray) -> np.ndarray:
+    """Convert rotation-6D values to normalized ``[qw, qx, qy, qz]``."""
+
+    matrices = rotation_6d_to_matrix(rotation_6d)
+    quaternion_xyzw = Rotation.from_matrix(matrices.reshape(-1, 3, 3)).as_quat()
+    quaternion_wxyz = np.concatenate(
+        [quaternion_xyzw[:, 3:4], quaternion_xyzw[:, :3]], axis=1
+    )
+    # Choose one deterministic representative of q == -q.
+    flip = quaternion_wxyz[:, :1] < 0
+    quaternion_wxyz = np.where(flip, -quaternion_wxyz, quaternion_wxyz)
+    return quaternion_wxyz.reshape(matrices.shape[:-2] + (4,))
+
 
 # Camera MP4s are previewed in the browser across Ubuntu/macOS/Windows on
 # x64/arm64/aarch64, so the codec must be H.264 — the one format every browser
@@ -106,16 +172,16 @@ def _depth_entry_to_camera(sides: list[str]) -> dict[str, str]:
 
 
 # Per-metric axis names. The full sub-feature label is "<metric>.<axis>", e.g.
-# "tcp_pose.x" or "tcp_wrench.fz". tcp_pose carries position + quaternion.
+# "tcp_pose.x" or "tcp_wrench.fz". The driver reports orientation as a
+# quaternion, but q and -q are the same rotation and its reported sign flips
+# mid-trajectory, so poses are stored as position + rotation-6D instead.
 _TCP_POSE_AXES = [
     "tcp_pose.x",
     "tcp_pose.y",
     "tcp_pose.z",
-    "tcp_pose.q_w",
-    "tcp_pose.q_x",
-    "tcp_pose.q_y",
-    "tcp_pose.q_z",
+    *(f"tcp_rotation_6d.{axis}" for axis in ROTATION_6D_AXES),
 ]
+_DRIVER_POSE_DIM = 7
 _TCP_TWIST_AXES = [
     "tcp_twist.vx",
     "tcp_twist.vy",
@@ -300,6 +366,14 @@ def extract_recording_depths(
     return {name: depths[name] for name in selected if name in depths}
 
 
+def _pose_to_rotation_6d(pose: Sequence[float]) -> list[float]:
+    """Driver poses are ``[x, y, z, q_w..q_z]``; recorded poses carry 6D."""
+    if len(pose) != _DRIVER_POSE_DIM:
+        return [float(value) for value in pose]
+    rotation = quaternion_wxyz_to_rotation_6d(np.asarray(pose[3:], dtype=np.float64))
+    return [float(value) for value in pose[:3]] + rotation.tolist()
+
+
 def _collect_arm_group(
     section: Any,
     side: str,
@@ -326,6 +400,8 @@ def _collect_arm_group(
         vector = section.get(field) if isinstance(section, dict) else None
         if not isinstance(vector, (list, tuple)):
             continue
+        if label == "tcp_pose":
+            vector = _pose_to_rotation_6d(vector)
         for index, value in enumerate(vector):
             values.append(float(value))
             names.append(
@@ -436,22 +512,15 @@ def extract_recording_frame_values(
     robot_snapshot: dict[str, Any],
     entries: list[str] | None = None,
     sides: list[str] | None = None,
-    canonicalizer: QuaternionSignCanonicalizer | None = None,
 ) -> dict[str, list[float]]:
-    """Per-frame vectors keyed by feature (``observation.state`` and ``action``).
-
-    ``canonicalizer`` makes each arm's ``tcp_pose`` quaternion sign continuous.
-    """
+    """Per-frame vectors keyed by feature (``observation.state`` and ``action``)."""
     resolved_entries = set(resolve_recording_entries(entries, sides))
-    result: dict[str, list[float]] = {}
-    for key, values, names in _iter_combined_features(
-        robot_snapshot, resolved_entries, sides
-    ):
-        if canonicalizer is not None:
-            kind = "state" if key == "observation.state" else "action"
-            values = canonicalizer.apply(values, names, kind)
-        result[key] = values
-    return result
+    return {
+        key: values
+        for key, values, _ in _iter_combined_features(
+            robot_snapshot, resolved_entries, sides
+        )
+    }
 
 
 def build_features_from_sample(

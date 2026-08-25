@@ -21,12 +21,26 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
+from flexivtrainer.data.lerobot_io import (
+    ROTATION_6D_AXES,
+    rotation_6d_to_quaternion_wxyz,
+)
 from flexivtrainer.observability import describe_exception, warn
 
-_POSE_DIM = 7
+_POSE_DIM = 9
+# Checkpoints recorded before poses moved to rotation-6D.
+_LEGACY_POSE_DIM = 7
 _TWIST_DIM = 6
 _WRENCH_DIM = 6
-_POSE_AXES = ("x", "y", "z", "q_w", "q_x", "q_y", "q_z")
+_POSITION_AXES = ("x", "y", "z")
+_LEGACY_POSE_AXES = ("x", "y", "z", "q_w", "q_x", "q_y", "q_z")
+_POSE_GROUPS_6D = (
+    ("tcp_pose", _POSITION_AXES),
+    ("tcp_rotation_6d", ROTATION_6D_AXES),
+)
+_POSE_GROUPS_LEGACY = (("tcp_pose", _LEGACY_POSE_AXES),)
 _TWIST_AXES = ("vx", "vy", "vz", "wx", "wy", "wz")
 _WRENCH_AXES = ("fx", "fy", "fz", "mx", "my", "mz")
 # Keyed by active arm count; values match the ``arm_mode`` setting operators see.
@@ -62,7 +76,12 @@ def _layout_hint(action_dim: int, arm_count: int) -> str:
     A width that divides cleanly by 13 or 19 points at a different arm count --
     the common case, and the only one with a one-step fix.
     """
-    for per_arm in (_POSE_DIM + _TWIST_DIM, _POSE_DIM + _TWIST_DIM + _WRENCH_DIM):
+    for per_arm in (
+        _POSE_DIM + _TWIST_DIM,
+        _POSE_DIM + _TWIST_DIM + _WRENCH_DIM,
+        _LEGACY_POSE_DIM + _TWIST_DIM,
+        _LEGACY_POSE_DIM + _TWIST_DIM + _WRENCH_DIM,
+    ):
         if action_dim % per_arm:
             continue
         needed = action_dim // per_arm
@@ -109,7 +128,8 @@ def _width_preamble(action_dim: int, arm_count: int) -> str:
     """Shared opening clause: the observed width against the canonical ones."""
     return (
         f"Policy action width is {action_dim}; canonical widths for "
-        f"{_arm_count_text(arm_count)} are {_canonical_widths_text(arm_count)}"
+        f"{_arm_count_text(arm_count)} are "
+        f"{_canonical_widths_text(arm_count, action_dim)}"
     )
 
 
@@ -117,10 +137,14 @@ def _arm_count_text(arm_count: int) -> str:
     return f"{arm_count} arm" if arm_count == 1 else f"{arm_count} arms"
 
 
-def _canonical_widths_text(arm_count: int) -> str:
+def _canonical_widths_text(arm_count: int, action_dim: int | None = None) -> str:
     """The two inferable widths for an arm count, as ``13 or 19``."""
-    inferable, with_wrench = _canonical_widths(arm_count)
-    return f"{inferable} or {with_wrench}"
+    widths = _canonical_widths(arm_count)
+    # Quote the family the width actually belongs to, so a legacy checkpoint is
+    # not told its own working width is non-canonical.
+    if action_dim is not None and action_dim in _legacy_widths(arm_count):
+        widths = _legacy_widths(arm_count)
+    return f"{widths[0]} or {widths[1]}"
 
 
 def _sides_hint(checkpoint_sides: list[str], active_sides: list[str]) -> str:
@@ -158,6 +182,14 @@ def _canonical_widths(arm_count: int) -> tuple[int, int]:
     )
 
 
+def _legacy_widths(arm_count: int) -> tuple[int, int]:
+    """The same two widths for checkpoints predating rotation-6D poses."""
+    return (
+        arm_count * (_LEGACY_POSE_DIM + _TWIST_DIM),
+        arm_count * (_LEGACY_POSE_DIM + _TWIST_DIM + _WRENCH_DIM),
+    )
+
+
 def _pose_sides(action_names: list[str]) -> list[str]:
     """Arm sides named by a flat action schema, in first-seen order."""
     marker = ".tcp_pose."
@@ -172,26 +204,25 @@ def _pose_sides(action_names: list[str]) -> list[str]:
 
 
 def canonical_action_names(action_dim: int, sides: list[str]) -> list[str]:
-    """Infer only the recorder's unambiguous legacy waypoint layouts."""
+    """Infer only the recorder's unambiguous waypoint layouts."""
 
     if not sides:
         raise ValueError("At least one active arm side is required")
-    if action_dim == len(sides) * (_POSE_DIM + _TWIST_DIM + _WRENCH_DIM):
-        groups = (
-            ("tcp_pose", _POSE_AXES),
-            ("tcp_twist", _TWIST_AXES),
-            ("tcp_wrench", _WRENCH_AXES),
-        )
-    elif action_dim == len(sides) * (_POSE_DIM + _TWIST_DIM):
-        groups = (("tcp_pose", _POSE_AXES), ("tcp_twist", _TWIST_AXES))
-    else:
-        raise ValueError(_layout_hint(action_dim, len(sides)))
-    return [
-        f"{side}.{group}.{axis}"
-        for side in sides
-        for group, axes in groups
-        for axis in axes
-    ]
+    for pose_groups in (_POSE_GROUPS_6D, _POSE_GROUPS_LEGACY):
+        for tail in (
+            (("tcp_twist", _TWIST_AXES), ("tcp_wrench", _WRENCH_AXES)),
+            (("tcp_twist", _TWIST_AXES),),
+        ):
+            groups = (*pose_groups, *tail)
+            width = sum(len(axes) for _, axes in groups)
+            if action_dim == len(sides) * width:
+                return [
+                    f"{side}.{group}.{axis}"
+                    for side in sides
+                    for group, axes in groups
+                    for axis in axes
+                ]
+    raise ValueError(_layout_hint(action_dim, len(sides)))
 
 
 def build_action_layout(
@@ -238,6 +269,12 @@ def build_action_layout(
                 f"Action schema cannot contain both '{legacy_width_name}' and "
                 f"'{target_width_name}'"
             )
+        rotation_slice = _group_slice(
+            action_names,
+            f"{side}.tcp_rotation_6d.",
+            ROTATION_6D_AXES,
+            required=False,
+        )
         gripper_width = target_width if target_width is not None else legacy_width
         if gripper_force_name in action_names and legacy_width is None:
             raise ValueError(
@@ -250,9 +287,10 @@ def build_action_layout(
                 "pose": _group_slice(
                     action_names,
                     f"{side}.tcp_pose.",
-                    _POSE_AXES,
+                    _POSITION_AXES if rotation_slice else _LEGACY_POSE_AXES,
                     required=True,
                 ),
+                "rotation": rotation_slice,
                 "twist": _group_slice(
                     action_names,
                     f"{side}.tcp_twist.",
@@ -300,7 +338,10 @@ def layout_problem(
     if not sides:
         return None
     if action_names is None:
-        if action_dim not in _canonical_widths(len(sides)):
+        if action_dim not in (
+            *_canonical_widths(len(sides)),
+            *_legacy_widths(len(sides)),
+        ):
             return _layout_hint(action_dim, len(sides))
         names = canonical_action_names(action_dim, sides)
     else:
@@ -323,9 +364,25 @@ def layout_problem(
     return None
 
 
+def pose_command(plan: Mapping[str, Any], action: Any) -> list[float]:
+    """Driver pose ``[x, y, z, q_w..q_z]`` for one arm's planned action.
+
+    ``SendCartesianMotionForce`` takes a quaternion, so a rotation-6D schema is
+    converted here and everything downstream stays on 7-element poses.
+    """
+    pose = [float(value) for value in action[plan["pose"]]]
+    rotation = plan.get("rotation")
+    if rotation is None:
+        return normalize_pose_quaternion(pose)
+    quaternion = rotation_6d_to_quaternion_wxyz(
+        np.asarray(action[rotation], dtype=np.float64)
+    )
+    return pose + [float(value) for value in quaternion]
+
+
 def normalize_pose_quaternion(pose: list[float]) -> list[float]:
     pose = list(pose)
-    if len(pose) < _POSE_DIM:
+    if len(pose) < _LEGACY_POSE_DIM:
         return pose
     quat = pose[3:7]
     norm = sum(component * component for component in quat) ** 0.5
@@ -431,7 +488,7 @@ class WaypointExecutor:
                 wrench_slice = arm_plan["wrench"]
                 commands.append(
                     _RobotCommand(
-                        pose=normalize_pose_quaternion(list(action[pose_slice])),
+                        pose=pose_command(arm_plan, action),
                         wrench=(
                             list(action[wrench_slice])
                             if wrench_slice is not None
