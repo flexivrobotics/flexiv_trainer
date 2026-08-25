@@ -27,7 +27,6 @@ from flexivtrainer.config import (
     TeleopRobotPair,
     get_settings,
 )
-from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.jobs.train_policy import TrainingService
 from flexivtrainer.observability import describe_exception, warn
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
@@ -145,9 +144,7 @@ class RuntimeManager:
             gripper_initialization_registry=self.gripper_initialization,
         )
         self.cameras = CameraService(settings)
-        self.cameras.set_active_locations(
-            active_camera_names(self._robot_config.active_sides())
-        )
+        self.cameras.set_active_locations(self._robot_config.active_camera_names())
         self._load_camera_config()
         try:
             from flexivtrainer.data.recording_service import RecordingService
@@ -157,7 +154,11 @@ class RuntimeManager:
             )
         else:
             self.recording = RecordingService(
-                settings, self.teleop, self.cameras, self.get_active_sides
+                settings,
+                self.teleop,
+                self.cameras,
+                self.get_active_sides,
+                self.get_active_cameras,
             )
         self.training = TrainingService(settings)
         try:
@@ -173,6 +174,7 @@ class RuntimeManager:
                 self.teleop,
                 self.get_teleop_robot_pairs,
                 self.get_active_sides,
+                self.get_active_cameras,
                 get_end_effector_config=self.get_end_effector_config,
                 get_gripper_default_width=self.get_gripper_default_width,
                 gripper_initialization_registry=self.gripper_initialization,
@@ -207,6 +209,9 @@ class RuntimeManager:
 
     def get_active_sides(self) -> list[str]:
         return self._robot_config.active_sides()
+
+    def get_active_cameras(self) -> list[str]:
+        return self._robot_config.active_camera_names()
 
     def get_end_effector_config(self) -> dict[str, Any]:
         return self._robot_config.end_effector_config
@@ -252,7 +257,7 @@ class RuntimeManager:
         )
 
     def camera_config_snapshot(self) -> dict[str, Any]:
-        active = active_camera_names(self.get_active_sides())
+        active = self.get_active_cameras()
         configured = self.cameras.configured_serials()
         return {
             "cameras": [
@@ -316,22 +321,46 @@ class RuntimeManager:
                     "gripper_force_limit_n": result["force"],
                 }
             )
-        # These save on every toggle; they must not bounce the services.
+        camera_layout_changed = (
+            normalized.camera_names != self._robot_config.camera_names
+            or normalized.camera_counts != self._robot_config.camera_counts
+        )
+        if camera_layout_changed and self.recording.status().get("active"):
+            raise ValueError("Camera layout cannot change while recording")
+        # These save on every toggle; they must not bounce the services. Camera
+        # slots too: set_active_locations() below already applies them, and no
+        # robot service depends on the camera layout.
         ignored = {
             "recording_entries": [],
             "record_resolution": "",
             "gripper_default_width_m": None,
             "gripper_velocity_m_s": None,
             "gripper_force_limit_n": None,
+            "camera_names": {},
+            "camera_counts": {},
         }
         changed = normalized.model_copy(update=ignored) != (
             self._robot_config.model_copy(update=ignored)
         )
+        # A renamed slot keeps its assigned device. Across an arm-mode switch
+        # the modes hold separate slot lists, so there is nothing to carry.
+        if normalized.arm_mode == self._robot_config.arm_mode:
+            renames = {
+                old: new
+                for old, new in zip(
+                    self._robot_config.camera_slot_names(),
+                    normalized.camera_slot_names(),
+                    strict=False,
+                )
+                if old != new
+            }
+            if renames:
+                self.cameras.rename_locations(renames)
         self._robot_config = normalized
         self._save_robot_config()
-        self.cameras.set_active_locations(
-            active_camera_names(self._robot_config.active_sides())
-        )
+        self.cameras.set_active_locations(self._robot_config.active_camera_names())
+        if camera_layout_changed:
+            self._save_camera_config()
         if changed:
             self.recording.shutdown()
             self.teleop.shutdown()

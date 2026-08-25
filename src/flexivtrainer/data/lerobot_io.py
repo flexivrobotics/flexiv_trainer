@@ -158,16 +158,24 @@ _WRIST_CAMERA_BY_SIDE = {
 
 
 def active_camera_names(sides: list[str] | None = None) -> list[str]:
+    """The layout a rig records until its camera slots are configured."""
     return ["ego"] + [_WRIST_CAMERA_BY_SIDE[side] for side in _resolve_sides(sides)]
 
 
-def _image_entry_to_camera(sides: list[str]) -> dict[str, str]:
-    cameras = ["ego"] + [_WRIST_CAMERA_BY_SIDE[side] for side in sides]
+def _resolve_cameras(
+    sides: list[str] | None, cameras: list[str] | None
+) -> list[str]:
+    # Slots are operator-named (RobotSerialConfig.camera_names), so callers
+    # holding the runtime config pass them. The default keeps every
+    # dataset-only caller working unchanged.
+    return list(cameras) if cameras else active_camera_names(sides)
+
+
+def _image_entry_to_camera(cameras: list[str]) -> dict[str, str]:
     return {f"observation.images.{name}": name for name in cameras}
 
 
-def _depth_entry_to_camera(sides: list[str]) -> dict[str, str]:
-    cameras = ["ego"] + [_WRIST_CAMERA_BY_SIDE[side] for side in sides]
+def _depth_entry_to_camera(cameras: list[str]) -> dict[str, str]:
     return {f"observation.images.{name}_depth": name for name in cameras}
 
 
@@ -248,13 +256,16 @@ def action_entry_keys(sides: list[str] | None = None) -> set[str]:
     }
 
 
-# Recording entries mirror the dataset's plottable vectors one-for-one: each
-# arm's wrist camera (plus the shared ego) and its per-metric state/action.
-def default_recording_entry_keys(sides: list[str] | None = None) -> list[str]:
+# Recording entries mirror the dataset's plottable vectors one-for-one: every
+# active camera and each arm's per-metric state/action.
+def default_recording_entry_keys(
+    sides: list[str] | None = None, cameras: list[str] | None = None
+) -> list[str]:
     resolved = _resolve_sides(sides)
+    resolved_cameras = _resolve_cameras(resolved, cameras)
     return (
-        list(_image_entry_to_camera(resolved))
-        + list(_depth_entry_to_camera(resolved))
+        list(_image_entry_to_camera(resolved_cameras))
+        + list(_depth_entry_to_camera(resolved_cameras))
         + [
             f"observation.state.{side}.{label}"
             for side in resolved
@@ -302,9 +313,11 @@ def _normalize_unique(items: list[str]) -> list[str]:
 
 
 def resolve_recording_entries(
-    entries: list[str] | None = None, sides: list[str] | None = None
+    entries: list[str] | None = None,
+    sides: list[str] | None = None,
+    cameras: list[str] | None = None,
 ) -> list[str]:
-    default = default_recording_entry_keys(sides)
+    default = default_recording_entry_keys(sides, cameras)
     if entries is None:
         return default
 
@@ -316,11 +329,9 @@ def resolve_recording_entries(
     return resolved
 
 
-def resolve_recording_image_names(
-    entries: list[str] | None = None, sides: list[str] | None = None
+def _cameras_for_entries(
+    resolved_entries: list[str], entry_to_camera: dict[str, str]
 ) -> list[str]:
-    resolved_entries = resolve_recording_entries(entries, sides)
-    entry_to_camera = _image_entry_to_camera(_resolve_sides(sides))
     camera_names: list[str] = []
     seen: set[str] = set()
     for entry in resolved_entries:
@@ -330,39 +341,47 @@ def resolve_recording_image_names(
         camera_names.append(camera_name)
         seen.add(camera_name)
     return camera_names
+
+
+def resolve_recording_image_names(
+    entries: list[str] | None = None,
+    sides: list[str] | None = None,
+    cameras: list[str] | None = None,
+) -> list[str]:
+    return _cameras_for_entries(
+        resolve_recording_entries(entries, sides, cameras),
+        _image_entry_to_camera(_resolve_cameras(sides, cameras)),
+    )
 
 
 def extract_recording_images(
     images: dict[str, np.ndarray],
     entries: list[str] | None = None,
     sides: list[str] | None = None,
+    cameras: list[str] | None = None,
 ) -> dict[str, np.ndarray]:
-    selected = resolve_recording_image_names(entries, sides)
+    selected = resolve_recording_image_names(entries, sides, cameras)
     return {name: images[name] for name in selected if name in images}
 
 
 def resolve_recording_depth_names(
-    entries: list[str] | None = None, sides: list[str] | None = None
+    entries: list[str] | None = None,
+    sides: list[str] | None = None,
+    cameras: list[str] | None = None,
 ) -> list[str]:
-    resolved_entries = resolve_recording_entries(entries, sides)
-    entry_to_camera = _depth_entry_to_camera(_resolve_sides(sides))
-    camera_names: list[str] = []
-    seen: set[str] = set()
-    for entry in resolved_entries:
-        camera_name = entry_to_camera.get(entry)
-        if not camera_name or camera_name in seen:
-            continue
-        camera_names.append(camera_name)
-        seen.add(camera_name)
-    return camera_names
+    return _cameras_for_entries(
+        resolve_recording_entries(entries, sides, cameras),
+        _depth_entry_to_camera(_resolve_cameras(sides, cameras)),
+    )
 
 
 def extract_recording_depths(
     depths: dict[str, np.ndarray],
     entries: list[str] | None = None,
     sides: list[str] | None = None,
+    cameras: list[str] | None = None,
 ) -> dict[str, np.ndarray]:
-    selected = resolve_recording_depth_names(entries, sides)
+    selected = resolve_recording_depth_names(entries, sides, cameras)
     return {name: depths[name] for name in selected if name in depths}
 
 
@@ -512,9 +531,12 @@ def extract_recording_frame_values(
     robot_snapshot: dict[str, Any],
     entries: list[str] | None = None,
     sides: list[str] | None = None,
+    cameras: list[str] | None = None,
 ) -> dict[str, list[float]]:
     """Per-frame vectors keyed by feature (``observation.state`` and ``action``)."""
-    resolved_entries = set(resolve_recording_entries(entries, sides))
+    # `cameras` yields no vectors, but `entries` may name image features that
+    # validate only against the configured layout.
+    resolved_entries = set(resolve_recording_entries(entries, sides, cameras))
     return {
         key: values
         for key, values, _ in _iter_combined_features(
@@ -529,11 +551,14 @@ def build_features_from_sample(
     entries: list[str] | None = None,
     sides: list[str] | None = None,
     depths: dict[str, np.ndarray] | None = None,
+    cameras: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
-    resolved_list = resolve_recording_entries(entries, sides)
+    resolved_list = resolve_recording_entries(entries, sides, cameras)
     resolved_entries = set(resolved_list)
-    selected_images = extract_recording_images(images, resolved_list, sides)
-    selected_depths = extract_recording_depths(depths or {}, resolved_list, sides)
+    selected_images = extract_recording_images(images, resolved_list, sides, cameras)
+    selected_depths = extract_recording_depths(
+        depths or {}, resolved_list, sides, cameras
+    )
 
     features: dict[str, dict[str, Any]] = {}
 

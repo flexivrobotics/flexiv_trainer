@@ -77,6 +77,7 @@ class BSplineRunner:
         gripper_default_width_m: float | None = None,
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
         gripper_command_parameters: GripperCommandMetadata | None = None,
+        camera_names: list[str] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -85,6 +86,7 @@ class BSplineRunner:
         self._sides = sides
         self._followers = followers
         self._cameras = cameras
+        self._camera_names = camera_names
         self._image_resolutions = image_resolutions
         self._rollout_cfg = rollout_cfg
         self._target_hz = target_hz
@@ -301,7 +303,8 @@ class BSplineRunner:
         period = 1.0 / target_hz
         next_observation = time.monotonic()
         observed_at = next_observation
-        camera_names = resolve_recording_image_names(None, sides)
+        cameras = self._camera_names
+        camera_names = resolve_recording_image_names(None, sides, cameras)
         max_steps = self._max_steps
         inference_latency = 0.0
         alignment_error = 0.0
@@ -366,7 +369,7 @@ class BSplineRunner:
                         robots, gripper_states, sides
                     )
                     observation = observations.build_observation(
-                        snapshot, images, sides
+                        snapshot, images, sides, cameras
                     )
                     prepared = observations._prepare_policy_observation(
                         observation,

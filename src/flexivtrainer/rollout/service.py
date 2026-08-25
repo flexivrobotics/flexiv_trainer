@@ -23,6 +23,7 @@ from functools import partial
 from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
+from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, ok, warn
 from flexivtrainer.policies import act as act_policy
@@ -92,6 +93,7 @@ class RolloutService:
         teleop: Any,
         get_robot_pairs: Callable[[], list[TeleopRobotPair]],
         get_active_sides: Callable[[], list[str]],
+        get_active_cameras: Callable[[], list[str]] | None = None,
         *,
         get_end_effector_config: Callable[[], dict[str, Any]] | None = None,
         get_gripper_default_width: Callable[[], float | None] | None = None,
@@ -105,6 +107,10 @@ class RolloutService:
         self._teleop = teleop
         self._get_robot_pairs = get_robot_pairs
         self._get_active_sides = get_active_sides
+        # Lets a caller construct the service without a camera configuration.
+        self._get_active_cameras = get_active_cameras or (
+            lambda: active_camera_names(get_active_sides())
+        )
         self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._get_gripper_default_width = get_gripper_default_width or (lambda: None)
         self._gripper_initialization_registry = gripper_initialization_registry
@@ -227,6 +233,7 @@ class RolloutService:
 
         device = self._resolve_device(self._settings.training.default_device)
         sides = self._get_active_sides()
+        camera_names = self._get_active_cameras()
         followers = [
             pair.follower_serial
             for pair in self._get_robot_pairs()
@@ -395,6 +402,7 @@ class RolloutService:
                 gripper_default_width_m=gripper_default_width_m,
                 gripper_initialization_registry=(self._gripper_initialization_registry),
                 gripper_command_parameters=gripper_command_parameters,
+                camera_names=camera_names,
             )
         else:
             assert waypoint_layout is not None
@@ -439,6 +447,7 @@ class RolloutService:
                 gripper_default_width_m=gripper_default_width_m,
                 gripper_initialization_registry=(self._gripper_initialization_registry),
                 gripper_command_parameters=gripper_command_parameters,
+                camera_names=camera_names,
             )
 
         with self._lock:

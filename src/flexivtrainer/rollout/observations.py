@@ -272,18 +272,23 @@ def grab_images(
 
 
 def build_observation(
-    snapshot: dict[str, Any], images: dict[str, np.ndarray], sides: list[str]
+    snapshot: dict[str, Any],
+    images: dict[str, np.ndarray],
+    sides: list[str],
+    cameras: list[str] | None = None,
 ) -> dict[str, Any]:
     observation: dict[str, Any] = {}
-    selected = extract_recording_images(images, None, sides)
+    selected = extract_recording_images(images, None, sides, cameras)
     for name, image in selected.items():
         observation[f"observation.images.{name}"] = image
     state_entries = [
         entry
-        for entry in default_recording_entry_keys(sides)
+        for entry in default_recording_entry_keys(sides, cameras)
         if entry.startswith("observation.state.")
     ]
-    frame_values = extract_recording_frame_values(snapshot, state_entries, sides)
+    frame_values = extract_recording_frame_values(
+        snapshot, state_entries, sides, cameras
+    )
     for key, vector in frame_values.items():
         if key.startswith("observation"):
             observation[key] = np.asarray(vector, dtype=np.float32)

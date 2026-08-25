@@ -87,6 +87,7 @@ class WaypointRunner:
         gripper_default_width_m: float | None = None,
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
         gripper_command_parameters: GripperCommandMetadata | None = None,
+        camera_names: list[str] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -94,6 +95,7 @@ class WaypointRunner:
         self._robots = robots
         self._sides = sides
         self._cameras = cameras
+        self._camera_names = camera_names
         self._image_resolutions = image_resolutions
         self._rollout_cfg = rollout_cfg
         self._target_hz = target_hz
@@ -210,7 +212,8 @@ class WaypointRunner:
         # Auto replan uses half the first effective action chunk.
         replan_steps: int | None = None
         max_steps = self._max_steps
-        camera_names = resolve_recording_image_names(None, sides)
+        cameras = self._camera_names
+        camera_names = resolve_recording_image_names(None, sides, cameras)
         layout = self._action_layout
         gripper = self._gripper_executor
         # Off by default: _actions_to_lists already syncs the tensors it copies,
@@ -308,7 +311,9 @@ class WaypointRunner:
                 stage_times["read_states"].append(now - mark)
                 mark = now
 
-                observation = observations.build_observation(snapshot, images, sides)
+                observation = observations.build_observation(
+                    snapshot, images, sides, cameras
+                )
                 now = time.monotonic()
                 stage_times["build_obs"].append(now - mark)
                 mark = now

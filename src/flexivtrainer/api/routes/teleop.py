@@ -24,10 +24,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from flexivtrainer.config import RobotSerialConfig
-from flexivtrainer.data.lerobot_io import (
-    DEFAULT_RECORDING_ENTRY_KEYS,
-    resolve_recording_entries,
-)
+from flexivtrainer.data.lerobot_io import resolve_recording_entries
 from flexivtrainer.observability import error, info, ok, warn
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
@@ -56,9 +53,8 @@ class GripperWidthRequest(BaseModel):
 class StartRecordingRequest(BaseModel):
     task: str = "Dual-arm Flexiv teleoperation demonstration"
     fps: int | None = Field(default=None, ge=1, le=120)
-    recording_entries: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_RECORDING_ENTRY_KEYS)
-    )
+    # None resolves to the rig's live layout; a frozen default would not follow it.
+    recording_entries: list[str] | None = None
     # Training job name; episodes sharing it are saved under the same
     # episodes/<job_name>/ subfolder. Sanitized server-side into one path
     # segment, falling back to the default when blank.
@@ -400,7 +396,9 @@ def start_recording(
 ) -> dict:
     try:
         recording_entries = resolve_recording_entries(
-            request.recording_entries, runtime.get_active_sides()
+            request.recording_entries,
+            runtime.get_active_sides(),
+            runtime.get_active_cameras(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

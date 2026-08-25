@@ -199,6 +199,7 @@ button:disabled {
 }
 
 .home-config-grid+.panel,
+.view[data-view="home"] > .panel+.panel,
 .view[data-view="home"] .panel+.panel-grid {
     margin-top: 1rem;
 }
@@ -232,6 +233,14 @@ button:disabled {
        and let the robot-serial tiles grow enough to show the full placeholder. */
     grid-template-columns: minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 1rem;
+}
+
+/* Wraps onto a second line rather than stretching the panel taller. */
+.camera-setup-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 0.8rem;
+    align-items: end;
 }
 
 .robot-input-grid {

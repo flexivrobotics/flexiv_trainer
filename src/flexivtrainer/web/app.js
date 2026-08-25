@@ -270,6 +270,54 @@ function getActiveSides() {
     return [...DUAL_SIDES];
 }
 
+function getArmMode() {
+    return state.summary?.robot_config?.arm_mode === "single" ? "single" : "dual";
+}
+
+// Mirrors MAX_CAMERAS_BY_ARM_MODE in config.py. The backend normalizes what is
+// saved, so this only bounds what the dropdown offers.
+const MAX_CAMERAS_BY_ARM_MODE = { single: 3, dual: 5 };
+
+function maxCameraCount() {
+    return MAX_CAMERAS_BY_ARM_MODE[getArmMode()];
+}
+
+// Mirrors default_camera_names() in config.py.
+function defaultCameraSlotNames() {
+    const names = ["ego", ...getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side])];
+    while (names.length < maxCameraCount()) {
+        names.push(`aux_${names.length - getActiveSides().length}`);
+    }
+    return names;
+}
+
+function cameraSlotNames() {
+    const saved = state.summary?.robot_config?.camera_names?.[getArmMode()];
+    return defaultCameraSlotNames().map((fallback, index) =>
+        (Array.isArray(saved) && typeof saved[index] === "string" && saved[index])
+            ? saved[index]
+            : fallback,
+    );
+}
+
+function activeCameraCount() {
+    const saved = state.summary?.robot_config?.camera_counts?.[getArmMode()];
+    const fallback = getActiveSides().length + 1;
+    const count = Number.isFinite(Number(saved)) ? Number(saved) : fallback;
+    return clamp(Math.round(count), 1, maxCameraCount());
+}
+
+function getActiveCameraNames() {
+    return cameraSlotNames().slice(0, activeCameraCount());
+}
+
+// Feeds tile two per row. An odd count would leave the last row half empty, so
+// the first camera takes a full-width hero and the even remainder tiles beneath.
+function cameraFeedLayout(cameraNames) {
+    const hero = cameraNames.length % 2 === 1 ? cameraNames[0] : null;
+    return { hero, row: hero ? cameraNames.slice(1) : cameraNames };
+}
+
 const RECORDING_METRICS = [
     { metric: "tcp_pose", stateField: "tcp_pose", actionField: "tcp_pose_d" },
     { metric: "tcp_twist", stateField: "tcp_vel", actionField: "tcp_vel_d" },
@@ -343,16 +391,11 @@ function buildArmMetricRecordingOptions(sides) {
     return options;
 }
 
-// The ego camera is shared; each active arm contributes its own wrist camera.
 function recordingEntryOptions() {
     const sides = getActiveSides();
-    const images = [
-        { id: "observation.images.ego", label: "ego", group: "observation.images", bucket: "image", sourceField: "ego" },
-    ];
-    sides.forEach((side) => {
-        const camera = WRIST_CAMERA_BY_SIDE[side];
-        images.push({ id: `observation.images.${camera}`, label: camera, group: "observation.images", bucket: "image", sourceField: camera });
-    });
+    const images = getActiveCameraNames().map((camera) => (
+        { id: `observation.images.${camera}`, label: camera, group: "observation.images", bucket: "image", sourceField: camera }
+    ));
     const depths = images.map((image) => ({
         id: `${image.id}_depth`,
         label: `${image.label}_depth`,
@@ -2402,10 +2445,103 @@ function reconcileRecordingEntries() {
 function onArmConfigChanged() {
     reconcileRecordingEntries();
     renderArmConfig();
+    renderCameraSetup();
     renderHomeRobotConfigInputs();
     renderHomeStatus();
     renderHomeEndEffectors();
     saveRecordingEntries();
+}
+
+// Anything CAMERA_NAME_RE in config.py rejects is silently replaced by the slot
+// default on the round trip, so keep the field to what it accepts.
+function sanitizeCameraName(value) {
+    return String(value).replace(/[^A-Za-z0-9_]/g, "").replace(/^_+/, "").slice(0, 32);
+}
+
+// Seeds the mode's slot list and count from the current (possibly default)
+// layout, so the PUT carries them whether or not they were ever saved.
+function cameraConfigForMode() {
+    const robotConfig = state.summary.robot_config || (state.summary.robot_config = {});
+    const mode = getArmMode();
+    if (!robotConfig.camera_names || typeof robotConfig.camera_names !== "object") {
+        robotConfig.camera_names = {};
+    }
+    if (!robotConfig.camera_counts || typeof robotConfig.camera_counts !== "object") {
+        robotConfig.camera_counts = {};
+    }
+    robotConfig.camera_names[mode] = cameraSlotNames();
+    robotConfig.camera_counts[mode] = activeCameraCount();
+    return { mode, robotConfig };
+}
+
+// Every slot is renameable -- `ego` and the wrist names are only what an
+// unconfigured slot starts as.
+function renderCameraSetup() {
+    if (!state.summary) {
+        return;
+    }
+    const container = byId("home-camera-setup");
+    if (!container) {
+        return;
+    }
+    const count = activeCameraCount();
+    const limit = maxCameraCount();
+    const options = [];
+    for (let value = 1; value <= limit; value += 1) {
+        options.push(`<option value="${value}"${value === count ? " selected" : ""}>${value}</option>`);
+    }
+    container.innerHTML = "";
+
+    const countField = document.createElement("label");
+    countField.className = "robot-input-group";
+    countField.innerHTML = `
+        <span>Cameras</span>
+        <select id="camera-count-select">${options.join("")}</select>
+    `;
+    countField.querySelector("select").onchange = (event) => {
+        const { mode, robotConfig } = cameraConfigForMode();
+        robotConfig.camera_counts[mode] = Number(event.target.value);
+        onCameraConfigChanged();
+    };
+    container.appendChild(countField);
+
+    cameraSlotNames().slice(0, count).forEach((name, index) => {
+        const field = document.createElement("label");
+        field.className = "robot-input-group";
+        field.innerHTML = `
+            <span>Camera ${index + 1}</span>
+            <input type="text" value="${escapeHtml(name)}" maxlength="32" placeholder="camera_name" />
+        `;
+        const input = field.querySelector("input");
+        input.oninput = () => {
+            const sanitized = sanitizeCameraName(input.value);
+            if (input.value !== sanitized) {
+                input.value = sanitized;
+            }
+            const { mode, robotConfig } = cameraConfigForMode();
+            robotConfig.camera_names[mode][index] = sanitized;
+            queueRobotConfigSave();
+        };
+        // The backend rejects an empty, duplicate or *_depth name and answers
+        // with the slot default, so re-render from what it actually saved.
+        input.onblur = () => {
+            saveRobotConfigNow()
+                .then(onCameraConfigChanged)
+                .catch((error) => showToast(error.message, true));
+        };
+        container.appendChild(field);
+    });
+}
+
+// The checklist offers one image and depth entry per slot, so a layout change
+// has to re-derive it and repaint every view that shows a feed.
+function onCameraConfigChanged() {
+    reconcileRecordingEntries();
+    renderCameraSetup();
+    renderHomeStatus();
+    saveRecordingEntries();
+    loadTeleopCameraConfig();
+    renderTeleop();
 }
 
 function renderHomeRobotConfigInputs() {
@@ -2689,6 +2825,7 @@ function renderHome() {
         return;
     }
     renderArmConfig();
+    renderCameraSetup();
     renderHomeRobotConfigInputs();
     renderHomePosture();
     renderHomeStatus();
@@ -2721,12 +2858,24 @@ async function saveRobotConfigNow() {
     return result;
 }
 
+// Seed slot names only; any other slot is operator-named and labels itself.
 const CAMERA_LOCATION_LABELS = {
     ego: "Egocentric",
     left_wrist: "Left Wrist",
     right_wrist: "Right Wrist",
     wrist: "Wrist",
 };
+
+function cameraLabel(name) {
+    if (CAMERA_LOCATION_LABELS[name]) {
+        return CAMERA_LOCATION_LABELS[name];
+    }
+    return String(name || "")
+        .split("_")
+        .filter(Boolean)
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(" ") || String(name || "");
+}
 
 async function loadTeleopCameraConfig() {
     try {
@@ -2753,7 +2902,7 @@ function renderTeleopCameraConfig() {
     cameras.forEach((camera) => {
         const field = document.createElement("label");
         field.className = "robot-input-group camera-input-group";
-        const labelText = CAMERA_LOCATION_LABELS[camera.name] || camera.name;
+        const labelText = cameraLabel(camera.name);
         const current = camera.device_serial || "";
         const seen = new Set();
         const options = [`<option value=""${current ? "" : " selected"}>N/A</option>`];
@@ -3007,13 +3156,12 @@ function getRobotTelemetryByIndex(sideIndex, teleopStatus) {
 
 // One descriptor per active arm, mapped onto the two static teleop columns
 // (slot "left" = index 0, "right" = index 1). Single mode yields one descriptor
-// in the left slot with neutral camera/labels; the right column is then hidden.
+// in the left slot; the right column is then hidden. Camera count is configured
+// independently of arm count, so a column carries only telemetry now.
 function activeArmPanels() {
     const slots = ["left", "right"];
     return getActiveSides().map((side, index) => ({
         slot: slots[index],
-        camera: WRIST_CAMERA_BY_SIDE[side],
-        feedTitle: ARM_SIDE_LABELS[side].feed,
         wrenchLabel: ARM_SIDE_LABELS[side].wrench,
         followerIndex: index,
     }));
@@ -3167,6 +3315,17 @@ function cameraFeedKey(cameraName, view) {
     return `${cameraName}:${view}`;
 }
 
+// Feed keys are "<camera>:<view>".
+function stopFeedsForInactiveCameras(activeCameraNames) {
+    const active = new Set(activeCameraNames);
+    Object.keys(state.cameraFeeds).forEach((key) => {
+        const cameraName = key.split(":")[0];
+        if (!active.has(cameraName)) {
+            stopCameraFeed(cameraName);
+        }
+    });
+}
+
 function stopCameraFeed(cameraName, view = null) {
     const prefix = `${cameraName}:`;
     Object.keys(state.cameraFeeds).forEach((key) => {
@@ -3286,6 +3445,34 @@ function renderCameraFps(elementId, cameraName, camera) {
     }
 }
 
+// Rebuilding the markup tears down the live <img>, so only do it when the
+// camera set actually changes.
+function renderCameraFeedRow(cameras, cameraNames) {
+    const row = byId("teleop-camera-feed-row");
+    if (!row) {
+        return;
+    }
+    row.classList.toggle("hidden", cameraNames.length === 0);
+    const renderKey = cameraNames.join("|");
+    if (row.dataset.renderKey !== renderKey) {
+        row.dataset.renderKey = renderKey;
+        row.innerHTML = cameraNames.map((name) => `
+            <div class="feed">
+                <div class="feed__header">
+                    <span class="feed__title">${escapeHtml(cameraLabel(name))}</span>
+                    <strong class="feed__fps" id="feed-${escapeHtml(name)}-fps">0.0 FPS</strong>
+                </div>
+                <div class="feed__placeholder feed__placeholder--awaiting" data-render-mode="awaiting">
+                    ${buildAwaitingDataMarkup()}
+                </div>
+            </div>
+        `).join("");
+    }
+    cameraNames.forEach((name) => {
+        renderCameraFps(`feed-${name}-fps`, name, cameras[name]);
+    });
+}
+
 function renderDepthPreviewFeeds(cameras, cameraNames) {
     const section = byId("teleop-depth-feeds");
     const row = byId("teleop-depth-feed-row");
@@ -3306,7 +3493,7 @@ function renderDepthPreviewFeeds(cameras, cameraNames) {
     if (row.dataset.renderKey !== renderKey) {
         cameraNames.forEach((name) => stopCameraFeed(name, "depth"));
         row.innerHTML = readyCameraNames.map((name) => {
-            const label = CAMERA_LOCATION_LABELS[name] || name;
+            const label = cameraLabel(name);
             return `
                 <div class="feed">
                     <div class="feed__header"><span class="feed__title">${label} Depth</span></div>
@@ -4669,17 +4856,23 @@ function renderTeleop() {
     byId("wrist-feed-row")?.classList.toggle("feed-row--single", panels.length === 1);
 
     const cameras = teleopStatus.cameras?.cameras || {};
-    const activeCameraNames = ["ego", ...panels.map((panel) => panel.camera)];
+    const activeCameraNames = getActiveCameraNames();
     renderDepthVisualizationControl(
         cameras,
         activeCameraNames,
     );
-    renderCameraFps("ego-fps", "ego", cameras.ego);
+    // Lowering the count or renaming a slot leaves the old name's frame pump
+    // running against a camera nothing displays any more.
+    stopFeedsForInactiveCameras(activeCameraNames);
+    const { hero: heroCamera, row: rowCameras } = cameraFeedLayout(activeCameraNames);
+    byId("teleop-hero-feed")?.classList.toggle("hidden", !heroCamera);
+    if (heroCamera) {
+        const heroTitleEl = byId("ego-title");
+        if (heroTitleEl) heroTitleEl.textContent = cameraLabel(heroCamera);
+        renderCameraFps("ego-fps", heroCamera, cameras[heroCamera]);
+    }
+    renderCameraFeedRow(cameras, rowCameras);
     panels.forEach((panel) => {
-        const titleEl = byId(`${panel.slot}-wrist-title`);
-        if (titleEl) titleEl.textContent = panel.feedTitle;
-        renderCameraFps(`${panel.slot}-wrist-fps`, panel.camera, cameras[panel.camera]);
-
         const robotEntry = getRobotTelemetryByIndex(panel.followerIndex, teleopStatus);
         const telemetry = readRobotTelemetry(robotEntry.robot);
         if (state.teleopStatus) appendTelemetrySample(panel.slot, telemetry);
@@ -7590,17 +7783,19 @@ function renderRollout() {
 // Render the live camera feeds the policy consumes during rollout, using the
 // same /teleop/cameras/<name>/frame endpoint the rollout loop reads from, so
 // the operator sees exactly what the policy sees. The active cameras follow the
-// rollout's observation layout: the shared ego plus each active side's wrist.
+// rollout's observation layout: the configured camera slots.
 function renderRolloutCameras() {
     const container = byId("rollout-cameras");
     if (!container) {
         return;
     }
-    // Place the egocentric feed in the middle, flanked by the wrist cameras
-    // (e.g. [left_wrist, ego, right_wrist] for a dual-arm setup).
-    const wristCameras = getActiveSides().map((side) => WRIST_CAMERA_BY_SIDE[side]);
-    const mid = Math.floor(wristCameras.length / 2);
-    const cameraNames = [...wristCameras.slice(0, mid), "ego", ...wristCameras.slice(mid)];
+    // Place the first slot in the middle, flanked by the rest (e.g.
+    // [left_wrist, ego, right_wrist] for a default dual-arm setup).
+    const [hero, ...rest] = getActiveCameraNames();
+    const mid = Math.floor(rest.length / 2);
+    const cameraNames = hero
+        ? [...rest.slice(0, mid), hero, ...rest.slice(mid)]
+        : rest;
     // Only rebuild the feed elements when the camera set changes; rebuilding on
     // every poll would tear down the live <img> and restart the frame pump.
     const renderKey = cameraNames.join(",");
