@@ -21,7 +21,7 @@ limitations under the License.
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260812-03" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260827-04" />
 </head>
 
 <body>
@@ -380,8 +380,13 @@ limitations under the License.
             <input class="text-input" id="hub-token-input" type="password" autocomplete="off"
                 spellcheck="false" placeholder="hf_...">
             <p class="hub-token-note">
-                Held in memory for this server session only — never written to disk.
-                Create one at huggingface.co/settings/tokens with read access.
+                Signed in already? Run <code>hf auth token</code> in a terminal
+                to print it. Otherwise create one at
+                huggingface.co/settings/tokens (read access).
+            </p>
+            <p class="hub-token-note">
+                Asked once: kept in server memory until the server restarts —
+                never written to disk.
             </p>
             <div class="hub-token-actions">
                 <button class="secondary-button" id="hub-token-cancel" type="button">Cancel</button>
@@ -430,7 +435,7 @@ limitations under the License.
         </section>
     </div>
 
-    <script type="module" src="/static/app.js?v=20260812-07"></script>
+    <script type="module" src="/static/app.js?v=20260827-04"></script>
 </body>
 
 </html>
