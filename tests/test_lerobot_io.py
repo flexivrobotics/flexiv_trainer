@@ -169,6 +169,28 @@ def test_extract_recording_frame_values_groups_selected_metrics() -> None:
     assert values["action"] == list(range(50, 56))
 
 
+def test_extract_recording_frame_values_keeps_the_legacy_quaternion_pose() -> None:
+    """Checkpoints trained before rotation-6D still need the raw driver pose."""
+    entries = [
+        "observation.state.left_arm.tcp_pose",
+        "observation.state.left_arm.tcp_twist",
+        "observation.state.left_arm.tcp_wrench",
+    ]
+    values = extract_recording_frame_values(
+        make_snapshot(),
+        entries,
+        pose_format=lerobot_io.POSE_FORMAT_QUATERNION,
+    )
+
+    # Pose 7 + twist 6 + wrench 6 = 19, and the quaternion passes through
+    # unconverted so the policy sees exactly what it was trained on.
+    assert values["observation.state"] == list(range(0, 7)) + list(
+        range(10, 16)
+    ) + list(range(20, 26))
+    rotation_6d = extract_recording_frame_values(make_snapshot(), entries)
+    assert len(rotation_6d["observation.state"]) == 21
+
+
 def test_extract_recording_frame_values_drops_unselected_metrics() -> None:
     # Pose + wrench but NOT twist: the combined vector omits the twist block.
     values = extract_recording_frame_values(

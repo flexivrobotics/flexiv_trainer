@@ -65,6 +65,7 @@ class WaypointRunner:
         task: str | None,
         action_layout: list[dict[str, Any]],
         action_dim: int,
+        state_dim: int | None,
         gripper_sides: tuple[str, ...],
         gripper_target_mode: str,
         end_effector_config: dict[str, Any],
@@ -103,6 +104,7 @@ class WaypointRunner:
         self._task = task
         self._action_layout = action_layout
         self._action_dim = action_dim
+        self._state_dim = state_dim
         self._motion_limits = motion_limits
         self._planner_hz_fallback = planner_hz_fallback
         self._expected_hz_fallback = expected_hz_fallback
@@ -214,6 +216,7 @@ class WaypointRunner:
         max_steps = self._max_steps
         cameras = self._camera_names
         camera_names = resolve_recording_image_names(None, sides, cameras)
+        pose_format: str | None = None
         layout = self._action_layout
         gripper = self._gripper_executor
         # Off by default: _actions_to_lists already syncs the tensors it copies,
@@ -311,8 +314,12 @@ class WaypointRunner:
                 stage_times["read_states"].append(now - mark)
                 mark = now
 
+                if pose_format is None:
+                    pose_format = observations.resolve_state_pose_format(
+                        snapshot, sides, cameras, self._state_dim, self._append_log
+                    )
                 observation = observations.build_observation(
-                    snapshot, images, sides, cameras
+                    snapshot, images, sides, cameras, pose_format
                 )
                 now = time.monotonic()
                 stage_times["build_obs"].append(now - mark)

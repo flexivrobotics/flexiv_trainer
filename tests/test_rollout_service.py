@@ -33,6 +33,7 @@ from flexivtrainer.rollout.checkpoint import (
     checkpoint_action_names,
     checkpoint_action_output_dim,
     checkpoint_image_resolutions,
+    checkpoint_state_input_dim,
 )
 from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
@@ -546,6 +547,18 @@ def test_checkpoint_image_resolutions_skips_channels_last_shapes(tmp_path) -> No
     checkpoint = _checkpoint_with_image_shapes(tmp_path, {"ego": [240, 320, 3]})
 
     assert checkpoint_image_resolutions(checkpoint) == {}
+
+
+def test_checkpoint_state_input_dim_reads_the_trained_state_width(tmp_path) -> None:
+    checkpoint = _checkpoint_with_image_shapes(tmp_path, {"ego": [3, 240, 320]})
+
+    assert checkpoint_state_input_dim(checkpoint) == 38
+
+
+def test_checkpoint_state_input_dim_is_none_without_a_state_feature(tmp_path) -> None:
+    checkpoint = _checkpoint_of_type(tmp_path, "act")
+
+    assert checkpoint_state_input_dim(checkpoint) is None
 
 
 def _cameras_returning(images: dict[str, np.ndarray]):

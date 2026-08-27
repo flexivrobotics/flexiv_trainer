@@ -39,6 +39,7 @@ from flexivtrainer.rollout.checkpoint import (
     checkpoint_action_output_dim,
     checkpoint_gripper_command_metadata,
     checkpoint_image_resolutions,
+    checkpoint_state_input_dim,
     resolve_checkpoint_path,
     resolve_hub_checkpoint,
 )
@@ -275,6 +276,9 @@ class RolloutService:
             and str(device).startswith("cuda")
         )
         bspline_layout: BSplineActionLayout | None = None
+        # config.json is what from_pretrained loaded the policy from, so its
+        # declared state width is the one the policy's normalizer will enforce.
+        state_dim = checkpoint_state_input_dim(checkpoint_path)
         waypoint_layout: list[dict[str, Any]] | None = None
         waypoint_action_dim: int | None = None
         waypoint_layout_inferred = False
@@ -386,6 +390,7 @@ class RolloutService:
                 device=device,
                 task=task,
                 bspline_layout=bspline_layout,
+                state_dim=state_dim,
                 end_effector_config=end_effector_config,
                 motion_limits=motion_limits,
                 max_steps=app_rollout.max_steps,
@@ -422,6 +427,7 @@ class RolloutService:
                 task=task,
                 action_layout=waypoint_layout,
                 action_dim=waypoint_action_dim,
+                state_dim=state_dim,
                 gripper_sides=waypoint_gripper_sides,
                 gripper_target_mode=waypoint_gripper_target_mode,
                 end_effector_config=end_effector_config,

@@ -60,6 +60,7 @@ class BSplineRunner:
         device: str,
         task: str | None,
         bspline_layout: BSplineActionLayout,
+        state_dim: int | None,
         end_effector_config: dict[str, Any],
         motion_limits: tuple[float, float, float, float],
         max_steps: int,
@@ -93,6 +94,7 @@ class BSplineRunner:
         self._device = device
         self._task = task
         self._bspline_layout = bspline_layout
+        self._state_dim = state_dim
         self._end_effector_config = end_effector_config
         self._motion_limits = motion_limits
         self._max_steps = max_steps
@@ -305,6 +307,7 @@ class BSplineRunner:
         observed_at = next_observation
         cameras = self._camera_names
         camera_names = resolve_recording_image_names(None, sides, cameras)
+        pose_format: str | None = None
         max_steps = self._max_steps
         inference_latency = 0.0
         alignment_error = 0.0
@@ -368,8 +371,12 @@ class BSplineRunner:
                     snapshot = observations.read_robot_snapshot(
                         robots, gripper_states, sides
                     )
+                    if pose_format is None:
+                        pose_format = observations.resolve_state_pose_format(
+                            snapshot, sides, cameras, self._state_dim, self._append_log
+                        )
                     observation = observations.build_observation(
-                        snapshot, images, sides, cameras
+                        snapshot, images, sides, cameras, pose_format
                     )
                     prepared = observations._prepare_policy_observation(
                         observation,

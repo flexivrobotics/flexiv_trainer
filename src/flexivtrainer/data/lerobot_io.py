@@ -189,6 +189,20 @@ _TCP_POSE_AXES = [
     "tcp_pose.z",
     *(f"tcp_rotation_6d.{axis}" for axis in ROTATION_6D_AXES),
 ]
+# Datasets recorded before rotation-6D stored the driver quaternion verbatim.
+# Checkpoints trained on them are still rolled out, so the observation builder
+# can reproduce that layout on request.
+_LEGACY_TCP_POSE_AXES = [
+    "tcp_pose.x",
+    "tcp_pose.y",
+    "tcp_pose.z",
+    "tcp_pose.q_w",
+    "tcp_pose.q_x",
+    "tcp_pose.q_y",
+    "tcp_pose.q_z",
+]
+POSE_FORMAT_ROTATION_6D = "rotation_6d"
+POSE_FORMAT_QUATERNION = "quaternion"
 _DRIVER_POSE_DIM = 7
 _TCP_TWIST_AXES = [
     "tcp_twist.vx",
@@ -398,6 +412,7 @@ def _collect_arm_group(
     side: str,
     kind: str,
     enabled_entries: set[str],
+    pose_format: str = POSE_FORMAT_ROTATION_6D,
 ) -> tuple[list[float], list[str]]:
     """Concatenate an arm's *enabled* metrics into a single flat vector.
 
@@ -420,7 +435,10 @@ def _collect_arm_group(
         if not isinstance(vector, (list, tuple)):
             continue
         if label == "tcp_pose":
-            vector = _pose_to_rotation_6d(vector)
+            if pose_format == POSE_FORMAT_ROTATION_6D:
+                vector = _pose_to_rotation_6d(vector)
+            else:
+                axis_names = _LEGACY_TCP_POSE_AXES
         for index, value in enumerate(vector):
             values.append(float(value))
             names.append(
@@ -472,6 +490,7 @@ def _iter_combined_features(
     robot_snapshot: dict[str, Any],
     enabled_entries: set[str],
     sides: list[str] | None = None,
+    pose_format: str = POSE_FORMAT_ROTATION_6D,
 ):
     """Yield (feature_key, values, axis_names) for the combined state and action.
 
@@ -501,7 +520,7 @@ def _iter_combined_features(
             else arm_side_label(index)
         )
         arm_state_values, arm_state_names = _collect_arm_group(
-            payload.get("states"), side, "state", enabled_entries
+            payload.get("states"), side, "state", enabled_entries, pose_format
         )
         gripper_state_values, gripper_state_names = _collect_arm_gripper(
             payload, side, "state", enabled_entries
@@ -511,7 +530,7 @@ def _iter_combined_features(
             f"{side}.{name}" for name in arm_state_names + gripper_state_names
         )
         arm_action_values, arm_action_names = _collect_arm_group(
-            payload.get("actions"), side, "action", enabled_entries
+            payload.get("actions"), side, "action", enabled_entries, pose_format
         )
         gripper_action_values, gripper_action_names = _collect_arm_gripper(
             payload, side, "action", enabled_entries
@@ -532,6 +551,7 @@ def extract_recording_frame_values(
     entries: list[str] | None = None,
     sides: list[str] | None = None,
     cameras: list[str] | None = None,
+    pose_format: str = POSE_FORMAT_ROTATION_6D,
 ) -> dict[str, list[float]]:
     """Per-frame vectors keyed by feature (``observation.state`` and ``action``)."""
     # `cameras` yields no vectors, but `entries` may name image features that
@@ -540,7 +560,7 @@ def extract_recording_frame_values(
     return {
         key: values
         for key, values, _ in _iter_combined_features(
-            robot_snapshot, resolved_entries, sides
+            robot_snapshot, resolved_entries, sides, pose_format
         )
     }
 
