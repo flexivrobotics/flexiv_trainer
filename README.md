@@ -41,7 +41,10 @@ echo "${USER} hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
 ## Hardware Requirements
 
 1. A single- or dual-arm teleoperation setup eligible for high-transparency teleoperation.
-2. Supported cameras connected to your computer: 1 egocentric and 2 in-hand (left and right wrist), with the two in-hand cameras mounted on the follower robots.
+2. Supported cameras connected to your computer. A single-arm setup uses up to
+   3 cameras and a dual-arm setup up to 5. The default layout is 1 egocentric
+   plus 1 in-hand camera per follower robot; the remaining slots are spare and
+   start out inactive.
 
 ### Supported robots
 
@@ -163,11 +166,35 @@ When the UI opens, you will start on the home page.
 
 1. Enter the serial numbers for the two leader robots.
 2. Enter the serial numbers for the two follower robots.
-3. In the System Status tile, connect:
+3. In the Camera Setup tile, choose how many cameras to use and name each one
+   (see [Camera Setup](#camera-setup) below).
+4. In the System Status tile, connect:
    - Teleop Service
    - Robot Data Service
    - Cameras
-4. Confirm the system shows healthy status before moving on.
+5. Confirm the system shows healthy status before moving on.
+
+### Camera Setup
+
+The `Camera Setup` tile on the home page controls how many cameras the rig uses
+and what each one is called.
+
+- **Count.** Pick 1 to 3 cameras in single-arm mode, or 1 to 5 in dual-arm mode.
+  Only the first N slots are active; the rest are ignored everywhere.
+- **Names.** Every slot is renameable. `ego`, `wrist`, `left_wrist`, and
+  `right_wrist` are only what an unconfigured slot starts as, and spare slots
+  start as `aux_1`, `aux_2`, and so on. Use letters, digits, and underscores
+  (up to 32 characters). An empty, duplicate, or `*_depth` name is rejected and
+  the slot reverts to its default.
+- **Device assignment.** Each slot is assigned a device serial independently in
+  the camera tiles, so renaming a slot keeps the camera already bound to it.
+- **Per-mode layouts.** Counts and names are stored separately for single-arm
+  and dual-arm mode, so switching modes back and forth preserves both layouts.
+
+A camera named `X` becomes the dataset feature `observation.images.X`, with its
+depth map (when enabled) as `observation.images.X_depth`. Renaming a camera
+therefore changes the feature names in every episode recorded afterwards — a
+policy trained on the old names expects a rig that still uses them.
 
 The home page also shows the storage locations used by the app for episodes, merged datasets, and training outputs.
 
@@ -180,7 +207,7 @@ On this page you can verify robot and camera health, view the camera feeds, moni
 ### Recommended workflow
 
 1. Check `System Status` and make sure teleoperation, robot data, and cameras are all connected.
-2. Confirm that the egocentric and wrist camera feeds are updating at around 30 FPS.
+2. Confirm that every active camera feed is updating at around 30 FPS.
 3. If needed, use `Home All Robots` before starting teleoperation.
 4. In `Teleoperation Control`, click `Start` to begin teleoperation.
 5. In `Episode Recording`, choose which entries you want to record.
@@ -320,13 +347,35 @@ Training outputs are written to the output directory shown in Step 3. By default
 .local/training/
 ```
 
+## Checkpoint Compatibility
+
+Recorded TCP orientation moved from a quaternion to a rotation-6D
+representation, because the driver reports `q` and `-q` interchangeably for the
+same rotation and the sign flips mid-trajectory.
+
+Rollout accepts checkpoints in either representation. Which one a checkpoint
+uses is detected when it loads:
+
+- **Actions** are read from the checkpoint's axis names, recovered from its
+  `action_names.json` sidecar, its policy config, the training dataset, or the
+  dataset's Hub metadata. When no names are recoverable, the layout is inferred
+  from the action width instead.
+- **Observations** are matched against the width the checkpoint declares for
+  `observation.state`, so a pre-rotation-6D checkpoint is fed the driver
+  quaternion it was trained on. Rollout logs `Legacy quaternion state layout`
+  when this applies.
+
+Datasets are only ever recorded in rotation-6D, so this affects rollout of older
+checkpoints, not new recordings. Datasets recorded before the change are
+converted on read when they are used as B-spline training targets.
+
 ## Typical End-To-End Session
 
 For a normal session, the order is:
 
 1. Start `flexiv-trainer-server`.
 2. Open the web UI.
-3. Configure robot serial numbers on `Home`.
+3. Configure robot serial numbers and the camera layout on `Home`.
 4. Connect teleop service, robot data service, and cameras.
 5. Open `Data Collection`.
 6. Start teleoperation and record one or more demonstration episodes.
