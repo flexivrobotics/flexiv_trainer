@@ -23,6 +23,7 @@ from functools import partial
 from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
+from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, ok, warn
 from flexivtrainer.policies import act as act_policy
@@ -38,6 +39,7 @@ from flexivtrainer.rollout.checkpoint import (
     checkpoint_action_output_dim,
     checkpoint_gripper_command_metadata,
     checkpoint_image_resolutions,
+    checkpoint_state_input_dim,
     resolve_checkpoint_path,
     resolve_hub_checkpoint,
 )
@@ -92,6 +94,7 @@ class RolloutService:
         teleop: Any,
         get_robot_pairs: Callable[[], list[TeleopRobotPair]],
         get_active_sides: Callable[[], list[str]],
+        get_active_cameras: Callable[[], list[str]] | None = None,
         *,
         get_end_effector_config: Callable[[], dict[str, Any]] | None = None,
         get_gripper_default_width: Callable[[], float | None] | None = None,
@@ -105,6 +108,10 @@ class RolloutService:
         self._teleop = teleop
         self._get_robot_pairs = get_robot_pairs
         self._get_active_sides = get_active_sides
+        # Lets a caller construct the service without a camera configuration.
+        self._get_active_cameras = get_active_cameras or (
+            lambda: active_camera_names(get_active_sides())
+        )
         self._get_end_effector_config = get_end_effector_config or (lambda: {})
         self._get_gripper_default_width = get_gripper_default_width or (lambda: None)
         self._gripper_initialization_registry = gripper_initialization_registry
@@ -227,6 +234,7 @@ class RolloutService:
 
         device = self._resolve_device(self._settings.training.default_device)
         sides = self._get_active_sides()
+        camera_names = self._get_active_cameras()
         followers = [
             pair.follower_serial
             for pair in self._get_robot_pairs()
@@ -268,6 +276,9 @@ class RolloutService:
             and str(device).startswith("cuda")
         )
         bspline_layout: BSplineActionLayout | None = None
+        # config.json is what from_pretrained loaded the policy from, so its
+        # declared state width is the one the policy's normalizer will enforce.
+        state_dim = checkpoint_state_input_dim(checkpoint_path)
         waypoint_layout: list[dict[str, Any]] | None = None
         waypoint_action_dim: int | None = None
         waypoint_layout_inferred = False
@@ -379,6 +390,7 @@ class RolloutService:
                 device=device,
                 task=task,
                 bspline_layout=bspline_layout,
+                state_dim=state_dim,
                 end_effector_config=end_effector_config,
                 motion_limits=motion_limits,
                 max_steps=app_rollout.max_steps,
@@ -395,6 +407,7 @@ class RolloutService:
                 gripper_default_width_m=gripper_default_width_m,
                 gripper_initialization_registry=(self._gripper_initialization_registry),
                 gripper_command_parameters=gripper_command_parameters,
+                camera_names=camera_names,
             )
         else:
             assert waypoint_layout is not None
@@ -414,6 +427,7 @@ class RolloutService:
                 task=task,
                 action_layout=waypoint_layout,
                 action_dim=waypoint_action_dim,
+                state_dim=state_dim,
                 gripper_sides=waypoint_gripper_sides,
                 gripper_target_mode=waypoint_gripper_target_mode,
                 end_effector_config=end_effector_config,
@@ -439,6 +453,7 @@ class RolloutService:
                 gripper_default_width_m=gripper_default_width_m,
                 gripper_initialization_registry=(self._gripper_initialization_registry),
                 gripper_command_parameters=gripper_command_parameters,
+                camera_names=camera_names,
             )
 
         with self._lock:

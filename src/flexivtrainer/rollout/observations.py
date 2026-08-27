@@ -22,6 +22,8 @@ from typing import Any
 import numpy as np
 
 from flexivtrainer.data.lerobot_io import (
+    POSE_FORMAT_QUATERNION,
+    POSE_FORMAT_ROTATION_6D,
     default_recording_entry_keys,
     extract_recording_frame_values,
     extract_recording_images,
@@ -271,20 +273,79 @@ def grab_images(
     return images
 
 
-def build_observation(
-    snapshot: dict[str, Any], images: dict[str, np.ndarray], sides: list[str]
-) -> dict[str, Any]:
-    observation: dict[str, Any] = {}
-    selected = extract_recording_images(images, None, sides)
-    for name, image in selected.items():
-        observation[f"observation.images.{name}"] = image
+def _state_vectors(
+    snapshot: dict[str, Any],
+    sides: list[str],
+    cameras: list[str] | None,
+    pose_format: str,
+) -> dict[str, np.ndarray]:
     state_entries = [
         entry
-        for entry in default_recording_entry_keys(sides)
+        for entry in default_recording_entry_keys(sides, cameras)
         if entry.startswith("observation.state.")
     ]
-    frame_values = extract_recording_frame_values(snapshot, state_entries, sides)
-    for key, vector in frame_values.items():
-        if key.startswith("observation"):
-            observation[key] = np.asarray(vector, dtype=np.float32)
+    frame_values = extract_recording_frame_values(
+        snapshot, state_entries, sides, cameras, pose_format
+    )
+    return {
+        key: np.asarray(vector, dtype=np.float32)
+        for key, vector in frame_values.items()
+        if key.startswith("observation")
+    }
+
+
+def resolve_state_pose_format(
+    snapshot: dict[str, Any],
+    sides: list[str],
+    cameras: list[str] | None,
+    checkpoint_state_dim: int | None,
+    append_log: Callable[..., None] | None = None,
+) -> str:
+    """Pick the pose format whose state width the checkpoint was trained on.
+
+    Checkpoints predating rotation-6D expect the raw driver quaternion in
+    ``observation.state``; feeding them a rotation-6D vector only fails deep
+    inside the policy's normalizer, on a width mismatch that names neither the
+    cause nor the fix. Widths are compared against the two formats the recorder
+    has ever written, and the current one wins any tie.
+    """
+    if checkpoint_state_dim is None:
+        return POSE_FORMAT_ROTATION_6D
+    widths: dict[str, int] = {}
+    for pose_format in (POSE_FORMAT_ROTATION_6D, POSE_FORMAT_QUATERNION):
+        vectors = _state_vectors(snapshot, sides, cameras, pose_format)
+        width = int(vectors["observation.state"].shape[0]) if vectors else 0
+        if width == checkpoint_state_dim:
+            if pose_format == POSE_FORMAT_QUATERNION:
+                detail = (
+                    f"observation.state width {checkpoint_state_dim} matches the "
+                    "pre-rotation-6D layout; feeding the driver quaternion"
+                )
+                info("Rollout state uses the legacy quaternion pose layout", detail)
+                if append_log is not None:
+                    append_log(
+                        "INFO", "ROLLOUT", "Legacy quaternion state layout", detail
+                    )
+            return pose_format
+        widths[pose_format] = width
+    raise RuntimeError(
+        f"Checkpoint expects an observation.state width of {checkpoint_state_dim}, "
+        f"but the configured arms produce {widths[POSE_FORMAT_ROTATION_6D]} "
+        f"(rotation-6D) or {widths[POSE_FORMAT_QUATERNION]} (legacy quaternion). "
+        "The checkpoint was trained on a different arm or gripper layout"
+    )
+
+
+def build_observation(
+    snapshot: dict[str, Any],
+    images: dict[str, np.ndarray],
+    sides: list[str],
+    cameras: list[str] | None = None,
+    pose_format: str = POSE_FORMAT_ROTATION_6D,
+) -> dict[str, Any]:
+    observation: dict[str, Any] = {}
+    selected = extract_recording_images(images, None, sides, cameras)
+    for name, image in selected.items():
+        observation[f"observation.images.{name}"] = image
+    observation.update(_state_vectors(snapshot, sides, cameras, pose_format))
     return observation

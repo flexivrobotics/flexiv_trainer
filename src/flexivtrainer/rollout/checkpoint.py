@@ -168,16 +168,14 @@ def _checkpoint_dataset_candidates(
     )
 
 
-def checkpoint_action_output_dim(checkpoint_path: str) -> int | None:
-    """Read the flat action width declared by a waypoint checkpoint."""
+def _config_feature_dim(checkpoint_path: str, group: str, name: str) -> int | None:
+    """Read a flat feature width from a checkpoint's config.json."""
 
     model_dir = _checkpoint_model_dir(checkpoint_path)
     config = _read_json(model_dir / "config.json") or {}
-    output_features = config.get("output_features")
-    action = (
-        output_features.get("action") if isinstance(output_features, dict) else None
-    )
-    shape = action.get("shape") if isinstance(action, dict) else None
+    features = config.get(group)
+    feature = features.get(name) if isinstance(features, dict) else None
+    shape = feature.get("shape") if isinstance(feature, dict) else None
     if (
         not isinstance(shape, list | tuple)
         or len(shape) != 1
@@ -187,6 +185,16 @@ def checkpoint_action_output_dim(checkpoint_path: str) -> int | None:
     ):
         return None
     return int(shape[0])
+
+
+def checkpoint_action_output_dim(checkpoint_path: str) -> int | None:
+    """Read the flat action width declared by a waypoint checkpoint."""
+    return _config_feature_dim(checkpoint_path, "output_features", "action")
+
+
+def checkpoint_state_input_dim(checkpoint_path: str) -> int | None:
+    """Read the flat ``observation.state`` width a checkpoint expects."""
+    return _config_feature_dim(checkpoint_path, "input_features", "observation.state")
 
 
 def _validated_action_names(names: Any, origin: str) -> list[str]:

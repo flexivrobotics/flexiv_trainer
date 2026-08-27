@@ -21,7 +21,7 @@ limitations under the License.
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Flexiv Trainer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260812-02" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260812-03" />
 </head>
 
 <body>
@@ -67,6 +67,11 @@ limitations under the License.
                         </div>
                         <div class="robot-input-grid" id="home-follower-robots"></div>
                     </section>
+                </section>
+
+                <section class="panel">
+                    <h3>Camera Setup</h3>
+                    <div class="camera-setup-row" id="home-camera-setup"></div>
                 </section>
 
                 <section class="panel">
@@ -189,23 +194,18 @@ limitations under the License.
                     <section class="panel teleop-main">
                         <div class="teleop-layout">
                             <div class="component-wrapper" id="teleop-cameras-wrap">
-                                <div class="feed feed--hero">
+                                <div class="feed feed--hero" id="teleop-hero-feed">
                                     <div class="feed__header">
-                                        <span class="feed__title">Egocentric</span>
+                                        <span class="feed__title" id="ego-title">Egocentric</span>
                                         <strong class="feed__fps" id="ego-fps">0.0 FPS</strong>
                                     </div>
                                     <div class="feed__placeholder">Egocentric camera view placeholder</div>
                                 </div>
 
+                                <div class="feed-row" id="teleop-camera-feed-row"></div>
+
                                 <div class="feed-row" id="wrist-feed-row">
                                     <div class="wrist-column" id="left-wrist-column">
-                                        <div class="feed">
-                                            <div class="feed__header">
-                                                <span class="feed__title" id="left-wrist-title">Left Wrist</span>
-                                                <strong class="feed__fps" id="left-wrist-fps">0.0 FPS</strong>
-                                            </div>
-                                            <div class="feed__placeholder">Left robot camera placeholder</div>
-                                        </div>
                                         <section class="telemetry-card telemetry-card--vector" id="left-force-panel">
                                         </section>
                                         <section class="telemetry-card telemetry-card--chart"
@@ -214,13 +214,6 @@ limitations under the License.
                                             id="left-moment-graph-panel"></section>
                                     </div>
                                     <div class="wrist-column" id="right-wrist-column">
-                                        <div class="feed">
-                                            <div class="feed__header">
-                                                <span class="feed__title" id="right-wrist-title">Right Wrist</span>
-                                                <strong class="feed__fps" id="right-wrist-fps">0.0 FPS</strong>
-                                            </div>
-                                            <div class="feed__placeholder">Right robot camera placeholder</div>
-                                        </div>
                                         <section class="telemetry-card telemetry-card--vector" id="right-force-panel">
                                         </section>
                                         <section class="telemetry-card telemetry-card--chart"
@@ -437,7 +430,7 @@ limitations under the License.
         </section>
     </div>
 
-    <script type="module" src="/static/app.js?v=20260812-06"></script>
+    <script type="module" src="/static/app.js?v=20260812-07"></script>
 </body>
 
 </html>

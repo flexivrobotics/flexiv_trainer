@@ -34,6 +34,7 @@ from flexivtrainer.data.gripper_command import (
     write_gripper_command_metadata,
 )
 from flexivtrainer.data.lerobot_io import (
+    active_camera_names,
     build_features_from_sample,
     extract_recording_depths,
     extract_recording_frame_values,
@@ -103,11 +104,16 @@ class RecordingService:
         teleop: Any,
         cameras: Any,
         get_active_sides: Callable[[], list[str]],
+        get_active_cameras: Callable[[], list[str]] | None = None,
     ) -> None:
         self._settings = settings
         self._teleop = teleop
         self._cameras = cameras
         self._get_active_sides = get_active_sides
+        # Without a camera configuration, record the names this rig always used.
+        self._get_active_cameras = get_active_cameras or (
+            lambda: active_camera_names(get_active_sides())
+        )
 
         self._lock = threading.Lock()
         self._active = False
@@ -123,6 +129,7 @@ class RecordingService:
         self._aligned_cameras: list[str] = []
         self._resolution: tuple[int, int] | None = None
         self._recording_sides: list[str] | None = None
+        self._recording_cameras: list[str] | None = None
         self._gripper_command_metadata: GripperCommandMetadata | None = None
         self._staging_path: Path | None = None
         self._dataset: Any = None
@@ -170,7 +177,8 @@ class RecordingService:
                 raise RuntimeError("Previous recording is awaiting save or discard")
 
         sides = self._get_active_sides()
-        entries = resolve_recording_entries(recording_entries, sides)
+        cameras = self._get_active_cameras()
+        entries = resolve_recording_entries(recording_entries, sides, cameras)
         includes_observation_values = any(
             entry.startswith("observation.state.") for entry in entries
         )
@@ -188,8 +196,8 @@ class RecordingService:
         episode_name, staging_path = self._create_staging_path()
 
         try:
-            image_names = resolve_recording_image_names(entries, sides)
-            depth_names = resolve_recording_depth_names(entries, sides)
+            image_names = resolve_recording_image_names(entries, sides, cameras)
+            depth_names = resolve_recording_depth_names(entries, sides, cameras)
             camera_names = list(dict.fromkeys([*image_names, *depth_names]))
             # Alignment must be running before the preflight and the first grab
             # below, which define the stored depth shape.
@@ -211,7 +219,7 @@ class RecordingService:
             )
 
             features, _, _ = build_features_from_sample(
-                robot_snapshot, images, entries, sides, depths=depths
+                robot_snapshot, images, entries, sides, depths=depths, cameras=cameras
             )
             if not features:
                 raise RuntimeError(
@@ -263,6 +271,7 @@ class RecordingService:
             self._task = task
             self._recording_entries = entries
             self._recording_sides = sides
+            self._recording_cameras = cameras
             self._gripper_command_metadata = gripper_command_metadata
             self._staging_path = staging_path
             self._dataset = dataset
@@ -635,8 +644,9 @@ class RecordingService:
         max_delay_since_warning_s = 0.0
         entries = list(self._recording_entries or [])
         sides = self._recording_sides
-        image_names = resolve_recording_image_names(entries, sides)
-        depth_names = resolve_recording_depth_names(entries, sides)
+        cameras = self._recording_cameras
+        image_names = resolve_recording_image_names(entries, sides, cameras)
+        depth_names = resolve_recording_depth_names(entries, sides, cameras)
         includes_observation_values = any(
             entry.startswith("observation.state.") for entry in entries
         )
@@ -666,8 +676,12 @@ class RecordingService:
                     else {}
                 )
 
-                selected_images = extract_recording_images(images, entries, sides)
-                selected_depths = extract_recording_depths(depths, entries, sides)
+                selected_images = extract_recording_images(
+                    images, entries, sides, cameras
+                )
+                selected_depths = extract_recording_depths(
+                    depths, entries, sides, cameras
+                )
                 if len(selected_images) != len(image_names) or len(
                     selected_depths
                 ) != len(depth_names):
@@ -699,7 +713,7 @@ class RecordingService:
 
                 if requires_robot_values:
                     arm_values = extract_recording_frame_values(
-                        robot_snapshot, entries, sides
+                        robot_snapshot, entries, sides, cameras
                     )
                     for key, vector in arm_values.items():
                         frame[key] = np.array(vector, dtype=np.float32)

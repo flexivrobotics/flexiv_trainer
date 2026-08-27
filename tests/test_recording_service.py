@@ -50,6 +50,7 @@ def test_capture_loop_warns_with_deadline_delay(monkeypatch) -> None:
     service._fps = 30
     service._recording_entries = []
     service._recording_sides = []
+    service._recording_cameras = []
     service._stop_event = OneIterationStopEvent()
     service._task = "test"
     service._dataset = SimpleNamespace(add_frame=frames.append)

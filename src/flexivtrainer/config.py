@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -25,6 +26,36 @@ from flexivtrainer.policies import PolicyConfig
 
 # Flexiv "Home" primitive default for the Rizon 4 (degrees, joints A1..A7).
 DEFAULT_HOME_POSTURE_DEG: list[float] = [0.0, -40.0, 0.0, 90.0, 0.0, 40.0, 0.0]
+
+# Raising a value is the only edit needed to offer more slots: the defaults
+# below extend to match.
+MAX_CAMERAS_BY_ARM_MODE = {"single": 3, "dual": 5}
+
+# Every slot is renameable; these are only what an unconfigured slot starts as,
+# so a default configuration records the feature names it always has.
+_BASE_CAMERA_NAMES: dict[str, list[str]] = {
+    "single": ["ego", "wrist"],
+    "dual": ["ego", "left_wrist", "right_wrist"],
+}
+
+# A camera name becomes the dataset feature `observation.images.<name>`, whose
+# videos live in a directory of that name, so restrict it to characters that
+# cannot escape the dataset root.
+CAMERA_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{0,31}$")
+
+# `observation.images.{name}_depth` names the depth feature, so a camera called
+# "<x>_depth" would collide with camera "<x>"'s depth map.
+_DEPTH_NAME_SUFFIX = "_depth"
+
+
+def max_camera_count(arm_mode: str) -> int:
+    return MAX_CAMERAS_BY_ARM_MODE["single" if arm_mode == "single" else "dual"]
+
+
+def default_camera_names(arm_mode: str) -> list[str]:
+    base = _BASE_CAMERA_NAMES["single" if arm_mode == "single" else "dual"]
+    extra = max_camera_count(arm_mode) - len(base)
+    return [*base, *(f"aux_{index}" for index in range(1, extra + 1))]
 
 
 class TeleopRobotPair(BaseModel):
@@ -192,6 +223,11 @@ class RobotSerialConfig(BaseModel):
     recording_entries: list[str] = Field(default_factory=list)
     # Cached capture-resolution preset id; empty means never saved.
     record_resolution: str = ""
+    # The first camera_counts[mode] slots are active. Held per mode -- like the
+    # serials above -- so a single -> dual -> single round trip keeps both
+    # layouts. Empty means never saved, so default_camera_names() applies.
+    camera_names: dict[str, list[str]] = Field(default_factory=dict)
+    camera_counts: dict[str, int] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -226,6 +262,52 @@ class RobotSerialConfig(BaseModel):
         serials.extend([""] * (count - len(serials)))
         return serials
 
+    def _normalize_camera_names(self) -> dict[str, list[str]]:
+        # Both modes are filled to their ceiling, so raising a
+        # MAX_CAMERAS_BY_ARM_MODE value widens a persisted config on next load.
+        # Names index the camera runtimes, hence the fallback on a duplicate.
+        normalized: dict[str, list[str]] = {}
+        for mode in _BASE_CAMERA_NAMES:
+            defaults = default_camera_names(mode)
+            saved = self.camera_names.get(mode) or []
+            names: list[str] = []
+            for index, fallback in enumerate(defaults):
+                candidate = str(saved[index]).strip() if index < len(saved) else ""
+                if (
+                    not CAMERA_NAME_RE.match(candidate)
+                    or candidate.endswith(_DEPTH_NAME_SUFFIX)
+                    or candidate in names
+                ):
+                    candidate = fallback
+                    suffix = 1
+                    while candidate in names:
+                        suffix += 1
+                        candidate = f"{fallback}_{suffix}"
+                names.append(candidate)
+            normalized[mode] = names
+        return normalized
+
+    def _normalize_camera_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for mode, base in _BASE_CAMERA_NAMES.items():
+            try:
+                value = int(self.camera_counts[mode])
+            except (KeyError, TypeError, ValueError):
+                # Never saved: the seed layout.
+                value = len(base)
+            counts[mode] = min(max(value, 1), max_camera_count(mode))
+        return counts
+
+    def max_camera_count(self) -> int:
+        return max_camera_count(self.arm_mode)
+
+    def camera_slot_names(self) -> list[str]:
+        return self._normalize_camera_names()[self.arm_mode]
+
+    def active_camera_names(self) -> list[str]:
+        count = self._normalize_camera_counts()[self.arm_mode]
+        return self.camera_slot_names()[:count]
+
     def _normalize_home_posture(self) -> list[float]:
         # Coerce to exactly 7 floats; missing/bad joints fall back to defaults.
         posture: list[float] = []
@@ -253,6 +335,9 @@ class RobotSerialConfig(BaseModel):
                 str(entry) for entry in self.recording_entries if str(entry).strip()
             ],
             record_resolution=str(self.record_resolution).strip(),
+            # Both modes are kept, as with the serials above.
+            camera_names=self._normalize_camera_names(),
+            camera_counts=self._normalize_camera_counts(),
         )
 
     @classmethod

@@ -132,8 +132,21 @@ class CameraService:
         # Serializes whole start/stop/restart cycles (_lock is released mid-join).
         self._lifecycle_lock = threading.RLock()
 
+    def _template_config(self, name: str) -> CameraConfig:
+        for camera in self._settings.cameras:
+            return camera.model_copy(update={"name": name, "device_serial": None})
+        return CameraConfig(name=name)
+
     def set_active_locations(self, names: list[str]) -> None:
         with self._lifecycle_lock, self._lock:
+            # Slot names are operator-chosen, so an active location need not
+            # be one of the configured cameras.
+            for name in names:
+                if name not in self._runtimes:
+                    self._runtimes[name] = CameraRuntime(
+                        config=self._template_config(name),
+                        manual_assignment=False,
+                    )
             self._active_locations = [name for name in names if name in self._runtimes]
             # Release cameras held by slots that are no longer active so their
             # devices return to the pool for the new mode's active slots.
@@ -141,6 +154,31 @@ class CameraService:
                 if name not in self._active_locations and runtime.started:
                     self._stop_runtime(runtime)
                     runtime.actual_serial = None
+
+    def rename_locations(self, renames: dict[str, str]) -> None:
+        """Move a slot's runtime -- and its assigned device -- to a new name.
+
+        Re-keyed rather than left behind because set_device_serials() enforces
+        serial uniqueness across every runtime: an abandoned slot still holding
+        a serial would take it from the slot that replaced it.
+        """
+        with self._lifecycle_lock, self._lock:
+            for old, new in renames.items():
+                runtime = self._runtimes.get(old)
+                if runtime is None or old == new or new in self._runtimes:
+                    continue
+                if runtime.started:
+                    self._stop_runtime(runtime)
+                    runtime.actual_serial = None
+                runtime.config = runtime.config.model_copy(update={"name": new})
+                self._runtimes[new] = self._runtimes.pop(old)
+                self._last_frames.pop(old, None)
+                error = self._errors.pop(old, None)
+                if error is not None:
+                    self._errors[new] = error
+                self._active_locations = [
+                    new if name == old else name for name in self._active_locations
+                ]
 
     def available(self) -> bool:
         return any(backend.available() for backend in self._backends)

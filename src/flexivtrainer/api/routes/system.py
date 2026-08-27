@@ -39,6 +39,8 @@ class RobotConfigRequest(BaseModel):
     gripper_force_limit_n: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     recording_entries: list[str] = Field(default_factory=list)
     record_resolution: str = ""
+    camera_names: dict[str, list[str]] = Field(default_factory=dict)
+    camera_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class HubTokenRequest(BaseModel):
