@@ -5433,7 +5433,7 @@ function renderTraining() {
                 <div class="merged-dataset-entry">
                     <div class="rollout-hub-fields">
                         <input class="rollout-hub-input" id="training-hub-repo" type="text"
-                            placeholder="owner/dataset (e.g. lerobot/pusht)"
+                            placeholder="owner/dataset (e.g. flexivrobotics/push_t_dual)"
                             autocomplete="off" spellcheck="false">
                         <input class="rollout-hub-input" id="training-hub-revision" type="text"
                             placeholder="revision (optional)"
