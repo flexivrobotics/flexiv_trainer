@@ -2128,6 +2128,17 @@ button:active {
     line-height: 1.45;
 }
 
+/* The commands are the point of the note, so lift them off the muted text. */
+.hub-token-note code {
+    padding: 0.05rem 0.32rem;
+    border-radius: 3px;
+    border: 1px solid var(--line);
+    background: var(--accent-soft);
+    color: var(--ink);
+    font-size: 0.95em;
+    white-space: nowrap;
+}
+
 .hub-token-actions {
     display: flex;
     justify-content: flex-end;

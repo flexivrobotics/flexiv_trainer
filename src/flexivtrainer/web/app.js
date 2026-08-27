@@ -1900,6 +1900,22 @@ function promptForHubToken(reason) {
     });
 }
 
+// The backend detail is written for logs and API clients (it names server
+// env vars); the modal speaks to an operator with a paste field right below.
+function hubTokenReason(error) {
+    const detail = String(error.detail || error.message || "").toLowerCase();
+    if (detail.includes("no token is configured")) {
+        return "This repository is private or does not exist. Paste a token that has access to it.";
+    }
+    if (detail.includes("is gated")) {
+        return "This repository is gated. Accept its terms on huggingface.co, then paste your token.";
+    }
+    if (detail.includes("authentication failed")) {
+        return "The current token was rejected. Paste one that has access to this repository.";
+    }
+    return error.detail || error.message;
+}
+
 // Retry only on auth failure, so a genuinely missing repo still fails fast.
 async function withHubToken(attempt) {
     try {
@@ -1908,7 +1924,7 @@ async function withHubToken(attempt) {
         if (!isHubTokenError(error)) {
             throw error;
         }
-        const supplied = await promptForHubToken(error.detail || error.message);
+        const supplied = await promptForHubToken(hubTokenReason(error));
         if (!supplied) {
             throw error;
         }
@@ -7625,7 +7641,7 @@ function renderRollout() {
                         state.rolloutCheckpointSource === "hub"
                             ? `<div class="rollout-hub-fields">
                                 <input class="rollout-hub-input" id="rollout-hub-repo" type="text"
-                                    placeholder="owner/model (e.g. lerobot/pi0)"
+                                    placeholder="owner/model (e.g. flexivrobotics/push_t_dual_act)"
                                     autocomplete="off" spellcheck="false" ${isRunning ? "disabled" : ""}>
                                 <input class="rollout-hub-input" id="rollout-hub-revision" type="text"
                                     placeholder="revision (optional)"
