@@ -57,14 +57,10 @@ class FakeController:
     def __init__(self, robots: tuple[FakeRobot, ...]) -> None:
         # Treat each robot as the follower of its pair.
         self._robots = robots
-        self.home_all_calls = 0
 
     def instances(self, idx: int):
         follower = self._robots[idx]
         return (follower, follower)
-
-    def HomeAll(self) -> None:
-        self.home_all_calls += 1
 
 
 class _StructStates:
@@ -816,7 +812,9 @@ def _homeable_service(tmp_path, robots, monkeypatch):
     return service
 
 
-def test_reset_home_executes_movej_when_stopped(tmp_path, monkeypatch) -> None:
+def test_reset_home_executes_home_primitive_when_stopped(
+    tmp_path, monkeypatch
+) -> None:
     robots = (FakeRobot(), FakeRobot())
     service = _homeable_service(tmp_path, robots, monkeypatch)
 
@@ -824,11 +822,65 @@ def test_reset_home_executes_movej_when_stopped(tmp_path, monkeypatch) -> None:
 
     assert result == {"ok": True, "warnings": []}
     # instances(idx) returns (follower, follower), so each pair's handle is
-    # driven with a MoveJ carrying the configured posture.
+    # driven with a Home primitive carrying the configured posture.
     for robot in robots:
         primitives = [name for name, _ in robot.calls]
-        assert primitives == ["MoveJ", "MoveJ"]
+        assert primitives == ["Home", "Home"]
+        for _, params in robot.calls:
+            assert params == {"target": [0.0, -40.0, 0.0, 90.0, 0.0, 40.0, 0.0]}
         assert robot.modes  # SwitchMode was called first
+
+
+class _SimultaneousHomeRobot(FakeRobot):
+    """reachedTarget only after every robot is dispatched — sequential homing
+    polls robot 0 before robot 1 gets its primitive, so it times out here."""
+
+    def __init__(self, fleet: list["_SimultaneousHomeRobot"]) -> None:
+        super().__init__()
+        self._fleet = fleet
+
+    def primitive_states(self) -> dict[str, bool]:
+        return {"reachedTarget": all(robot.calls for robot in self._fleet)}
+
+
+def test_reset_home_starts_all_robots_before_waiting(tmp_path, monkeypatch) -> None:
+    fleet: list[_SimultaneousHomeRobot] = []
+    fleet.extend(_SimultaneousHomeRobot(fleet) for _ in range(2))
+    service = _homeable_service(tmp_path, tuple(fleet), monkeypatch)
+
+    result = service.reset_home()
+
+    assert result == {"ok": True, "warnings": []}
+
+
+def test_reset_home_homes_remaining_robots_when_one_fails(
+    tmp_path, monkeypatch
+) -> None:
+    healthy = FakeRobot()
+    service = _homeable_service(tmp_path, (SimpleNamespace(), healthy), monkeypatch)
+
+    result = service.reset_home()
+
+    assert result["ok"] is True
+    assert [name for name, _ in healthy.calls] == ["Home", "Home"]
+    assert len(result["warnings"]) == 2  # leader and follower of pair 0
+    assert all(
+        "Pair 0" in warning and "primitive execution" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_reset_home_reports_primitive_that_stops_short(tmp_path, monkeypatch) -> None:
+    class StoppedShortRobot(FakeRobot):
+        def primitive_states(self) -> dict[str, bool]:
+            return {"reachedTarget": False, "terminated": True}
+
+    service = _homeable_service(tmp_path, (StoppedShortRobot(),), monkeypatch)
+
+    result = service.reset_home()
+
+    assert result["ok"] is False
+    assert "before reaching the target" in str(result["error"])
 
 
 def test_reset_home_is_blocked_while_teleop_running(tmp_path, monkeypatch) -> None:

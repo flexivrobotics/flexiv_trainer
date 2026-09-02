@@ -749,6 +749,13 @@ class TeleopService:
         self._engaged = False
         self._error = None
 
+    @staticmethod
+    def _pair_robot_label(idx: int, position: int, count: int) -> str:
+        """``instances(idx)`` yields (leader, follower), in that order."""
+        if count == 2:
+            return f"Pair {idx} {'leader' if position == 0 else 'follower'}"
+        return f"Pair {idx} robot"
+
     def reset_home(self) -> dict[str, Any]:
         if self._controller is None:
             return {"ok": False, "error": "Teleoperation controller is not initialized"}
@@ -772,21 +779,31 @@ class TeleopService:
         posture = self._home_posture()
 
         warnings: list[str] = []
-        homed_any = False
+        robots: list[tuple[str, Any]] = []
         for idx in range(self._engageable_pair_count()):
             try:
-                robots = instances_reader(idx)
+                handles = instances_reader(idx)
             except Exception as exc:  # pragma: no cover - hardware specific
                 warnings.append(f"Pair {idx}: {describe_exception(exc)}")
                 continue
-            for robot in robots if isinstance(robots, (tuple, list)) else (robots,):
-                error = self._move_to_home(robot, posture)
-                if error is None:
-                    homed_any = True
-                else:
-                    warnings.append(error)
+            if not isinstance(handles, (tuple, list)):
+                handles = (handles,)
+            robots.extend(
+                (self._pair_robot_label(idx, position, len(handles)), robot)
+                for position, robot in enumerate(handles)
+            )
 
-        if not homed_any:
+        # Phased so the arms start together: SwitchMode blocks up to ~1 s per
+        # robot, so every mode switch happens before any primitive starts;
+        # ExecutePrimitive returns ~200 ms after motion begins; polling starts
+        # only once every arm is moving.
+        prepared = self._home_phase(robots, self._prepare_home, warnings)
+        dispatched = self._home_phase(
+            prepared, lambda robot: self._start_home(robot, posture), warnings
+        )
+        reached, wait_warnings = self._wait_all_reached(dispatched)
+        warnings.extend(wait_warnings)
+        if reached == 0:
             return {
                 "ok": False,
                 "error": warnings[0] if warnings else "No robots were homed",
@@ -799,11 +816,24 @@ class TeleopService:
                 return [float(value) for value in pair.leader_home_posture]
         return list(DEFAULT_HOME_POSTURE_DEG)
 
-    def _move_to_home(
-        self, robot: Any, posture: list[float], timeout_sec: float = 30.0
-    ) -> str | None:
-        # Drive one robot to `posture` (degrees) via the MoveJ primitive, then
-        # block on reachedTarget. Returns None on success or an error string.
+    @staticmethod
+    def _home_phase(
+        robots: list[tuple[str, Any]],
+        step: Callable[[Any], str | None],
+        warnings: list[str],
+    ) -> list[tuple[str, Any]]:
+        """Run one homing step on every robot; a failure only drops that robot."""
+        kept: list[tuple[str, Any]] = []
+        for label, robot in robots:
+            error = step(robot)
+            if error is None:
+                kept.append((label, robot))
+            else:
+                warnings.append(f"{label}: {error}")
+        return kept
+
+    @staticmethod
+    def _prepare_home(robot: Any) -> str | None:
         switch_mode = getattr(robot, "SwitchMode", None)
         execute = getattr(robot, "ExecutePrimitive", None)
         states = getattr(robot, "primitive_states", None)
@@ -811,15 +841,55 @@ class TeleopService:
             return "Connected robot does not support primitive execution"
         try:
             switch_mode(flexivrdk.Mode.NRT_PRIMITIVE_EXECUTION)
-            execute("MoveJ", {"target": flexivrdk.JPos(posture)})
-            deadline = time.monotonic() + timeout_sec
-            while not states().get("reachedTarget"):
-                if time.monotonic() >= deadline:
-                    return "Timed out waiting for a robot to reach home"
-                time.sleep(0.5)
         except Exception as exc:  # pragma: no cover - hardware specific
             return describe_exception(exc)
         return None
+
+    @staticmethod
+    def _start_home(robot: Any, posture: list[float]) -> str | None:
+        # Primitives take `posture` in degrees, unlike SendJointPosition.
+        try:
+            robot.ExecutePrimitive("Home", {"target": flexivrdk.JPos(posture)})
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return describe_exception(exc)
+        return None
+
+    @staticmethod
+    def _wait_all_reached(
+        robots: list[tuple[str, Any]], timeout_sec: float = 30.0
+    ) -> tuple[int, list[str]]:
+        """terminated without reachedTarget means the primitive stopped short
+        (fault, operator stop) — reported at once instead of timing out."""
+        pending = list(robots)
+        warnings: list[str] = []
+        reached = 0
+        deadline = time.monotonic() + timeout_sec
+        while pending:
+            still_pending: list[tuple[str, Any]] = []
+            for label, robot in pending:
+                try:
+                    states = robot.primitive_states()
+                    if states.get("reachedTarget"):
+                        reached += 1
+                    elif states.get("terminated"):
+                        warnings.append(
+                            f"{label}: homing ended before reaching the target"
+                        )
+                    else:
+                        still_pending.append((label, robot))
+                except Exception as exc:  # pragma: no cover - hardware specific
+                    warnings.append(f"{label}: {describe_exception(exc)}")
+            pending = still_pending
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                warnings.extend(
+                    f"{label}: timed out waiting to reach home"
+                    for label, _ in pending
+                )
+                break
+            time.sleep(0.5)
+        return reached, warnings
 
     def _read_fault(self) -> str | None:
         """Return a fault message if the controller reports a fault.
@@ -891,8 +961,9 @@ class TeleopService:
         engaged = self._engaged and self._controller is not None
         fault: str | None = self._read_fault()
         # Home is offered whenever the robots are connected and the teleop
-        # control loop is not running (HomeAll() throws if it is). It is
-        # available right after Connect, before the first Start.
+        # control loop is not running (homing switches the robots to primitive
+        # execution, which the running loop would fight). It is available right
+        # after Connect, before the first Start.
         can_home = self._initialized and not started and self._controller is not None
         return TeleopSnapshot(
             configured=configured,
