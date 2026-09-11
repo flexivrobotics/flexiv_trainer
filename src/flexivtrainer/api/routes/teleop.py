@@ -389,6 +389,21 @@ def reset_home(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return result
 
 
+@router.post("/match-leader")
+def match_leader(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.match_leader_to_follower()
+    if result.get("error"):
+        error("Leader match failed", str(result.get("error")))
+    elif result.get("warnings"):
+        warn(
+            "Leader match completed with warnings",
+            "; ".join(str(item) for item in result.get("warnings", [])),
+        )
+    else:
+        ok("Leader match command sent")
+    return result
+
+
 @router.post("/recording/start")
 def start_recording(
     request: StartRecordingRequest,

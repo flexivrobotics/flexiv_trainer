@@ -198,13 +198,8 @@ class RolloutService:
                 )
             if self._running:
                 raise RuntimeError("Rollout is already running")
-            # A fresh RDK connection cannot coexist with the TDK controller
-            # holding the same follower's LAN connection; require teleop down.
-            if self._teleop_initialized():
-                raise RuntimeError(
-                    "Stop teleoperation before starting a rollout "
-                    "(it holds the robot connection)."
-                )
+
+        self._preflight_teleop()
 
         checkpoint_origin = checkpoint_path
         try:
@@ -235,6 +230,7 @@ class RolloutService:
         device = self._resolve_device(self._settings.training.default_device)
         sides = self._get_active_sides()
         camera_names = self._get_active_cameras()
+        self._preflight_cameras(camera_names)
         followers = [
             pair.follower_serial
             for pair in self._get_robot_pairs()
@@ -599,6 +595,67 @@ class RolloutService:
     def _teleop_initialized(self) -> bool:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
+
+    def _preflight_teleop(self) -> None:
+        """Drop teleop before RDK claims the followers.
+
+        A fresh RDK connection cannot coexist with the TDK controller holding
+        the same follower's LAN connection. Disconnecting here rather than
+        refusing keeps the rollout to a single Start click.
+        """
+        if not self._teleop_initialized():
+            return
+        self._append_log("INFO", "ROLLOUT", "Disconnecting teleoperation")
+        try:
+            self._teleop.shutdown()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to disconnect teleoperation: {describe_exception(exc)}"
+            ) from exc
+        if self._teleop_initialized():
+            raise RuntimeError(
+                "Failed to disconnect teleoperation: the service is still "
+                "connected and holds the robot connection."
+            )
+
+    def _started_cameras(self, status: dict[str, Any]) -> set[str]:
+        entries = status.get("cameras") or {}
+        return {name for name, entry in entries.items() if entry.get("started")}
+
+    def _preflight_cameras(self, camera_names: list[str]) -> None:
+        if not camera_names:
+            return
+        if self._started_cameras(self._cameras.status()).issuperset(camera_names):
+            return
+        self._append_log(
+            "INFO",
+            "ROLLOUT",
+            "Connecting cameras before rollout",
+            ", ".join(camera_names),
+        )
+        try:
+            status = self._cameras.start_streams(camera_names)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to connect cameras: {describe_exception(exc)}"
+            ) from exc
+        missing = [
+            name for name in camera_names if name not in self._started_cameras(status)
+        ]
+        if not missing:
+            return
+        # An unavailable SDK reports no per-camera entries, only backend errors.
+        entries = status.get("cameras") or {}
+        reasons = sorted(
+            {
+                str(entries[name]["error"])
+                for name in missing
+                if entries.get(name, {}).get("error")
+            }
+            or {str(value) for value in (status.get("errors") or {}).values() if value}
+        )
+        detail = "; ".join(reasons) or f"{', '.join(missing)} did not start"
+        raise RuntimeError(f"Failed to connect cameras: {detail}")
 
     def _apply_playback_speed(self, dataset_hz: float, rollout_cfg: Any) -> float:
         """Scale the action rate away from the rate the policy trained at."""

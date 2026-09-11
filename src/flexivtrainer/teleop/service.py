@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -52,6 +53,8 @@ TransparentCartesianTeleopLAN = (
     if flexivtdk is not None
     else None
 )
+
+ARM_DOF = 7
 
 # Init()'s zero_ft_sensor parameter is a ZeroFTSensor enum (Enable/Disable).
 ZeroFTSensor = (
@@ -417,7 +420,7 @@ class TeleopService:
         # (see TransparentCartesianTeleopLAN::Start/Stop docs), restarting after
         # a Stop() requires calling Init() again first, so Init() is run on every
         # Start rather than only when the controller is first constructed. The
-        # pairs stay disengaged by default; engaging is a separate action.
+        # pairs are forced disengaged below; engaging is a separate action.
         #
         # zero_ft_sensor maps to Init()'s flag of the same name: when enabled the
         # force/torque sensors are zeroed during initialization (the robots must
@@ -437,6 +440,11 @@ class TeleopService:
                 else:
                     init_method()
             self._controller.Start()
+            # The controller latches engagement across Stop/Init/Start, so the
+            # documented disengaged default cannot be trusted; Engage() must
+            # follow Start() (the TDK raises if the loop is not running).
+            for idx in range(self._engageable_pair_count()):
+                self._controller.Engage(idx, False)
             self._started = True
             self._engaged = False
             self._error = None
@@ -756,30 +764,41 @@ class TeleopService:
             return f"Pair {idx} {'leader' if position == 0 else 'follower'}"
         return f"Pair {idx} robot"
 
-    def reset_home(self) -> dict[str, Any]:
+    def _posture_motion_guard(self, stop_message: str) -> tuple[dict | None, Any]:
         if self._controller is None:
-            return {"ok": False, "error": "Teleoperation controller is not initialized"}
+            return (
+                {"ok": False, "error": "Teleoperation controller is not initialized"},
+                None,
+            )
         if self._started:
-            # Homing requires the teleop control loop to be stopped. The UI gates
-            # the Home button behind Stop, but guard here as well.
-            return {
-                "ok": False,
-                "error": "Stop teleoperation before homing the robots",
-            }
+            # The UI gates these buttons behind Stop, but a running control loop
+            # would fight the primitive mode, so guard here as well.
+            return ({"ok": False, "error": stop_message}, None)
         if flexivrdk is None:
-            return {"ok": False, "error": "flexivrdk is not importable"}
+            return ({"ok": False, "error": "flexivrdk is not importable"}, None)
 
         instances_reader = getattr(self._controller, "instances", None)
         if not callable(instances_reader):
-            return {
-                "ok": False,
-                "error": "Connected controller does not expose robot instances",
-            }
+            return (
+                {
+                    "ok": False,
+                    "error": "Connected controller does not expose robot instances",
+                },
+                None,
+            )
+        return (None, instances_reader)
+
+    def reset_home(self) -> dict[str, Any]:
+        error, instances_reader = self._posture_motion_guard(
+            "Stop teleoperation before homing the robots"
+        )
+        if error is not None:
+            return error
 
         posture = self._home_posture()
 
         warnings: list[str] = []
-        robots: list[tuple[str, Any]] = []
+        targets: list[tuple[str, Any, list[float]]] = []
         for idx in range(self._engageable_pair_count()):
             try:
                 handles = instances_reader(idx)
@@ -788,26 +807,96 @@ class TeleopService:
                 continue
             if not isinstance(handles, (tuple, list)):
                 handles = (handles,)
-            robots.extend(
-                (self._pair_robot_label(idx, position, len(handles)), robot)
+            targets.extend(
+                (self._pair_robot_label(idx, position, len(handles)), robot, posture)
                 for position, robot in enumerate(handles)
             )
 
+        return self._run_posture_phases(
+            targets,
+            warnings,
+            primitive="Home",
+            action="homing",
+            empty_error="No robots were homed",
+        )
+
+    def match_leader_to_follower(self) -> dict[str, Any]:
+        """Move each pair's leader onto its follower's current joint posture."""
+
+        error, instances_reader = self._posture_motion_guard(
+            "Stop teleoperation before matching the leader arms"
+        )
+        if error is not None:
+            return error
+
+        warnings: list[str] = []
+        targets: list[tuple[str, Any, list[float]]] = []
+        for idx in range(self._engageable_pair_count()):
+            try:
+                handles = instances_reader(idx)
+            except Exception as exc:  # pragma: no cover - hardware specific
+                warnings.append(f"Pair {idx}: {describe_exception(exc)}")
+                continue
+            pair = handles if isinstance(handles, tuple | list) else ()
+            if len(pair) < 2:
+                warnings.append(
+                    f"Pair {idx}: controller did not report a leader/follower pair"
+                )
+                continue
+            posture = self._follower_posture_deg(pair[1])
+            if isinstance(posture, str):
+                warnings.append(f"Pair {idx}: {posture}")
+                continue
+            targets.append((f"Pair {idx} leader", pair[0], posture))
+
+        return self._run_posture_phases(
+            targets,
+            warnings,
+            primitive="MoveJ",
+            action="leader matching",
+            empty_error="No leader arms were matched",
+        )
+
+    def _follower_posture_deg(self, follower: Any) -> list[float] | str:
+        states_reader = getattr(follower, "states", None)
+        if not callable(states_reader):
+            return "Connected robot does not report joint states"
+        try:
+            raw_states = states_reader()
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return describe_exception(exc)
+        joints = self._read_vector_field(raw_states, "q")
+        if joints is None or len(joints) < ARM_DOF:
+            return "Could not read follower joint positions"
+        # states().q is in radians and, when external axes exist, carries their
+        # values ahead of the arm joints; primitive targets are the arm's degrees.
+        return [math.degrees(value) for value in joints[-ARM_DOF:]]
+
+    def _run_posture_phases(
+        self,
+        targets: list[tuple[str, Any, list[float]]],
+        warnings: list[str],
+        *,
+        primitive: str,
+        action: str,
+        empty_error: str,
+    ) -> dict[str, Any]:
         # Phased so the arms start together: SwitchMode blocks up to ~1 s per
         # robot, so every mode switch happens before any primitive starts;
         # ExecutePrimitive returns ~200 ms after motion begins; polling starts
         # only once every arm is moving.
-        prepared = self._home_phase(robots, self._prepare_home, warnings)
-        dispatched = self._home_phase(
-            prepared, lambda robot: self._start_home(robot, posture), warnings
+        prepared = self._home_phase(
+            targets, lambda robot, _posture: self._prepare_home(robot), warnings
         )
-        reached, wait_warnings = self._wait_all_reached(dispatched)
+        dispatched = self._home_phase(
+            prepared,
+            lambda robot, posture: self._start_primitive(robot, primitive, posture),
+            warnings,
+        )
+        reached, wait_warnings = self._wait_all_reached(dispatched, action=action)
         warnings.extend(wait_warnings)
         if reached == 0:
-            return {
-                "ok": False,
-                "error": warnings[0] if warnings else "No robots were homed",
-            }
+            return {"ok": False, "error": warnings[0] if warnings else empty_error}
         return {"ok": True, "warnings": warnings}
 
     def _home_posture(self) -> list[float]:
@@ -818,16 +907,16 @@ class TeleopService:
 
     @staticmethod
     def _home_phase(
-        robots: list[tuple[str, Any]],
-        step: Callable[[Any], str | None],
+        targets: list[tuple[str, Any, list[float]]],
+        step: Callable[[Any, list[float]], str | None],
         warnings: list[str],
-    ) -> list[tuple[str, Any]]:
-        """Run one homing step on every robot; a failure only drops that robot."""
-        kept: list[tuple[str, Any]] = []
-        for label, robot in robots:
-            error = step(robot)
+    ) -> list[tuple[str, Any, list[float]]]:
+        """Run one step on every robot; a failure only drops that robot."""
+        kept: list[tuple[str, Any, list[float]]] = []
+        for label, robot, posture in targets:
+            error = step(robot, posture)
             if error is None:
-                kept.append((label, robot))
+                kept.append((label, robot, posture))
             else:
                 warnings.append(f"{label}: {error}")
         return kept
@@ -846,17 +935,22 @@ class TeleopService:
         return None
 
     @staticmethod
-    def _start_home(robot: Any, posture: list[float]) -> str | None:
+    def _start_primitive(
+        robot: Any, primitive: str, posture: list[float]
+    ) -> str | None:
         # Primitives take `posture` in degrees, unlike SendJointPosition.
         try:
-            robot.ExecutePrimitive("Home", {"target": flexivrdk.JPos(posture)})
+            robot.ExecutePrimitive(primitive, {"target": flexivrdk.JPos(posture)})
         except Exception as exc:  # pragma: no cover - hardware specific
             return describe_exception(exc)
         return None
 
     @staticmethod
     def _wait_all_reached(
-        robots: list[tuple[str, Any]], timeout_sec: float = 30.0
+        robots: list[tuple[str, Any, list[float]]],
+        timeout_sec: float = 30.0,
+        *,
+        action: str = "homing",
     ) -> tuple[int, list[str]]:
         """terminated without reachedTarget means the primitive stopped short
         (fault, operator stop) — reported at once instead of timing out."""
@@ -865,18 +959,18 @@ class TeleopService:
         reached = 0
         deadline = time.monotonic() + timeout_sec
         while pending:
-            still_pending: list[tuple[str, Any]] = []
-            for label, robot in pending:
+            still_pending: list[tuple[str, Any, list[float]]] = []
+            for label, robot, posture in pending:
                 try:
                     states = robot.primitive_states()
                     if states.get("reachedTarget"):
                         reached += 1
                     elif states.get("terminated"):
                         warnings.append(
-                            f"{label}: homing ended before reaching the target"
+                            f"{label}: {action} ended before reaching the target"
                         )
                     else:
-                        still_pending.append((label, robot))
+                        still_pending.append((label, robot, posture))
                 except Exception as exc:  # pragma: no cover - hardware specific
                     warnings.append(f"{label}: {describe_exception(exc)}")
             pending = still_pending
@@ -884,8 +978,8 @@ class TeleopService:
                 break
             if time.monotonic() >= deadline:
                 warnings.extend(
-                    f"{label}: timed out waiting to reach home"
-                    for label, _ in pending
+                    f"{label}: timed out waiting to reach the target"
+                    for label, _, _ in pending
                 )
                 break
             time.sleep(0.5)

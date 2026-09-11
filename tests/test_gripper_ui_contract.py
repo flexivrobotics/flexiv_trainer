@@ -25,7 +25,7 @@ def test_gripper_panel_uses_backend_session_lifecycle() -> None:
     assert '"/teleop/gripper/reinitialize"' in source
     assert "window.confirm" in source
     assert 'markup = sessionReady ? "Prepare" : "Initialize"' in source
-    assert "showReinitialize = done || anySessionReady" in source
+    assert "(done || anySessionReady) && !busy" in source
     assert "params?.takeover_pending" in source
     assert "Grasp preserved — request Close once to enable opening." in source
 
@@ -33,8 +33,8 @@ def test_gripper_panel_uses_backend_session_lifecycle() -> None:
 def test_gripper_panel_asset_revision_is_current() -> None:
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
 
-    assert "/static/app.js?v=20260827-04" in index
-    assert "/static/styles.css?v=20260827-04" in index
+    assert "/static/app.js?v=20260910-06" in index
+    assert "/static/styles.css?v=20260910-06" in index
 
 
 def test_recording_uses_accepted_gripper_target_width_command() -> None:

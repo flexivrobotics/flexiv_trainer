@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from types import SimpleNamespace
+
+import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
 from flexivtrainer.teleop.service import TeleopService
@@ -37,6 +40,7 @@ class FakeRobot:
             "tcp_pose": [0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0],
             "tcp_vel": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
             "ext_wrench_in_world": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "q": [0.0, -0.6981317, 0.0, 1.5707963, 0.0, 0.6981317, 0.0],
         }
 
     def actions(self) -> dict[str, list[float]]:
@@ -379,13 +383,14 @@ def _configured_service(tmp_path) -> TeleopService:
 
 
 def test_start_and_stop_do_not_engage_pairs(tmp_path) -> None:
-    # Start only runs the control loop; Stop only stops it. Neither touches
-    # engagement, which is a separate action.
+    # Start only runs the control loop (forcing every pair disengaged); Stop
+    # only stops it. Neither engages, which is a separate action.
     service = _configured_service(tmp_path)
     controller = service._controller
 
     started = service.start()
     assert controller.start_calls == 1
+    assert controller.engage_calls == [(0, False), (1, False)]
     assert started.started is True
     assert started.engaged is False
 
@@ -393,7 +398,7 @@ def test_start_and_stop_do_not_engage_pairs(tmp_path) -> None:
     # Two configured pairs -> per-pair StopWithIdx for each, not global Stop().
     assert controller.stop_idx_calls == [0, 1]
     assert controller.stop_calls == 0
-    assert controller.engage_calls == []
+    assert controller.engage_calls == [(0, False), (1, False)]
     assert stopped.started is False
     assert stopped.engaged is False
 
@@ -479,7 +484,7 @@ def test_engage_then_disengage_toggles_every_pair(tmp_path) -> None:
     service.start()
 
     engaged = service.set_engaged(True)
-    assert controller.engage_calls == [(0, True), (1, True)]
+    assert controller.engage_calls[-2:] == [(0, True), (1, True)]
     assert engaged.engaged is True
     # Engaging must not restart or stop the control loop.
     assert controller.start_calls == 1
@@ -488,6 +493,23 @@ def test_engage_then_disengage_toggles_every_pair(tmp_path) -> None:
     disengaged = service.set_engaged(False)
     assert controller.engage_calls[-2:] == [(0, False), (1, False)]
     assert disengaged.engaged is False
+
+
+def test_start_disengages_pairs_latched_by_the_controller(tmp_path) -> None:
+    # Regression: the controller keeps the engage flag across Stop/Init/Start,
+    # so a pair engaged before a Stop used to follow the leader again the moment
+    # Start ran, while the UI still offered "Engage".
+    service = _configured_service(tmp_path)
+    controller = service._controller
+
+    service.start()
+    service.set_engaged(True)
+    service.stop()
+
+    restarted = service.start()
+
+    assert controller.engage_calls[-2:] == [(0, False), (1, False)]
+    assert restarted.engaged is False
 
 
 class _FakeGripper:
@@ -781,7 +803,18 @@ def test_can_home_when_connected_and_not_running(tmp_path) -> None:
     assert service.stop().can_home is True
 
 
-def _homeable_service(tmp_path, robots, monkeypatch):
+class FakePairController:
+    """Unlike ``FakeController``, gives each pair a distinct leader and
+    follower so leader-only commands can be told apart."""
+
+    def __init__(self, pairs: tuple[tuple[object, object], ...]) -> None:
+        self._pairs = pairs
+
+    def instances(self, idx: int):
+        return self._pairs[idx]
+
+
+def _homeable_service(tmp_path, robots, monkeypatch, controller=None):
     # Keep these unit tests independent of the platform-specific flexivrdk
     # binary. macOS CI cannot import it, but the behavior under test is the
     # TeleopService primitive flow against the fake robot handles below.
@@ -807,7 +840,7 @@ def _homeable_service(tmp_path, robots, monkeypatch):
         AppSettings(storage=StorageConfig(root=tmp_path)),
         get_robot_pairs=lambda: pairs,
     )
-    service._controller = FakeController(robots)
+    service._controller = controller or FakeController(robots)
     service._initialized = True
     return service
 
@@ -904,6 +937,92 @@ def test_reset_home_errors_when_primitive_execution_unsupported(
 
     assert result["ok"] is False
     assert "primitive execution" in str(result["error"])
+
+
+class _ExternalAxisRobot(FakeRobot):
+    """Reports an eighth joint value, as a rig with an external axis does.
+    External axes come first in q, so the arm joints are the trailing seven."""
+
+    def states(self) -> dict[str, list[float]]:
+        return {**super().states(), "q": [0.3, *super().states()["q"]]}
+
+
+def _matchable_service(tmp_path, monkeypatch, pairs):
+    robots = tuple(follower for _, follower in pairs)
+    return _homeable_service(
+        tmp_path, robots, monkeypatch, controller=FakePairController(pairs)
+    )
+
+
+def test_match_moves_each_leader_to_its_follower_posture(tmp_path, monkeypatch) -> None:
+    pairs = (
+        (FakeRobot(), FakeRobot()),
+        (FakeRobot(), _ExternalAxisRobot()),
+    )
+    service = _matchable_service(tmp_path, monkeypatch, pairs)
+
+    result = service.match_leader_to_follower()
+
+    assert result == {"ok": True, "warnings": []}
+    for leader, follower in pairs:
+        expected = [math.degrees(value) for value in follower.states()["q"][-7:]]
+        assert [name for name, _ in leader.calls] == ["MoveJ"]
+        assert leader.calls[0][1] == {"target": pytest.approx(expected)}
+        # The external-axis follower still yields exactly 7 targets.
+        assert len(leader.calls[0][1]["target"]) == 7
+        assert not follower.calls
+
+
+def test_match_is_blocked_while_teleop_running(tmp_path, monkeypatch) -> None:
+    pairs = ((FakeRobot(), FakeRobot()),)
+    service = _matchable_service(tmp_path, monkeypatch, pairs)
+    service._started = True
+
+    result = service.match_leader_to_follower()
+
+    assert result["ok"] is False
+    assert all(not robot.calls for pair in pairs for robot in pair)
+
+
+def test_match_continues_when_one_follower_posture_is_unreadable(
+    tmp_path, monkeypatch
+) -> None:
+    class UnreadableFollower(FakeRobot):
+        def states(self) -> dict[str, list[float]]:
+            return {"tcp_pose": [0.0] * 7}
+
+    pairs = (
+        (FakeRobot(), UnreadableFollower()),
+        (FakeRobot(), FakeRobot()),
+    )
+    service = _matchable_service(tmp_path, monkeypatch, pairs)
+
+    result = service.match_leader_to_follower()
+
+    assert result["ok"] is True
+    assert not pairs[0][0].calls
+    assert [name for name, _ in pairs[1][0].calls] == ["MoveJ"]
+    assert len(result["warnings"]) == 1
+    assert "Pair 0" in result["warnings"][0]
+
+
+def test_match_rejects_a_controller_without_pair_handles(tmp_path, monkeypatch) -> None:
+    class SingleHandleController:
+        def __init__(self, robot: FakeRobot) -> None:
+            self._robot = robot
+
+        def instances(self, idx: int):
+            return self._robot
+
+    robot = FakeRobot()
+    service = _homeable_service(
+        tmp_path, (robot,), monkeypatch, controller=SingleHandleController(robot)
+    )
+
+    result = service.match_leader_to_follower()
+
+    assert result["ok"] is False
+    assert not robot.calls
 
 
 def test_robot_data_snapshot_uses_instance_states_and_actions(tmp_path) -> None:

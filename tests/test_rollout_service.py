@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
+from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.policies import act as act_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
@@ -166,16 +167,58 @@ def _settings(tmp_path) -> AppSettings:
     return settings
 
 
+class _FakeTeleop:
+    def __init__(self, initialized: bool = False, *, shutdown_error: str = "") -> None:
+        self.initialized = initialized
+        self.shutdown_calls = 0
+        self._shutdown_error = shutdown_error
+
+    def snapshot(self):
+        return SimpleNamespace(initialized=self.initialized)
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+        if self._shutdown_error:
+            raise RuntimeError(self._shutdown_error)
+        self.initialized = False
+
+
 def _teleop(initialized: bool = False):
-    return SimpleNamespace(
-        snapshot=lambda: SimpleNamespace(initialized=initialized)
-    )
+    return _FakeTeleop(initialized)
+
+
+class _FakeCameras:
+    def __init__(
+        self, started: list[str] | None = None, *, fails: bool = False
+    ) -> None:
+        self._started = set(started or [])
+        self._fails = fails
+        self.start_calls: list[list[str]] = []
+
+    # No image entries are exercised in these state-only tests; capture_frame
+    # returns a frame missing an image so it is simply skipped.
+    def capture_frame(self, name, **kwargs):
+        return {}
+
+    def status(self):
+        return {
+            "available": True,
+            "cameras": {
+                name: {"started": True, "error": None} for name in sorted(self._started)
+            },
+            "errors": {"realsense": "device busy"} if self._fails else {},
+        }
+
+    def start_streams(self, camera_names=None):
+        names = list(camera_names or [])
+        self.start_calls.append(names)
+        if not self._fails:
+            self._started.update(names)
+        return self.status()
 
 
 def _cameras():
-    # No image entries are exercised in these state-only tests; capture_frame
-    # returns a frame missing an image so it is simply skipped.
-    return SimpleNamespace(capture_frame=lambda name, **kwargs: {})
+    return _FakeCameras(active_camera_names(["left_arm", "right_arm"]))
 
 
 def _single_arm_pairs():
@@ -326,19 +369,81 @@ def test_zero_ft_sensor_returns_false_without_primitive(monkeypatch) -> None:
     assert not _zero_ft_sensor(_NoPrimitiveRobot("F1"), threading.Event())
 
 
-def test_start_refuses_when_teleop_initialized(tmp_path) -> None:
-    service = RolloutService(
+def _preflight_service(tmp_path, teleop, cameras, *, policy=None, robot=None):
+    policy = policy or _FakePolicy([float(i) for i in range(19)])
+    return RolloutService(
         _settings(tmp_path),
-        _cameras(),
-        _teleop(initialized=True),
+        cameras,
+        teleop,
         _single_arm_pairs,
         lambda: ["single_arm"],
-        policy_loader=_fake_loader(_FakePolicy([])),
-        robot_factory=_FakeRobot,
+        policy_loader=_fake_loader(policy),
+        robot_factory=lambda serial: robot or _FakeRobot(serial),
         resolve_device=lambda configured: "cpu",
     )
-    with pytest.raises(RuntimeError, match="Stop teleoperation"):
-        service.start("/tmp/ckpt")
+
+
+def test_start_disconnects_teleop_and_connects_cameras(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+    teleop = _FakeTeleop(initialized=True)
+    cameras = _FakeCameras()
+    service = _preflight_service(tmp_path, teleop, cameras)
+
+    service.start(_checkpoint(tmp_path))
+    service.stop()
+
+    assert teleop.shutdown_calls == 1
+    assert not teleop.initialized
+    assert cameras.start_calls == [active_camera_names(["single_arm"])]
+
+
+def test_start_aborts_when_teleop_cannot_disconnect(tmp_path) -> None:
+    teleop = _FakeTeleop(initialized=True, shutdown_error="TDK refused")
+    service = _preflight_service(tmp_path, teleop, _cameras())
+
+    with pytest.raises(RuntimeError, match="Failed to disconnect teleoperation"):
+        service.start(_checkpoint(tmp_path))
+    assert service.status()["status"] == "idle"
+
+
+def test_start_aborts_when_teleop_stays_connected(tmp_path) -> None:
+    teleop = _FakeTeleop(initialized=True)
+    teleop.shutdown = lambda: None
+    service = _preflight_service(tmp_path, teleop, _cameras())
+
+    with pytest.raises(RuntimeError, match="still.*connected"):
+        service.start(_checkpoint(tmp_path))
+
+
+def test_start_aborts_when_cameras_fail_to_connect(tmp_path) -> None:
+    cameras = _FakeCameras(fails=True)
+    service = _preflight_service(tmp_path, _teleop(initialized=False), cameras)
+
+    with pytest.raises(RuntimeError, match="Failed to connect cameras: device busy"):
+        service.start(_checkpoint(tmp_path))
+    assert service.status()["status"] == "idle"
+    assert cameras.start_calls == [active_camera_names(["single_arm"])]
+
+
+def test_stop_leaves_teleop_and_cameras_alone(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+    teleop = _FakeTeleop(initialized=True)
+    cameras = _FakeCameras()
+    service = _preflight_service(tmp_path, teleop, cameras)
+
+    service.start(_checkpoint(tmp_path))
+    calls_after_start = list(cameras.start_calls)
+    service.stop()
+
+    assert teleop.shutdown_calls == 1
+    assert not teleop.initialized
+    assert cameras.start_calls == calls_after_start
 
 
 def test_start_refuses_missing_checkpoint(tmp_path) -> None:
@@ -1824,10 +1929,8 @@ def test_rollout_start_clears_depth_alignment_leases(tmp_path, monkeypatch) -> N
     )
     robot = _FakeRobot("F1")
     service = _make_service(tmp_path, policy=policy, robot=robot)
-    service._cameras = SimpleNamespace(
-        capture_frame=lambda name, **kwargs: {},
-        clear_depth_alignment_leases=lambda: cleared.append(True),
-    )
+    service._cameras = _cameras()
+    service._cameras.clear_depth_alignment_leases = lambda: cleared.append(True)
     monkeypatch.setattr(
         "flexivtrainer.rollout.observations._predict_action_chunk",
         lambda obs, pol, dev, pre, post, **kwargs: (

@@ -30,7 +30,7 @@ def test_root_serves_packaged_ui() -> None:
 
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "/static/app.js?v=20260827-04" in response.text
+    assert "/static/app.js?v=20260910-06" in response.text
 
 
 def test_docs_route_is_available() -> None:
@@ -154,3 +154,50 @@ def test_runtime_manager_blocks_alignment_and_fails_closed(tmp_path) -> None:
 
     manager.rollout.status = boom
     assert manager._rollout_is_running() is True
+
+
+def _rollout_client(rollout) -> TestClient:
+    app = create_app()
+    app.dependency_overrides[get_runtime_manager] = lambda: SimpleNamespace(
+        rollout=rollout
+    )
+    return TestClient(app)
+
+
+def test_rollout_start_is_one_call_that_runs_the_preflight() -> None:
+    class FakeRollout:
+        def __init__(self) -> None:
+            self.started: list[str] = []
+
+        def start(self, checkpoint_path, **kwargs):
+            self.started.append(checkpoint_path)
+            return {"status": "running", "checkpoint_path": checkpoint_path}
+
+    rollout = FakeRollout()
+    response = _rollout_client(rollout).post(
+        "/rollout/start", json={"source": "local", "checkpoint_path": "/ckpt"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+    assert rollout.started == ["/ckpt"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Failed to disconnect teleoperation: TDK refused",
+        "Failed to connect cameras: device busy",
+    ],
+)
+def test_rollout_start_surfaces_preflight_failures(message: str) -> None:
+    class FakeRollout:
+        def start(self, checkpoint_path, **kwargs):
+            raise RuntimeError(message)
+
+    response = _rollout_client(FakeRollout()).post(
+        "/rollout/start", json={"source": "local", "checkpoint_path": "/ckpt"}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == message
