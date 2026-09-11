@@ -160,6 +160,7 @@ const state = {
         teleopStartBusy: false,
         teleopZeroingSensors: false,
         teleopHomeBusy: false,
+        daggerMode: false,
         visualizeDepth: false,
         recordingStartBusy: false,
         recordingSaveBusy: false,
@@ -189,10 +190,6 @@ const state = {
         },
         // In-flight action per service, so the right button shows its spinner.
         serviceBusyAction: {
-            teleop: null,
-            cameras: null,
-        },
-        rolloutServiceBusy: {
             teleop: null,
             cameras: null,
         },
@@ -536,6 +533,22 @@ const TELEOP_START_MARKUP = `
             <path d="M8 6 18 12 8 18Z" fill="currentColor"></path>
         </svg>
         <span>Start</span>
+    </span>
+`;
+const TELEOP_HOME_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--home" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 3 11h2v9h5v-6h4v6h5v-9h2L12 3z" fill="currentColor"></path>
+        </svg>
+        <span>Home All Robots</span>
+    </span>
+`;
+const TELEOP_MATCH_LEADER_MARKUP = `
+    <span class="button-content">
+        <svg class="button-icon button-icon--match" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M11.25 2.5h1.5v3.2h-1.5zM11.25 18.3h1.5v3.2h-1.5zM6.5 8l4 4-4 4v-2.5H2v-3h4.5zM17.5 8l-4 4 4 4v-2.5H22v-3h-4.5z" fill="currentColor"></path>
+        </svg>
+        <span>Match Leader</span>
     </span>
 `;
 const TELEOP_STOP_MARKUP = `
@@ -4027,7 +4040,15 @@ function updateTeleopControlButtons(teleopStatus) {
         startWarning.classList.toggle("hidden", !(starting && state.ui.teleopZeroingSensors));
     }
 
-    byId("teleop-home").disabled = !canHome;
+    const homeButton = byId("teleop-home");
+    homeButton.disabled = !canHome;
+    // renderTeleop runs ~10 Hz; rewriting innerHTML unconditionally would drop
+    // clicks landing between repaints.
+    setMarkupIfChanged(
+        homeButton,
+        state.ui.daggerMode ? "teleop-home:match" : "teleop-home:home",
+        state.ui.daggerMode ? TELEOP_MATCH_LEADER_MARKUP : TELEOP_HOME_MARKUP,
+    );
 
     const engageButton = byId("teleop-engage");
     engageButton.disabled = !canEngage;
@@ -4451,17 +4472,12 @@ function updateGripperInitButton(
                     ? "Use initialization cached by this backend session"
                     : "Runs the gripper close/open initialization cycle";
 
-    const showReinitialize = done || anySessionReady;
+    // Any running operation shows on the main button alone; hiding this one
+    // gives the busy pill the full row so its label never wraps outside it.
+    const showReinitialize = (done || anySessionReady) && !busy;
     reinitButton.classList.toggle("hidden", !showReinitialize);
     reinitButton.disabled = !initialized || started || busy || !showReinitialize;
-    reinitButton.classList.toggle("button--busy", busy && reinitializing);
-    setMarkupIfChanged(
-        reinitButton,
-        `gripper-reinit:${busy && reinitializing ? "busy" : "idle"}`,
-        busy && reinitializing
-            ? '<span class="button-spinner" aria-hidden="true"></span><span>Reinitializing …</span>'
-            : "Reinit",
-    );
+    setMarkupIfChanged(reinitButton, "gripper-reinit:idle", "Reinit");
     reinitButton.title = started
         ? "Stop teleoperation before reinitializing grippers"
         : "Force the gripper close/open initialization cycle again";
@@ -7444,76 +7460,20 @@ async function startRolloutRun() {
     const payload = useHub
         ? { source: "hub", repo_id: repoId, task, ...(revision ? { revision } : {}) }
         : { source: "local", checkpoint_path: checkpoint, task };
-    state.rolloutStatus = await withHubToken(() =>
-        api("/rollout/start", {
-            method: "POST",
-            body: JSON.stringify(payload),
-        })
-    );
-    renderRollout();
-}
-
-function isRolloutServiceConnected(serviceKey, service = {}) {
-    if (serviceKey === "teleop_service") {
-        return !!state.teleopStatus?.teleop?.initialized || service.tone === "ok";
-    }
-    const cameras = Object.values(state.teleopStatus?.cameras?.cameras || {});
-    return cameras.some((camera) => !!camera?.started)
-        || service.tone === "ok"
-        || service.tone === "working";
-}
-
-function buildRolloutServiceCard(serviceKey, serviceName, fallbackLabel, isRunning) {
-    const services = state.teleopStatus?.services || state.summary?.services || {};
-    const service = services[serviceKey] || {};
-    const connected = isRolloutServiceConnected(serviceKey, service);
-    const action = connected ? "disconnect" : "connect";
-    const pendingAction = state.ui.rolloutServiceBusy[serviceName];
-    const busy = !!pendingAction;
-    const serialsMissing = serviceName === "teleop" && !connected && !allRobotSerialsConfigured();
-    const disabled = isRunning || busy || serialsMissing;
-    const serviceState = formatValue(service.state || (connected ? "Connected" : "Not connected"));
-    const tone = service.tone || (connected ? "ok" : "neutral");
-    const buttonLabel = action === "connect" ? "Connect" : "Disconnect";
-    const busyLabel = pendingAction === "connect" ? "Connecting…" : "Disconnecting…";
-    const title = isRunning
-        ? "Stop rollout before changing service connections."
-        : serialsMissing
-            ? ROBOT_SERIALS_REQUIRED_MESSAGE
-            : `${buttonLabel} ${fallbackLabel.toLowerCase()}`;
-
-    return `
-        <aside class="panel panel--soft rollout-service-card">
-            <div class="panel-header rollout-service-card__header">
-                <h3>${escapeHtml(fallbackLabel)}</h3>
-                <span class="teleop-system-card__dot teleop-system-card__dot--${escapeHtml(tone)}" role="img" aria-label="${escapeHtml(serviceState)}" title="${escapeHtml(serviceState)}"></span>
-            </div>
-            <div class="control-stack">
-                <button class="button-with-icon ${connected ? "stop-button" : "start-button"}" data-rollout-service="${serviceName}" data-action="${action}" type="button" title="${escapeHtml(title)}" ${disabled ? "disabled" : ""}>
-                    <span class="button-content">
-                        ${busy ? `<span class="button-spinner" aria-hidden="true"></span><span>${busyLabel}</span>` : `<span>${buttonLabel}</span>`}
-                    </span>
-                </button>
-            </div>
-            <p class="training-controls__state">Status: <strong>${escapeHtml(serviceState)}</strong></p>
-            ${serviceName === "teleop" ? `<p class="training-controls__state">Disconnect before rollout</p>` : ""}
-        </aside>
-    `;
-}
-
-async function controlRolloutService(serviceName, action) {
-    if (state.ui.rolloutServiceBusy[serviceName]) {
-        return;
-    }
-    state.ui.rolloutServiceBusy[serviceName] = action;
-    renderRollout();
     try {
-        await controlHomeService(serviceName, action);
-        await refreshTeleopStatus();
+        state.rolloutStatus = await withHubToken(() =>
+            api("/rollout/start", {
+                method: "POST",
+                body: JSON.stringify(payload),
+            })
+        );
     } finally {
-        state.ui.rolloutServiceBusy[serviceName] = null;
-        renderRollout();
+        // /rollout/start disconnects teleop and connects the cameras itself, so
+        // the cached service state is stale whether or not the start succeeded.
+        await refreshTeleopStatus().catch(() => {});
+        await refreshSummary().catch(() => {});
     }
+    renderRollout();
 }
 
 function renderRollout() {
@@ -7558,14 +7518,6 @@ function renderRollout() {
                     : "Idle";
     const primaryMarkup = isRunning ? TELEOP_STOP_MARKUP : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
-    const rolloutServices = state.teleopStatus?.services || state.summary?.services || {};
-    const rolloutServiceKey = ["cameras", "teleop_service"].map((serviceKey) => {
-        const service = rolloutServices[serviceKey] || {};
-        return `${serviceKey}:${service.tone || ""}:${service.state || ""}:${service.detail || ""}`;
-    }).join("|");
-    const rolloutServiceBusyKey = ["cameras", "teleop"]
-        .map((serviceName) => `${serviceName}:${state.ui.rolloutServiceBusy[serviceName] || ""}`)
-        .join("|");
 
     // Rebuild the content only when something it renders changed. The 1s poll
     // calls this every tick; rebuilding unconditionally would destroy and
@@ -7573,7 +7525,7 @@ function renderRollout() {
     const renderKey = [
         status.status, status.stop_reason || "", status.error || "",
         checkpoint, configuredDevice, deviceOptions, deviceDetail,
-        state.rolloutRequiresTask, rolloutServiceKey, rolloutServiceBusyKey,
+        state.rolloutRequiresTask,
         // Without these the local/Hub toggle changes state but the guard above
         // returns early, so the panel never redraws and the click looks dead.
         state.rolloutCheckpointSource, state.rolloutActionNamesWarning || "",
@@ -7616,8 +7568,6 @@ function renderRollout() {
                     <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
                     ${status.error ? `<p class="training-controls__state rollout-error">${escapeHtml(status.error)}</p>` : ""}
                 </aside>
-                ${buildRolloutServiceCard("cameras", "cameras", "Cameras", isRunning)}
-                ${buildRolloutServiceCard("teleop_service", "teleop", "Teleop Service", isRunning)}
             </div>
             <div class="training-main">
                 <section class="panel panel--soft">
@@ -7788,12 +7738,6 @@ function renderRollout() {
             renderRollout();
         };
     }
-    container.querySelectorAll("[data-rollout-service]").forEach((button) => {
-        button.onclick = () => {
-            controlRolloutService(button.dataset.rolloutService, button.dataset.action)
-                .catch((error) => showToast(error.message, true));
-        };
-    });
 }
 
 // Render the live camera feeds the policy consumes during rollout, using the
@@ -8103,6 +8047,13 @@ function bindGlobalEvents() {
     if (refreshButton) {
         refreshButton.onclick = () => refreshTeleopStatusWithIndicator().catch((error) => showToast(error.message, true));
     }
+    const daggerMode = byId("teleop-dagger-mode");
+    if (daggerMode) {
+        daggerMode.onchange = () => {
+            state.ui.daggerMode = daggerMode.checked;
+            renderTeleop();
+        };
+    }
     const depthVisualization = byId("teleop-visualize-depth");
     if (depthVisualization) {
         depthVisualization.onchange = () => {
@@ -8172,13 +8123,16 @@ function bindGlobalEvents() {
     byId("teleop-home").onclick = async () => {
         try {
             setTeleopHomeBusy(true);
-            const result = await api("/teleop/home", { method: "POST" });
+            const matching = state.ui.daggerMode;
+            const result = await api(matching ? "/teleop/match-leader" : "/teleop/home", {
+                method: "POST",
+            });
             if (result.error) {
                 showToast(result.error, true);
             } else if (result.warnings?.length) {
                 showToast(result.warnings.join(" | "), true);
             } else {
-                showToast("Home reset command sent.");
+                showToast(matching ? "Leader match command sent." : "Home reset command sent.");
             }
         } catch (error) {
             showToast(error.message, true);
