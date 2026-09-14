@@ -3704,6 +3704,16 @@ function renderRecordResolutionOptions(recording = {}) {
     }
     const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
     const selectedId = state.recordResolution;
+    const selectedIndex = RESOLUTION_PRESETS.findIndex((preset) => preset.id === selectedId);
+    container.style.setProperty("--seg-count", String(RESOLUTION_PRESETS.length));
+    container.style.setProperty("--seg-index", String(Math.max(selectedIndex, 0)));
+    container.classList.toggle("resolution-options--locked", locked);
+    // Slide only once placed, so the restored choice doesn't animate in on load.
+    if (!container.dataset.segPlaced) {
+        requestAnimationFrame(() => {
+            container.dataset.segPlaced = "true";
+        });
+    }
     const renderKey = `${locked ? 1 : 0}|${selectedId}`;
     if (container.dataset.renderKey === renderKey) {
         return;
