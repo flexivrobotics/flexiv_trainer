@@ -5122,7 +5122,6 @@ function renderProcessingModePicker(container) {
     container.innerHTML = `
         ${_processingStepsMarkup()}
         <div class="wizard-body">
-            <div class="panel-header wizard-intro"><div><h3>Data Processing</h3></div></div>
             <div class="policy-grid mode-grid" id="processing-mode-grid"></div>
         </div>
     `;
@@ -5435,7 +5434,6 @@ function renderTrainingModePicker(container) {
     container.innerHTML = `
         ${_trainingStepsMarkup()}
         <div class="wizard-body">
-            <div class="panel-header wizard-intro"><div><h3>Policy Training</h3></div></div>
             <div class="policy-grid mode-grid" id="training-mode-grid"></div>
         </div>
     `;
