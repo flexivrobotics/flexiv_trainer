@@ -1019,7 +1019,7 @@ function _showPreviewLoadingOverlay(containerId) {
     const container = byId(containerId);
     if (!container) return;
     container.innerHTML = `
-        <div class="panel panel--soft" style="position:relative;min-height:200px">
+        <div class="dataset-preview-loading">
             <div class="preview-loading-overlay">
                 <span class="preview-loading-overlay__label">Loading data ...</span>
                 <div class="preview-loading-bar"><span></span></div>
@@ -1319,8 +1319,8 @@ function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, p
     container.innerHTML = `
         <span class="eyebrow dataset-feed-title">Camera Feeds</span>
         <div class="feed-row dataset-feed-row">${feedsHtml}</div>
-        ${playbackHtml}
         <div class="dataset-plots-grid">${plotsHtml}</div>
+        ${playbackHtml}
     `;
 
     // Attach playback event handlers
@@ -2350,6 +2350,43 @@ function setTrainingDeviceEvalBusy(busy) {
     button.setAttribute("aria-busy", busy ? "true" : "false");
 }
 
+function syncNavThumb({ animate = true } = {}) {
+    const nav = document.querySelector(".app-nav__segments");
+    const thumb = nav?.querySelector(".nav-thumb");
+    if (!nav || !thumb) {
+        return;
+    }
+    const active = nav.querySelector(".nav-link--active");
+    const slide = animate && thumb.dataset.placed === "true";
+    thumb.classList.toggle("nav-thumb--animate", slide);
+    if (!active) {
+        thumb.style.opacity = "0";
+        return;
+    }
+    const navRect = nav.getBoundingClientRect();
+    const rect = active.getBoundingClientRect();
+    thumb.style.width = `${rect.width}px`;
+    thumb.style.transform = `translateX(${rect.left - navRect.left - nav.clientLeft + nav.scrollLeft}px)`;
+    thumb.style.opacity = "1";
+    thumb.dataset.placed = "true";
+}
+
+// One-shot entry for content a user action just revealed; never call from poll renders.
+// Pass { rise: false } when the element contains position:fixed descendants.
+function animateEnter(element, { rise = true } = {}) {
+    if (!element?.animate) {
+        return;
+    }
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const frames = rise && !reduce
+        ? [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }]
+        : [{ opacity: 0 }, { opacity: 1 }];
+    element.animate(frames, {
+        duration: reduce ? 160 : 320,
+        easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+    });
+}
+
 function setActiveView(view) {
     state.activeView = view;
     // Both the teleoperation and rollout views show live camera feeds; stop the
@@ -2366,6 +2403,7 @@ function setActiveView(view) {
         element.classList.toggle("nav-link--active", active && !isBrand);
         element.classList.toggle("brand--active", active && isBrand);
     });
+    syncNavThumb();
     if (view === "teleoperation" && state.teleopStatus) {
         renderTeleop();
     }
@@ -3608,18 +3646,28 @@ function renderRecordingOptions(recording = {}) {
         renderRecordingOptions(recording);
         renderRecordingStatusPanel(state.teleopStatus);
     };
-    container.appendChild(selectAllButton);
+    const header = document.createElement("div");
+    header.className = "recording-option-header";
+    header.innerHTML = `<span class="recording-option-header__title">Recording entries</span>`;
+    header.appendChild(selectAllButton);
+    container.appendChild(header);
 
     let currentGroup = null;
+    let groupList = container;
     options.forEach((option) => {
         // Section header whenever the feature group changes, so the list reads
         // as observation.images / observation.state / action.
         if (option.group && option.group !== currentGroup) {
             currentGroup = option.group;
+            const section = document.createElement("div");
+            section.className = "recording-option-section";
             const heading = document.createElement("div");
             heading.className = "recording-option-group-title";
             heading.textContent = option.group;
-            container.appendChild(heading);
+            groupList = document.createElement("div");
+            groupList.className = "recording-option-group";
+            section.append(heading, groupList);
+            container.appendChild(section);
         }
         const checked = selected.has(option.id);
         const label = document.createElement("label");
@@ -3627,7 +3675,7 @@ function renderRecordingOptions(recording = {}) {
         label.innerHTML = `
             <input type="checkbox" ${checked ? "checked" : ""} ${locked ? "disabled" : ""} />
             <span class="recording-option__text">
-                <span class="recording-option__label">${option.label}</span>
+                <span class="recording-option__label">${option.label.replace(/\./g, ".<wbr>")}</span>
             </span>
         `;
         const input = label.querySelector("input");
@@ -3643,7 +3691,7 @@ function renderRecordingOptions(recording = {}) {
             renderRecordingOptions(recording);
             renderRecordingStatusPanel(state.teleopStatus);
         };
-        container.appendChild(label);
+        groupList.appendChild(label);
     });
 }
 
@@ -3656,6 +3704,16 @@ function renderRecordResolutionOptions(recording = {}) {
     }
     const locked = !!recording.active || !!recording.awaiting_save || state.ui.recordingStartBusy;
     const selectedId = state.recordResolution;
+    const selectedIndex = RESOLUTION_PRESETS.findIndex((preset) => preset.id === selectedId);
+    container.style.setProperty("--seg-count", String(RESOLUTION_PRESETS.length));
+    container.style.setProperty("--seg-index", String(Math.max(selectedIndex, 0)));
+    container.classList.toggle("resolution-options--locked", locked);
+    // Slide only once placed, so the restored choice doesn't animate in on load.
+    if (!container.dataset.segPlaced) {
+        requestAnimationFrame(() => {
+            container.dataset.segPlaced = "true";
+        });
+    }
     const renderKey = `${locked ? 1 : 0}|${selectedId}`;
     if (container.dataset.renderKey === renderKey) {
         return;
@@ -4186,12 +4244,12 @@ function buildGlobalGripperCommandControl(content, params) {
     block.className = "gripper-command-parameters";
     block.innerHTML = `
         <label class="gripper-input-group">
-            <span>Grasping velocity: <strong class="gripper-velocity-value"></strong> m/s</span>
+            <span class="gripper-input-head"><span>Grasping velocity</span><span class="gripper-input-value"><strong class="gripper-velocity-value"></strong> m/s</span></span>
             <div class="gripper-input-row"><input type="range" class="gripper-velocity" step="0.001" /></div>
             <small class="gripper-input-note gripper-velocity-note"></small>
         </label>
         <label class="gripper-input-group">
-            <span>Force limit: <strong class="gripper-force-value"></strong> N</span>
+            <span class="gripper-input-head"><span>Force limit</span><span class="gripper-input-value"><strong class="gripper-force-value"></strong> N</span></span>
             <div class="gripper-input-row"><input type="range" class="gripper-force" step="0.1" /></div>
             <small class="gripper-input-note gripper-force-note"></small>
         </label>`;
@@ -4271,7 +4329,7 @@ function buildGlobalGripperWidthControl(content, sides, grippers) {
     block.className = "gripper-default-width";
     block.innerHTML = `
         <label class="gripper-input-group">
-            <span>Default width: <strong class="gripper-width-value"></strong> m</span>
+            <span class="gripper-input-head"><span>Default width</span><span class="gripper-input-value"><strong class="gripper-width-value"></strong> m</span></span>
             <div class="gripper-width-row">
                 <input type="range" class="gripper-width" step="0.001" />
                 <button type="button" class="secondary-button gripper-width-set">Set</button>
@@ -4606,50 +4664,41 @@ function computeTelemetryScale(history, kind) {
     return { min, max, hasData: true };
 }
 
-// Shared geometry for the wrench trend charts. Margins leave room on the left
-// for the magnitude (y) axis labels and along the bottom for the time (x) axis
-// labels; buildTrendGrid and buildTrendPath must use the same values.
+// The SVG stretches to its plot box, so axis labels are HTML to keep their pixel size.
 const TREND_CHART_WIDTH = 960;
 const TREND_CHART_HEIGHT = 540;
-const TREND_CHART_MARGIN = { left: 64, right: 22, top: 20, bottom: 50 };
 
-function buildTrendGrid(scale, units, spanSeconds) {
+function buildTrendGrid(scale) {
     const width = TREND_CHART_WIDTH;
     const height = TREND_CHART_HEIGHT;
-    const { left, right, top, bottom } = TREND_CHART_MARGIN;
-    const innerWidth = width - left - right;
-    const innerHeight = height - top - bottom;
     const lines = [];
-    const labels = [];
-
-    // Vertical grid lines + time (x) axis ticks. The newest sample sits at the
-    // right edge (0 s) and the window stretches back in time to the left.
     for (let index = 0; index <= 5; index += 1) {
-        const x = left + (innerWidth * index) / 5;
-        lines.push(`<line class="trend-chart__grid-line" x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}"></line>`);
-        const secondsAgo = spanSeconds * (1 - index / 5);
-        const tick = index === 5 ? "0" : `-${secondsAgo.toFixed(1)}`;
-        labels.push(`<text class="trend-chart__axis" x="${x.toFixed(1)}" y="${height - bottom + 18}" text-anchor="middle">${tick}</text>`);
+        const x = (width * index) / 5;
+        lines.push(`<line class="trend-chart__grid-line" x1="${x}" y1="0" x2="${x}" y2="${height}"></line>`);
     }
-    // Horizontal grid lines + magnitude (y) axis ticks (top = max, bottom = min).
     for (let index = 0; index <= 4; index += 1) {
-        const y = top + (innerHeight * index) / 4;
-        lines.push(`<line class="trend-chart__grid-line" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}"></line>`);
-        const value = scale.max - (scale.max - scale.min) * (index / 4);
-        labels.push(`<text class="trend-chart__axis" x="${left - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end">${value.toFixed(1)}</text>`);
+        const y = (height * index) / 4;
+        lines.push(`<line class="trend-chart__grid-line" x1="0" y1="${y}" x2="${width}" y2="${y}"></line>`);
     }
     if (scale.hasData && scale.min < 0 && scale.max > 0) {
-        const zeroY = top + (1 - ((0 - scale.min) / (scale.max - scale.min))) * innerHeight;
-        lines.push(`<line class="trend-chart__zero" x1="${left}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}"></line>`);
+        const zeroY = (1 - ((0 - scale.min) / (scale.max - scale.min))) * height;
+        lines.push(`<line class="trend-chart__zero" x1="0" y1="${zeroY}" x2="${width}" y2="${zeroY}"></line>`);
     }
+    return `<g>${lines.join("")}</g>`;
+}
 
-    // Axis titles.
-    labels.push(`<text class="trend-chart__axis-title" x="${(left + innerWidth / 2).toFixed(1)}" y="${height - 8}" text-anchor="middle">Time (s)</text>`);
-    const titleX = 16;
-    const titleY = top + innerHeight / 2;
-    labels.push(`<text class="trend-chart__axis-title" x="${titleX}" y="${titleY.toFixed(1)}" text-anchor="middle" transform="rotate(-90 ${titleX} ${titleY.toFixed(1)})">Magnitude (${units})</text>`);
-
-    return `<g>${lines.join("")}${labels.join("")}</g>`;
+function buildTrendAxisLabels(scale, spanSeconds) {
+    const labels = [];
+    for (let index = 0; index <= 5; index += 1) {
+        const secondsAgo = spanSeconds * (1 - index / 5);
+        const tick = index === 5 ? "0" : `-${secondsAgo.toFixed(1)}`;
+        labels.push(`<span class="trend-chart__tick trend-chart__tick--x" style="left:${index * 20}%">${tick}</span>`);
+    }
+    for (let index = 0; index <= 4; index += 1) {
+        const value = scale.max - (scale.max - scale.min) * (index / 4);
+        labels.push(`<span class="trend-chart__tick trend-chart__tick--y" style="top:${index * 25}%">${value.toFixed(1)}</span>`);
+    }
+    return labels.join("");
 }
 
 function buildTrendPath(history, kind, componentIndex, scale) {
@@ -4659,9 +4708,6 @@ function buildTrendPath(history, kind, componentIndex, scale) {
 
     const width = TREND_CHART_WIDTH;
     const height = TREND_CHART_HEIGHT;
-    const { left, right, top, bottom } = TREND_CHART_MARGIN;
-    const innerWidth = width - left - right;
-    const innerHeight = height - top - bottom;
     let drawing = false;
     let path = "";
 
@@ -4674,8 +4720,8 @@ function buildTrendPath(history, kind, componentIndex, scale) {
         }
 
         const ratio = history.length === 1 ? 1 : index / (history.length - 1);
-        const x = left + ratio * innerWidth;
-        const y = top + (1 - ((value - scale.min) / (scale.max - scale.min))) * innerHeight;
+        const x = ratio * width;
+        const y = (1 - ((value - scale.min) / (scale.max - scale.min))) * height;
         path += `${drawing ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)} `;
         drawing = true;
     });
@@ -4706,42 +4752,43 @@ function renderTrendGraph(side, kind, history, currentVector, label) {
     const spanSeconds = history.length > 1
         ? ((history.length - 1) * TELEOP_POLL_INTERVAL_MS) / 1000
         : windowSeconds;
+    const legend = meta.labels.map((axis, index) =>
+        `<span class="trend-legend__item"><span class="trend-legend__swatch" style="--swatch:${meta.colors[index]}"></span><span class="trend-legend__label">${axis}</span></span>`,
+    ).join("");
+    const header = `
+        <div class="telemetry-card__header">
+            <div>
+                <span class="eyebrow">${title}</span>
+            </div>
+            <div class="trend-legend" aria-hidden="true">${legend}</div>
+        </div>
+    `;
+    const chart = (span, lines, overlay = "") => `
+        <div class="trend-chart trend-chart--wrench">
+            <div class="trend-chart__plot">
+                <svg class="trend-chart__svg" viewBox="0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}" preserveAspectRatio="none" aria-hidden="true">
+                    ${buildTrendGrid(scale)}
+                    ${lines}
+                </svg>
+                ${buildTrendAxisLabels(scale, span)}
+            </div>
+            <span class="trend-chart__caption trend-chart__caption--x">Time (s)</span>
+            <span class="trend-chart__caption trend-chart__caption--y">Magnitude (${meta.units})</span>
+            ${overlay}
+        </div>
+    `;
 
     if (!scale.hasData) {
         setMarkupIfChanged(
             panel,
             `${side}:${kind}:awaiting`,
-            `
-                <div class="telemetry-card__header">
-                    <div>
-                        <span class="eyebrow">${title}</span>
-                    </div>
-                </div>
-                <div class="trend-chart">
-                    <svg class="trend-chart__svg" viewBox="0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}" aria-hidden="true">
-                        ${buildTrendGrid(scale, meta.units, windowSeconds)}
-                    </svg>
-                    <div class="trend-chart__empty">${buildAwaitingDataMarkup()}</div>
-                </div>
-            `,
+            `${header}${chart(windowSeconds, "", `<div class="trend-chart__empty">${buildAwaitingDataMarkup()}</div>`)}`,
         );
         return;
     }
 
     delete panel.dataset.renderKey;
-    panel.innerHTML = `
-        <div class="telemetry-card__header">
-            <div>
-                <span class="eyebrow">${title}</span>
-            </div>
-        </div>
-        <div class="trend-chart">
-            <svg class="trend-chart__svg" viewBox="0 0 ${TREND_CHART_WIDTH} ${TREND_CHART_HEIGHT}" aria-hidden="true">
-                ${buildTrendGrid(scale, meta.units, spanSeconds)}
-                ${paths}
-            </svg>
-        </div>
-    `;
+    panel.innerHTML = `${header}${chart(spanSeconds, paths)}`;
 }
 
 async function fetchAndRenderTeleopStatus() {
@@ -5002,38 +5049,88 @@ async function loadTrainingPreview(episodePath, options = {}) {
 // Truncated job tags reveal their full text on hover by sliding ("rolling")
 // the text to expose the clipped tail, then sliding back. Only tags whose text
 // is actually clipped get the animation; the rest keep their static ellipsis.
-function _setupJobTagMarquee(scope) {
-    scope.querySelectorAll(".episode-row__job").forEach((tag) => {
-        const text = tag.querySelector(".episode-row__job-text");
-        if (!text) {
-            return;
-        }
-        const overflow = text.scrollWidth - text.clientWidth;
-        if (overflow > 1) {
-            tag.classList.add("episode-row__job--overflowing");
-            tag.style.setProperty("--job-tag-shift", `-${overflow}px`);
-            // Pace the scroll by distance so longer names don't whip past.
-            const seconds = Math.min(8, Math.max(2, overflow / 30));
-            tag.style.setProperty("--job-tag-duration", `${seconds}s`);
-        } else {
-            tag.classList.remove("episode-row__job--overflowing");
-            tag.style.removeProperty("--job-tag-shift");
-            tag.style.removeProperty("--job-tag-duration");
-        }
-    });
+const WIZARD_ICON = (paths) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const WIZARD_CHECK_SVG = WIZARD_ICON(`<path d="m6 12.5 4 4 8-9"></path>`);
+const WIZARD_PLUS_SVG = WIZARD_ICON(`<path d="M12 5v14M5 12h14"></path>`);
+const WIZARD_FOLDER_SVG = WIZARD_ICON(`<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path>`);
+const WIZARD_TRAY_SVG = WIZARD_ICON(`<path d="M4 13.5 6.2 6.6A1.5 1.5 0 0 1 7.6 5.5h8.8a1.5 1.5 0 0 1 1.4 1.1L20 13.5V17a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17z"></path><path d="M4 13.5h4.5l1 2h5l1-2H20"></path>`);
+const WIZARD_PREVIEW_SVG = WIZARD_ICON(`<rect x="3.5" y="5" width="17" height="14" rx="2.5"></rect><path d="m10.5 9.5 4 2.5-4 2.5z"></path>`);
+const MODE_TILE_ICONS = {
+    episodes: WIZARD_ICON(`<path d="M6 4v3.5a6 6 0 0 0 6 6 6 6 0 0 0 6-6V4"></path><path d="M12 13.5V20M9 17l3 3 3-3"></path>`),
+    datasets: WIZARD_ICON(`<ellipse cx="12" cy="6" rx="7" ry="2.8"></ellipse><path d="M5 6v6c0 1.55 3.13 2.8 7 2.8s7-1.25 7-2.8V6"></path><path d="M5 12v6c0 1.55 3.13 2.8 7 2.8s7-1.25 7-2.8v-6"></path>`),
+    new: WIZARD_ICON(`<path d="m11 3.5 1.8 4.9 4.9 1.8-4.9 1.8L11 16.9l-1.8-4.9-4.9-1.8 4.9-1.8z"></path><path d="M18.5 15v5M16 17.5h5"></path>`),
+    fine_tune: WIZARD_ICON(`<path d="M4 7h9M17 7h3M4 17h3M11 17h9"></path><circle cx="15" cy="7" r="2"></circle><circle cx="9" cy="17" r="2"></circle>`),
+};
+const MODE_TILE_CHEVRON_SVG = `<svg class="mode-tile__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6 6 6-6 6"></path></svg>`;
+
+function _modeTileMarkup(icon, title, description) {
+    return `<span class="mode-tile__icon">${icon}</span><span class="mode-tile__text"><h3>${title}</h3><p>${description}</p></span>${MODE_TILE_CHEVRON_SVG}`;
+}
+
+function _wizardStepsMarkup(labels, current) {
+    const items = labels.map((label, index) => {
+        const tone = index < current ? "done" : index === current ? "current" : "upcoming";
+        return `<li class="wizard-steps__item wizard-steps__item--${tone}"${index === current ? ` aria-current="step"` : ""}>
+            <span class="wizard-steps__dot">${index < current ? WIZARD_CHECK_SVG : index + 1}</span>
+            <span class="wizard-steps__label">${label}</span>
+        </li>`;
+    }).join("");
+    return `<ol class="wizard-steps" aria-label="Steps">${items}</ol>`;
+}
+
+function _processingStepsMarkup() {
+    return _wizardStepsMarkup(["Mode", "Load", "Merge", "Review"], state.processingMode ? state.processingStep : 0);
+}
+
+// Hub datasets skip the preview page, so the indicator drops it too.
+function _trainingStepsMarkup() {
+    const isFineTune = state.trainingMode === "fine_tune";
+    const previewStep = isFineTune ? 3 : 2;
+    const labels = isFineTune
+        ? ["Mode", "Checkpoint", "Dataset", "Preview", "Configure", "Train"]
+        : ["Mode", "Dataset", "Preview", "Policy", "Train"];
+    let current = state.trainingMode ? state.trainingStep : 0;
+    if (state.trainingDatasetSource === "hub") {
+        labels.splice(previewStep, 1);
+        if (current > previewStep) current -= 1;
+    }
+    return _wizardStepsMarkup(labels, current);
+}
+
+// The floating step nav sits outside .wizard-body, so the body can rise without re-anchoring it.
+function _animateWizardStep(container) {
+    animateEnter(container.querySelector(".wizard-body"));
+}
+
+// Step re-renders rebuild the sticky picker; keep its scroll position.
+function _keepListScroll(container, selector) {
+    const top = container.querySelector(selector)?.scrollTop || 0;
+    return () => {
+        const list = container.querySelector(selector);
+        if (list) list.scrollTop = top;
+    };
+}
+
+function _jobHeadingMarkup(job) {
+    if (!job) {
+        return `<div class="episode-group-heading episode-group-heading--none">No job</div>`;
+    }
+    return `<div class="episode-group-heading" title="${escapeHtml(job)}">${escapeHtml(job)}</div>`;
 }
 
 function renderProcessingModePicker(container) {
     container.innerHTML = `
-        <div class="panel-header"><div><h3>Data Processing</h3></div></div>
-        <div class="policy-grid" id="processing-mode-grid"></div>
+        ${_processingStepsMarkup()}
+        <div class="wizard-body">
+            <div class="policy-grid mode-grid" id="processing-mode-grid"></div>
+        </div>
     `;
     const grid = byId("processing-mode-grid");
     Object.entries(PROCESSING_MODES).forEach(([key, mode]) => {
         const card = document.createElement("button");
-        card.className = "policy-card";
+        card.className = "policy-card mode-tile";
         card.type = "button";
-        card.innerHTML = `<h3>${mode.cardTitle}</h3><p>${mode.cardDescription}</p>`;
+        card.innerHTML = _modeTileMarkup(MODE_TILE_ICONS[key], mode.cardTitle, mode.cardDescription);
         card.onclick = () => {
             if (state.processingMode !== key) {
                 state.processingStep = 1;
@@ -5044,6 +5141,7 @@ function renderProcessingModePicker(container) {
             }
             state.processingMode = key;
             renderProcessing();
+            _animateWizardStep(container);
         };
         grid.appendChild(card);
     });
@@ -5079,22 +5177,27 @@ function renderProcessing() {
 
     if (state.processingStep === 1) {
         container.innerHTML = `
-            <div class="panel-header panel-header--training-step">
-                <div>
-                    <h3 class="training-step-title">${mode.loadTitle}</h3>
-                </div>
-            </div>
-            <div class="episode-list" id="load-episode-list"></div>
-            <div class="control-bar control-bar--episode-step">
-                <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add ${mode.itemNoun} dataset" title="Add ${mode.itemNoun} dataset">
-                    <span aria-hidden="true">+</span>
-                </button>
-                ${state.episodes.length ? `
-                <button class="round-icon-button round-icon-button--clear" id="training-clear-episodes" type="button" aria-label="Clear all ${mode.itemNoun}s" title="Clear all ${mode.itemNoun}s">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"></path>
-                    </svg>
-                </button>` : ""}
+            ${_processingStepsMarkup()}
+            <div class="wizard-body">
+                <section class="panel wizard-card">
+                    <div class="panel-header panel-header--training-step">
+                        <div>
+                            <h3 class="training-step-title">${mode.loadTitle}</h3>
+                        </div>
+                        <div class="control-bar control-bar--episode-step">
+                            ${state.episodes.length ? `
+                            <button class="round-icon-button round-icon-button--clear" id="training-clear-episodes" type="button" aria-label="Clear all ${mode.itemNoun}s" title="Clear all ${mode.itemNoun}s">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"></path>
+                                </svg>
+                            </button>` : ""}
+                            <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add ${mode.itemNoun} dataset" title="Add ${mode.itemNoun} dataset">
+                                ${WIZARD_PLUS_SVG}<span>Add</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="episode-list" id="load-episode-list"></div>
+                </section>
             </div>
             <div class="control-bar control-bar--floating-step-nav">
                 <button class="secondary-button" id="processing-back-modes" type="button">Back</button>
@@ -5103,20 +5206,22 @@ function renderProcessing() {
         `;
         const list = byId("load-episode-list");
         if (!state.episodes.length) {
-            list.innerHTML = `<div class="episode-empty-state"><span>${mode.emptyMessage}</span></div>`;
+            list.innerHTML = `<div class="episode-empty-state">${WIZARD_TRAY_SVG}<span>${mode.emptyMessage}</span><small>${mode.cardDescription}</small></div>`;
         } else {
+            let currentJob = null;
             state.episodes.forEach((episode, index) => {
+                const job = episode.job || null;
+                if (job !== currentJob) {
+                    list.insertAdjacentHTML("beforeend", _jobHeadingMarkup(job));
+                }
+                currentJob = job;
                 const row = document.createElement("div");
                 row.className = "episode-entry-row";
-                const jobBadge = episode.job
-                    ? `<span class="episode-entry-card__job">${escapeHtml(episode.job)}</span>`
-                    : "";
                 row.innerHTML = `
                     <div class="episode-entry-card">
                         <strong class="episode-entry-card__index">${index + 1}</strong>
                         <span class="episode-entry-card__divider" aria-hidden="true"></span>
                         <div class="episode-entry-card__text">
-                            ${jobBadge}
                             <span class="episode-entry-card__name">${escapeHtml(episode.name)}</span>
                         </div>
                     </div>
@@ -5131,6 +5236,7 @@ function renderProcessing() {
         byId("processing-back-modes").onclick = () => {
             state.processingMode = null;
             renderProcessing();
+            _animateWizardStep(container);
         };
         const clearButton = byId("training-clear-episodes");
         if (clearButton) {
@@ -5143,6 +5249,7 @@ function renderProcessing() {
         byId("training-next-step").onclick = () => {
             state.processingStep = 2;
             renderProcessing();
+            _animateWizardStep(container);
         };
         list.querySelectorAll("[data-remove-episode]").forEach((button) => {
             button.onclick = () => {
@@ -5164,38 +5271,46 @@ function renderProcessing() {
         const mismatchNote = resolutionMismatch
             ? `<div class="merge-resolution-warning">${escapeHtml(resolutionMismatch)}</div>`
             : "";
+        const restorePickerScroll = _keepListScroll(container, "#training-episode-picker");
         container.innerHTML = `
-            <div class="training-layout">
-                <aside class="panel">
-                    <div class="panel-header">
-                        <h3>${mode.pickerTitle}</h3>
-                        <button class="secondary-button toggle-all-button" id="training-select-all" type="button" title="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}" aria-label="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}">${state.selectedEpisodes.length === state.episodes.length ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG}</button>
-                    </div>
-                    <div class="episode-list" id="training-episode-picker"></div>
-                </aside>
-                <div class="training-main">
-                    <div id="episode-preview-block"></div>
-                    ${mismatchNote}
-                    <div class="control-bar control-bar--floating-step-nav">
-                        <button class="secondary-button" id="training-prev-step" type="button">Back</button>
-                        <button id="training-merge" type="button" ${mergeDisabled ? "disabled" : ""}>${mode.mergeLabel}</button>
+            ${_processingStepsMarkup()}
+            <div class="wizard-body">
+                <div class="training-layout">
+                    <aside class="panel wizard-aside">
+                        <div class="panel-header">
+                            <h3>${mode.pickerTitle}</h3>
+                            <button class="secondary-button toggle-all-button" id="training-select-all" type="button" title="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}" aria-label="${state.selectedEpisodes.length === state.episodes.length ? `Deselect all ${mode.itemNoun}s` : `Select all ${mode.itemNoun}s`}">${state.selectedEpisodes.length === state.episodes.length ? DESELECT_ALL_ICON_SVG : SELECT_ALL_ICON_SVG}</button>
+                        </div>
+                        <div class="episode-list" id="training-episode-picker"></div>
+                    </aside>
+                    <div class="training-main">
+                        ${mismatchNote}
+                        <section class="panel dataset-preview-panel">
+                            <div id="episode-preview-block"></div>
+                        </section>
                     </div>
                 </div>
+            </div>
+            <div class="control-bar control-bar--floating-step-nav">
+                <button class="secondary-button" id="training-prev-step" type="button">Back</button>
+                <button id="training-merge" type="button" ${mergeDisabled ? "disabled" : ""}>${mode.mergeLabel}</button>
             </div>
         `;
         const picker = byId("training-episode-picker");
         const previewPath = state.preview?.path || "";
+        let currentJob = null;
         state.episodes.forEach((episode, index) => {
+            const job = episode.job || null;
+            if (job !== currentJob) {
+                picker.insertAdjacentHTML("beforeend", _jobHeadingMarkup(job));
+            }
+            currentJob = job;
             const row = document.createElement("div");
             row.className = `episode-row episode-row--selectable ${previewPath === episode.path ? "episode-row--selected" : ""}`.trim();
-            const jobBadge = episode.job
-                ? `<span class="episode-row__job" title="${escapeHtml(episode.job)}"><span class="episode-row__job-text">${escapeHtml(episode.job)}</span></span>`
-                : "";
             row.innerHTML = `
         <div class="episode-row__main">
           <input data-toggle-episode="${episode.path}" type="checkbox" ${state.selectedEpisodes.includes(episode.path) ? "checked" : ""} />
           <div class="episode-row__text">
-            ${jobBadge}
             <span>${escapeHtml(episode.name)}</span>
           </div>
         </div>
@@ -5225,10 +5340,10 @@ function renderProcessing() {
             }
             picker.appendChild(row);
         });
-        _setupJobTagMarquee(picker);
+        restorePickerScroll();
         const previewBlock = byId("episode-preview-block");
         if (!state.preview) {
-            previewBlock.innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Select an episode to preview.</div></div>`;
+            previewBlock.innerHTML = `<div class="dataset-preview-empty">${WIZARD_PREVIEW_SVG}<span>Select an episode to preview.</span></div>`;
         } else {
             renderDatasetPreviewBlock("episode-preview-block", state.preview, state.previewSeries?.series || null, "previewFrame", "previewPlaying");
         }
@@ -5239,6 +5354,7 @@ function renderProcessing() {
         byId("training-prev-step").onclick = () => {
             state.processingStep = 1;
             renderProcessing();
+            _animateWizardStep(container);
         };
         byId("training-merge").onclick = async () => {
             if (!state.selectedEpisodes.length) return;
@@ -5273,26 +5389,34 @@ function renderProcessing() {
         // previews the selected scope (whole dataset or one episode).
         const sel = state.mergedSelectedEpisode;
         const title = sel == null ? "Whole Dataset" : `Episode ${sel}`;
+        const restorePickerScroll = _keepListScroll(container, "#merged-episode-picker");
         container.innerHTML = `
-            <div class="training-layout">
-                <aside class="panel">
-                    <div class="panel-header"><h3>Episodes</h3></div>
-                    <div class="episode-list" id="merged-episode-picker"></div>
-                </aside>
-                <div class="training-main">
-                    <div class="panel-header"><div><h3>${escapeHtml(title)}</h3></div></div>
-                    <div id="merged-preview-block"></div>
-                    <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Back</button><button id="merge-next" type="button">Next</button></div>
+            ${_processingStepsMarkup()}
+            <div class="wizard-body">
+                <div class="training-layout">
+                    <aside class="panel wizard-aside">
+                        <div class="panel-header"><h3>Episodes</h3></div>
+                        <div class="episode-list" id="merged-episode-picker"></div>
+                    </aside>
+                    <div class="training-main">
+                        <section class="panel dataset-preview-panel">
+                            <div class="panel-header"><div><h3>${escapeHtml(title)}</h3></div></div>
+                            <div id="merged-preview-block"></div>
+                        </section>
+                    </div>
                 </div>
             </div>
+            <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Back</button><button id="merge-next" type="button">Next</button></div>
         `;
 
         _renderDatasetEpisodePicker(byId("merged-episode-picker"), "processing");
+        restorePickerScroll();
 
         renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
         byId("merge-prev").onclick = () => {
             state.processingStep = 2;
             renderProcessing();
+            _animateWizardStep(container);
         };
         byId("merge-next").onclick = () => {
             applyMergedDatasetToTraining();
@@ -5308,8 +5432,10 @@ function renderProcessing() {
 function renderTrainingModePicker(container) {
     container.classList.remove("has-playback-bar");
     container.innerHTML = `
-        <div class="panel-header"><div><h3>Policy Training</h3></div></div>
-        <div class="policy-grid" id="training-mode-grid"></div>
+        ${_trainingStepsMarkup()}
+        <div class="wizard-body">
+            <div class="policy-grid mode-grid" id="training-mode-grid"></div>
+        </div>
     `;
     const modes = {
         new: {
@@ -5324,9 +5450,9 @@ function renderTrainingModePicker(container) {
     const grid = byId("training-mode-grid");
     Object.entries(modes).forEach(([key, mode]) => {
         const card = document.createElement("button");
-        card.className = "policy-card";
+        card.className = "policy-card mode-tile";
         card.type = "button";
-        card.innerHTML = `<h3>${mode.title}</h3><p>${mode.description}</p>`;
+        card.innerHTML = _modeTileMarkup(MODE_TILE_ICONS[key], mode.title, mode.description);
         card.onclick = () => {
             resetTrainingRunViewState();
             state.trainingMode = key;
@@ -5336,6 +5462,7 @@ function renderTrainingModePicker(container) {
             state.fineTuneConfig = {};
             state.trainingOutputStamp = "";
             renderTraining();
+            _animateWizardStep(container);
         };
         grid.appendChild(card);
     });
@@ -5376,7 +5503,7 @@ function renderTraining() {
                     <div class="episode-entry-card">
                         <strong class="episode-entry-card__index">1</strong>
                         <span class="episode-entry-card__divider" aria-hidden="true"></span>
-                        <div>
+                        <div class="episode-entry-card__text">
                             <span class="episode-entry-card__name">${escapeHtml(checkpointName)}</span>
                             <div class="episode-row__meta">${escapeHtml(info.policy_label || info.policy_type)}</div>
                         </div>
@@ -5384,12 +5511,18 @@ function renderTraining() {
                     <button class="round-icon-button round-icon-button--remove" id="training-remove-checkpoint" type="button" aria-label="Remove checkpoint" title="Remove checkpoint"><span aria-hidden="true">&minus;</span></button>
                 </div>
             </div>`
-            : `<div class="merged-dataset-entry"><div class="episode-empty-state"><span>No policy checkpoint selected.</span></div></div>`;
+            : `<div class="merged-dataset-entry"><div class="episode-empty-state">${WIZARD_TRAY_SVG}<span>No policy checkpoint selected.</span></div></div>`;
         container.innerHTML = `
-            <div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Policy Checkpoint</h3></div></div>
-            ${bodyHtml}
-            <div class="control-bar control-bar--episode-step">
-                <button class="round-icon-button round-icon-button--add" id="training-browse-checkpoint" type="button" aria-label="Browse checkpoints" title="Browse checkpoints"><span aria-hidden="true">+</span></button>
+            ${_trainingStepsMarkup()}
+            <div class="wizard-body">
+                <section class="panel wizard-card">
+                    <div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Policy Checkpoint</h3></div>
+                        <div class="control-bar control-bar--episode-step">
+                            <button class="round-icon-button round-icon-button--add" id="training-browse-checkpoint" type="button" aria-label="Browse checkpoints" title="Browse checkpoints">${WIZARD_FOLDER_SVG}<span>Browse</span></button>
+                        </div>
+                    </div>
+                    ${bodyHtml}
+                </section>
             </div>
             <div class="control-bar control-bar--floating-step-nav">
                 <button class="secondary-button" id="training-back-modes" type="button">Back</button>
@@ -5408,10 +5541,12 @@ function renderTraining() {
         byId("training-back-modes").onclick = () => {
             state.trainingMode = null;
             renderTraining();
+            _animateWizardStep(container);
         };
         byId("training-flow-next").onclick = () => {
             state.trainingStep = datasetStep;
             renderTraining();
+            _animateWizardStep(container);
         };
         return;
     }
@@ -5443,26 +5578,32 @@ function renderTraining() {
             const hubMeta = hubInfo && hubInfo.num_episodes && hubInfo.num_frames
                 ? `${hubInfo.num_episodes.toLocaleString()} episodes · ${hubInfo.num_frames.toLocaleString()} frames`
                 : "The dataset is downloaded by the training run; only its metadata is fetched now.";
-            const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
-            container.innerHTML = `
-                ${headerHtml}
-                <div class="merged-dataset-entry">
-                    <div class="rollout-hub-fields">
-                        <input class="rollout-hub-input" id="training-hub-repo" type="text"
-                            placeholder="owner/dataset (e.g. flexivrobotics/push_t_dual)"
-                            autocomplete="off" spellcheck="false">
-                        <input class="rollout-hub-input" id="training-hub-revision" type="text"
-                            placeholder="revision (optional)"
-                            autocomplete="off" spellcheck="false">
-                        <button class="secondary-button" id="training-hub-load" type="button"
-                            ${hubLoading ? "disabled" : ""}>${escapeHtml(hubLoadLabel)}</button>
-                    </div>
-                    <div class="episode-row__meta" id="training-hub-meta">${escapeHtml(hubMeta)}</div>
-                    ${state.trainingDatasetVerdictWarning ? `<p class="training-controls__state rollout-error" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdictWarning)}</p>` : ""}
-                    ${!state.trainingDatasetVerdictWarning && state.trainingDatasetVerdict ? `<p class="training-controls__state rollout-ok" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdict)}</p>` : ""}
-                </div>
+            const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div>
                 <div class="control-bar control-bar--episode-step">
-                    <button class="secondary-button" id="training-dataset-source-toggle" type="button">Use Local</button>
+                    <button class="secondary-button wizard-source-toggle" id="training-dataset-source-toggle" type="button">Use Local</button>
+                </div>
+            </div>`;
+            container.innerHTML = `
+                ${_trainingStepsMarkup()}
+                <div class="wizard-body">
+                    <section class="panel wizard-card">
+                        ${headerHtml}
+                        <div class="training-hub-entry">
+                            <div class="training-hub-fields">
+                                <input class="training-hub-input" id="training-hub-repo" type="text"
+                                    placeholder="owner/dataset (e.g. flexivrobotics/push_t_dual)"
+                                    autocomplete="off" spellcheck="false">
+                                <input class="training-hub-input" id="training-hub-revision" type="text"
+                                    placeholder="revision (optional)"
+                                    autocomplete="off" spellcheck="false">
+                                <button class="secondary-button" id="training-hub-load" type="button"
+                                    ${hubLoading ? "disabled" : ""}>${escapeHtml(hubLoadLabel)}</button>
+                            </div>
+                            <div class="episode-row__meta" id="training-hub-meta">${escapeHtml(hubMeta)}</div>
+                            ${state.trainingDatasetVerdictWarning ? `<p class="training-controls__state rollout-error" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdictWarning)}</p>` : ""}
+                            ${!state.trainingDatasetVerdictWarning && state.trainingDatasetVerdict ? `<p class="training-controls__state rollout-ok" id="training-hub-verdict">${escapeHtml(state.trainingDatasetVerdict)}</p>` : ""}
+                        </div>
+                    </section>
                 </div>
                 <div class="control-bar control-bar--floating-step-nav">
                     <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
@@ -5520,10 +5661,12 @@ function renderTraining() {
                     state.trainingMode = null;
                 }
                 renderTraining();
+                _animateWizardStep(container);
             };
             byId("training-flow-next").onclick = () => {
                 state.trainingStep = stepAfterDataset;
                 renderTraining();
+                _animateWizardStep(container);
             };
             return;
         }
@@ -5535,7 +5678,7 @@ function renderTraining() {
                     <div class="episode-entry-card">
                         <strong class="episode-entry-card__index">1</strong>
                         <span class="episode-entry-card__divider" aria-hidden="true"></span>
-                        <div>
+                        <div class="episode-entry-card__text">
                             <span class="episode-entry-card__name">${escapeHtml(datasetName || "Selected dataset")}</span>
                             <div class="episode-row__meta">${escapeHtml(meta)}</div>
                         </div>
@@ -5545,23 +5688,29 @@ function renderTraining() {
                     </button>
                 </div>
             </div>`
-            : `<div class="merged-dataset-entry" id="merged-dataset-entry"><div class="episode-empty-state"><span>No training dataset selected.</span></div></div>`;
+            : `<div class="merged-dataset-entry" id="merged-dataset-entry"><div class="episode-empty-state">${WIZARD_TRAY_SVG}<span>No training dataset selected.</span></div></div>`;
 
         const controlHtml = `
-            <div class="control-bar control-bar--episode-step">
-                <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets"><span aria-hidden="true">+</span></button>
-                <button class="secondary-button" id="training-dataset-source-toggle" type="button">Use HuggingFace</button>
-            </div>
             <div class="control-bar control-bar--floating-step-nav">
                 <button class="secondary-button" id="training-dataset-back" type="button">Back</button>
                 <button id="training-flow-next" type="button" ${loaded && preview ? "" : "disabled"}>Next</button>
             </div>`;
 
-        const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div></div>`;
+        const headerHtml = `<div class="panel-header panel-header--training-step"><div><h3 class="training-step-title">Load Training Dataset</h3></div>
+            <div class="control-bar control-bar--episode-step">
+                <button class="secondary-button wizard-source-toggle" id="training-dataset-source-toggle" type="button">Use HuggingFace</button>
+                <button class="round-icon-button round-icon-button--add" id="training-browse-merged" type="button" aria-label="Browse datasets" title="Browse datasets">${WIZARD_FOLDER_SVG}<span>Browse</span></button>
+            </div>
+        </div>`;
 
         container.innerHTML = `
-            ${headerHtml}
-            ${bodyHtml}
+            ${_trainingStepsMarkup()}
+            <div class="wizard-body">
+                <section class="panel wizard-card">
+                    ${headerHtml}
+                    ${bodyHtml}
+                </section>
+            </div>
             ${controlHtml}
         `;
 
@@ -5578,6 +5727,7 @@ function renderTraining() {
                 state.trainingMode = null;
             }
             renderTraining();
+            _animateWizardStep(container);
         };
         if (loaded) {
             byId("training-remove-merged").onclick = () => {
@@ -5594,6 +5744,7 @@ function renderTraining() {
         byId("training-flow-next").onclick = () => {
             state.trainingStep = previewStep;
             renderTraining();
+            _animateWizardStep(container);
         };
         return;
     }
@@ -5601,36 +5752,45 @@ function renderTraining() {
     if (state.trainingStep === previewStep) {
         const tSel = state.mergedDatasetSelectedEpisode;
         const tTitle = tSel == null ? "Whole Dataset" : `Episode ${tSel}`;
+        const restorePickerScroll = _keepListScroll(container, "#training-dataset-episode-picker");
 
         container.innerHTML = `
-            <div class="training-layout">
-                <aside class="panel">
-                    <div class="panel-header"><h3>Episodes</h3></div>
-                    <div class="episode-list" id="training-dataset-episode-picker"></div>
-                </aside>
-                <div class="training-main">
-                    <div class="panel-header"><div><h3>${escapeHtml(tTitle)}</h3></div></div>
-                    <div id="merged-dataset-preview-block"></div>
-                    <div class="control-bar control-bar--floating-step-nav">
-                        <button class="secondary-button" id="training-prev-dataset" type="button">Back</button>
-                        <button id="training-flow-next" type="button">Next</button>
+            ${_trainingStepsMarkup()}
+            <div class="wizard-body">
+                <div class="training-layout">
+                    <aside class="panel wizard-aside">
+                        <div class="panel-header"><h3>Episodes</h3></div>
+                        <div class="episode-list" id="training-dataset-episode-picker"></div>
+                    </aside>
+                    <div class="training-main">
+                        <section class="panel dataset-preview-panel">
+                            <div class="panel-header"><div><h3>${escapeHtml(tTitle)}</h3></div></div>
+                            <div id="merged-dataset-preview-block"></div>
+                        </section>
                     </div>
                 </div>
+            </div>
+            <div class="control-bar control-bar--floating-step-nav">
+                <button class="secondary-button" id="training-prev-dataset" type="button">Back</button>
+                <button id="training-flow-next" type="button">Next</button>
             </div>`;
 
         _renderDatasetEpisodePicker(byId("training-dataset-episode-picker"), "training");
+        restorePickerScroll();
         if (state.mergedDatasetPreview) {
             renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
         } else {
-            byId("merged-dataset-preview-block").innerHTML = `<div class="panel panel--soft"><div class="feed__placeholder" style="min-height:200px">Loading dataset preview…</div></div>`;
+            byId("merged-dataset-preview-block").innerHTML = `<div class="dataset-preview-empty">${WIZARD_PREVIEW_SVG}<span>Loading dataset preview…</span></div>`;
         }
         byId("training-prev-dataset").onclick = () => {
             state.trainingStep = datasetStep;
             renderTraining();
+            _animateWizardStep(container);
         };
         byId("training-flow-next").onclick = () => {
             state.trainingStep = configStep;
             renderTraining();
+            _animateWizardStep(container);
         };
         return;
     }
@@ -5642,15 +5802,22 @@ function renderTraining() {
         const configReady = isFineTune ? !!fineTuneInfo : policiesReady;
         const outputDir = getTrainingOutputDir();
         container.innerHTML = `
-            <div class="panel-header"><div><h3>${isFineTune ? `Fine-tune ${escapeHtml(fineTuneInfo?.policy_label || "Policy")}` : "Choose Training Policy"}</h3></div></div>
-            ${isFineTune ? `
-                <div class="output-picker"><div><p class="eyebrow">Source Checkpoint</p><strong>${escapeHtml(state.trainingCheckpointPath || "—")}</strong></div></div>
-            ` : `<div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
-                <div class="policy-grid policy-grid--catalog" id="policy-grid"></div>
-                ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
-            </div>`}
-            <div id="policy-config-panel"></div>
-            <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
+            ${_trainingStepsMarkup()}
+            <div class="wizard-body">
+                <section class="panel wizard-card">
+                    <div class="panel-header"><div><h3>${isFineTune ? `Fine-tune ${escapeHtml(fineTuneInfo?.policy_label || "Policy")}` : "Choose Training Policy"}</h3></div></div>
+                    ${isFineTune ? `
+                        <div class="output-picker"><div><p class="eyebrow">Source Checkpoint</p><strong>${escapeHtml(state.trainingCheckpointPath || "—")}</strong></div></div>
+                    ` : `<div class="component-wrapper" id="policy-grid-wrap" style="min-height:100px">
+                        <div class="policy-grid policy-grid--catalog" id="policy-grid"></div>
+                        ${!policiesReady ? `<div class="component-loading-overlay"><div class="mini-progress-bar"><span></span></div><span class="component-loading-overlay__label">Loading policies…</span></div>` : ""}
+                    </div>`}
+                </section>
+                <section class="panel wizard-card">
+                    <div id="policy-config-panel"></div>
+                    <div class="output-picker"><div><p class="eyebrow">Training Output Directory</p><strong id="training-output-path">${escapeHtml(outputDir || "—")}</strong></div></div>
+                </section>
+            </div>
             <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="policy-prev" type="button">Back</button><button id="policy-start" type="button" ${outputDir && configReady ? "" : "disabled"}>Next</button></div>
         `;
         if (isFineTune) {
@@ -5664,7 +5831,8 @@ function renderTraining() {
                 const card = document.createElement("button");
                 card.className = `policy-card ${state.selectedPolicy === key ? "policy-card--selected" : ""}`;
                 card.type = "button";
-                card.innerHTML = `<h3>${policy.label}</h3><p>${policy.description}</p>`;
+                card.setAttribute("aria-pressed", String(state.selectedPolicy === key));
+                card.innerHTML = `<span class="policy-card__check" aria-hidden="true">${WIZARD_CHECK_SVG}</span><h3>${policy.label}</h3><p>${policy.description}</p>`;
                 card.onclick = () => {
                     state.selectedPolicy = key;
                     renderTraining();
@@ -5676,10 +5844,12 @@ function renderTraining() {
         byId("policy-prev").onclick = () => {
             state.trainingStep = usingHubDataset ? datasetStep : previewStep;
             renderTraining();
+            _animateWizardStep(container);
         };
         byId("policy-start").onclick = () => {
             state.trainingStep = runStep;
             renderTraining();
+            _animateWizardStep(container);
         };
         return;
     }
@@ -5771,6 +5941,8 @@ function renderTraining() {
                 ? "Stopped"
                 : _formatTrainingStatusLabel(status.status);
     container.innerHTML = `
+        ${_trainingStepsMarkup()}
+        <div class="wizard-body">
         <div class="training-layout">
             <div class="training-sidebar">
                 <aside class="panel panel--soft control-panel training-device-panel">
@@ -5801,11 +5973,15 @@ function renderTraining() {
                 </aside>
             </div>
             <div class="training-main">
-                <div class="progress-bar progress-bar--thick ${isFailed ? "progress-bar--error" : ""}"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
-                <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
-                <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="training-run-prev" type="button">Back</button></div>
+                <section class="panel training-run-panel">
+                    <div class="panel-header"><h3>Progress</h3></div>
+                    <div class="progress-bar progress-bar--thick ${isFailed ? "progress-bar--error" : ""}"><span style="width: ${progress}%"></span><span class="progress-bar__text">${progressLabel}</span></div>
+                    <div class="log-pane">${renderTrainingTerminalLogs(status)}</div>
+                </section>
             </div>
         </div>
+        </div>
+        <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="training-run-prev" type="button">Back</button></div>
     `;
     _restoreTrainingLogView(container);
     const pauseResumeBtn = byId("training-pause-resume");
@@ -5872,6 +6048,7 @@ function renderTraining() {
     byId("training-run-prev").onclick = () => {
         state.trainingStep = configStep;
         renderTraining();
+        _animateWizardStep(container);
     };
 }
 
@@ -6275,7 +6452,7 @@ function renderPolicyConfigPanel(policy, options = {}) {
         </div>`;
     }).join("");
     panel.className = "policy-config-panel";
-    panel.innerHTML = `<p class="eyebrow">${options.fineTune ? "Fine-tuning Configuration" : "Training Configuration"}</p>
+    panel.innerHTML = `<div class="panel-header"><h3>${options.fineTune ? "Fine-tuning Configuration" : "Training Configuration"}</h3></div>
         <div class="config-grid">${rows}</div>`;
 
     const updateStepsReadout = () => {
@@ -7518,6 +7695,10 @@ function renderRollout() {
                     : "Idle";
     const primaryMarkup = isRunning ? TELEOP_STOP_MARKUP : TRAINING_START_MARKUP;
     const primaryClass = isRunning ? "stop-button" : "start-button";
+    const statusDotClass = isRunning ? "status-dot--ok" : status.status === "failed" ? "status-dot--error" : "";
+    const checkpointLabelEmpty = state.rolloutCheckpointSource === "hub"
+        ? !state.rolloutCheckpointRepoId
+        : !checkpointName;
 
     // Rebuild the content only when something it renders changed. The 1s poll
     // calls this every tick; rebuilding unconditionally would destroy and
@@ -7542,45 +7723,21 @@ function renderRollout() {
     container.dataset.renderKey = renderKey;
 
     container.innerHTML = `
-        <div class="training-layout">
-            <div class="training-sidebar">
-                <aside class="panel panel--soft control-panel training-device-panel">
-                    <div class="panel-header"><h3>Computation Device</h3></div>
-                    <div class="training-device-row">
-                        <label class="training-device-field" for="rollout-device-select">
-                            <select id="rollout-device-select" ${isRunning ? "disabled" : ""}>
-                                ${deviceOptions || `<option value="auto" selected>auto</option><option value="cpu">cpu</option>`}
-                            </select>
-                        </label>
-                        <button class="secondary-button icon-button training-device-reload" id="rollout-device-reload" type="button" aria-label="Evaluate devices" title="Evaluate devices">
-                            ${RESET_ICON_SVG}
-                        </button>
+        <div class="rollout-layout">
+            <div class="rollout-sidebar">
+                <section class="panel rollout-setup">
+                    <div class="panel-header">
+                        <h3>Policy Checkpoint</h3>
+                        <button class="button--plain rollout-source-toggle" id="rollout-source-toggle" type="button" ${isRunning ? "disabled" : ""}>${
+                            state.rolloutCheckpointSource === "hub" ? "Use Local" : "Use HuggingFace"
+                        }</button>
                     </div>
-                    <p class="training-device-detail">${escapeHtml(deviceDetail)}</p>
-                </aside>
-                <aside class="panel panel--soft control-panel training-controls">
-                    <div class="panel-header"><h3>Rollout Control</h3></div>
-                    <div class="control-stack">
-                        <button id="rollout-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
-                            ${primaryMarkup}
-                        </button>
-                    </div>
-                    <p class="training-controls__state">Status: <strong>${escapeHtml(stateLabel)}</strong></p>
-                    ${status.error ? `<p class="training-controls__state rollout-error">${escapeHtml(status.error)}</p>` : ""}
-                </aside>
-            </div>
-            <div class="training-main">
-                <section class="panel panel--soft">
-                    <div class="panel-header"><h3>Policy Checkpoint</h3></div>
                     <div class="rollout-checkpoint">
-                        <code class="rollout-checkpoint__path">${
+                        <code class="rollout-checkpoint__path${checkpointLabelEmpty ? " rollout-checkpoint__path--empty" : ""}">${
                             state.rolloutCheckpointSource === "hub"
                                 ? (state.rolloutCheckpointRepoId ? escapeHtml(state.rolloutCheckpointRepoId) : "No Hub repo entered")
                                 : (checkpointName ? escapeHtml(checkpointName) : "No checkpoint selected")
                         }</code>
-                        <button class="secondary-button" id="rollout-source-toggle" type="button" ${isRunning ? "disabled" : ""}>${
-                            state.rolloutCheckpointSource === "hub" ? "Use Local" : "Use HuggingFace"
-                        }</button>
                         ${
                             state.rolloutCheckpointSource === "hub"
                                 ? ""
@@ -7603,32 +7760,54 @@ function renderRollout() {
                             : ""
                     }
                     ${state.rolloutCheckpointSource !== "hub" && checkpoint ? `<p class="rollout-checkpoint__full">${escapeHtml(checkpoint)}</p>` : ""}
-                    ${state.rolloutActionNamesWarning ? `<p class="training-controls__state rollout-error">${escapeHtml(state.rolloutActionNamesWarning)}</p>` : ""}
-                    ${!state.rolloutActionNamesWarning && state.rolloutActionNamesOk ? `<p class="training-controls__state rollout-ok">${escapeHtml(state.rolloutActionNamesOk)}</p>` : ""}
+                    ${state.rolloutActionNamesWarning ? `<p class="rollout-verdict rollout-error">${escapeHtml(state.rolloutActionNamesWarning)}</p>` : ""}
+                    ${!state.rolloutActionNamesWarning && state.rolloutActionNamesOk ? `<p class="rollout-verdict rollout-ok">${escapeHtml(state.rolloutActionNamesOk)}</p>` : ""}
                     <label class="field-label rollout-task-label" for="rollout-task">Task Instruction</label>
                     <textarea class="rollout-task-input" id="rollout-task" rows="3"
                         placeholder="${state.rolloutRequiresTask ? 'Task instruction (optional)' : 'This policy does not take a language input'}"
                         autocomplete="off" spellcheck="false"
                         ${isRunning || !state.rolloutRequiresTask ? "disabled" : ""}></textarea>
                 </section>
-                <section class="panel panel--soft">
+                <section class="panel rollout-control">
+                    <div class="panel-header"><h3>Rollout Control</h3></div>
+                    <label class="field-label" for="rollout-device-select">Computation Device</label>
+                    <div class="rollout-device-row">
+                        <select id="rollout-device-select" ${isRunning ? "disabled" : ""}>
+                            ${deviceOptions || `<option value="auto" selected>auto</option><option value="cpu">cpu</option>`}
+                        </select>
+                        <button class="secondary-button icon-button rollout-device-reload" id="rollout-device-reload" type="button" aria-label="Evaluate devices" title="Evaluate devices">
+                            ${RESET_ICON_SVG}
+                        </button>
+                    </div>
+                    <p class="rollout-device-detail">${escapeHtml(deviceDetail)}</p>
+                    <div class="rollout-run">
+                        <p class="rollout-status"><span class="status-dot ${statusDotClass}" aria-hidden="true"></span><span>Status: <strong>${escapeHtml(stateLabel)}</strong></span></p>
+                        <button id="rollout-primary-action" class="button-with-icon ${primaryClass}" type="button" ${canStart || isRunning ? "" : "disabled"}>
+                            ${primaryMarkup}
+                        </button>
+                        ${status.error ? `<p class="rollout-verdict rollout-error">${escapeHtml(status.error)}</p>` : ""}
+                    </div>
+                </section>
+            </div>
+            <div class="rollout-main">
+                <section class="panel">
                     <div class="panel-header"><h3>Policy Camera Input</h3></div>
                     <div id="rollout-cameras" class="rollout-cameras"></div>
                 </section>
-                <section class="panel panel--soft">
+                <section class="panel">
                     <div class="panel-header">
                         <h3>Inference Frequency</h3>
                         <span class="feed__fps rollout-hz-badge" id="rollout-hz-badge"></span>
                     </div>
                     <div class="trend-chart rollout-hz-chart" id="rollout-hz-chart"></div>
                 </section>
-                <section class="panel panel--soft">
+                <section class="panel">
                     <div class="panel-header"><h3>Cartesian Wrench</h3></div>
                     <div id="rollout-wrench" class="rollout-wrench"></div>
                 </section>
-                <section class="panel panel--soft">
+                <section class="panel">
                     <div class="panel-header"><h3>Rollout Log</h3></div>
-                    <div class="log-pane" id="rollout-terminal-pane"></div>
+                    <div class="log-pane rollout-log" id="rollout-terminal-pane"></div>
                 </section>
             </div>
         </div>
@@ -7850,12 +8029,12 @@ function renderRolloutTerminal() {
 }
 
 const ROLLOUT_HZ_CHART_WIDTH = 960;
-const ROLLOUT_HZ_CHART_HEIGHT = 300;
-const ROLLOUT_HZ_CHART_MARGIN = { left: 64, right: 22, top: 18, bottom: 46 };
+const ROLLOUT_HZ_CHART_HEIGHT = 220;
+const ROLLOUT_HZ_CHART_MARGIN = { left: 52, right: 16, top: 14, bottom: 40 };
 const ROLLOUT_HZ_CHART_SECONDS = 5;
 
 function niceRolloutHzTickStep(maxHz) {
-    const rawStep = Math.max(maxHz / 6, 1);
+    const rawStep = Math.max(maxHz / 4, 1);
     const magnitude = 10 ** Math.floor(Math.log10(rawStep));
     const scaled = rawStep / magnitude;
     const nice = scaled <= 1 ? 1 : (scaled <= 2 ? 2 : (scaled <= 5 ? 5 : 10));
@@ -7866,9 +8045,10 @@ function formatRolloutHzTick(value) {
     return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
-function buildRolloutHzSvg(metrics, targetHz) {
-    const width = ROLLOUT_HZ_CHART_WIDTH;
-    const height = ROLLOUT_HZ_CHART_HEIGHT;
+function buildRolloutHzSvg(metrics, targetHz, size = {}) {
+    // Matching the viewBox to the element keeps one unit = one CSS pixel, so labels stay legible at any width.
+    const width = Math.max(320, Math.round(size.width || ROLLOUT_HZ_CHART_WIDTH));
+    const height = Math.max(160, Math.round(size.height || ROLLOUT_HZ_CHART_HEIGHT));
     const { left, right, top, bottom } = ROLLOUT_HZ_CHART_MARGIN;
     const innerWidth = width - left - right;
     const innerHeight = height - top - bottom;
@@ -7904,7 +8084,7 @@ function buildRolloutHzSvg(metrics, targetHz) {
         lines.push(`<line class="trend-chart__grid-line" x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}"></line>`);
         const secondsAgo = ROLLOUT_HZ_CHART_SECONDS - index;
         const tick = secondsAgo === 0 ? "0" : `-${secondsAgo}`;
-        labels.push(`<text class="trend-chart__axis" x="${x.toFixed(1)}" y="${height - bottom + 18}" text-anchor="middle">${tick}</text>`);
+        labels.push(`<text class="trend-chart__axis" x="${x.toFixed(1)}" y="${height - bottom + 16}" text-anchor="middle">${tick}</text>`);
     }
     const yTickCount = Math.round(maxY / tickStep);
     for (let index = 0; index <= yTickCount; index += 1) {
@@ -7914,36 +8094,56 @@ function buildRolloutHzSvg(metrics, targetHz) {
         labels.push(`<text class="trend-chart__axis" x="${left - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end">${formatRolloutHzTick(value)}</text>`);
     }
 
-    labels.push(`<text class="trend-chart__axis-title" x="${(left + innerWidth / 2).toFixed(1)}" y="${height - 8}" text-anchor="middle">Time (s)</text>`);
-    const titleX = 16;
+    labels.push(`<text class="trend-chart__axis-title" x="${(left + innerWidth / 2).toFixed(1)}" y="${height - 6}" text-anchor="middle">Time (s)</text>`);
+    const titleX = 14;
     const titleY = top + innerHeight / 2;
     labels.push(`<text class="trend-chart__axis-title" x="${titleX}" y="${titleY.toFixed(1)}" text-anchor="middle" transform="rotate(-90 ${titleX} ${titleY.toFixed(1)})">Actual rate (Hz)</text>`);
 
+    const targetY = yFor(target);
+    const targetLabelY = targetY - 6 < top + 10 ? targetY + 15 : targetY - 6;
     const targetMarkup = target > 0
-        ? `<line class="rollout-hz-chart__target" x1="${left}" y1="${yFor(target).toFixed(1)}" x2="${width - right}" y2="${yFor(target).toFixed(1)}"></line>`
+        ? `<line class="rollout-hz-chart__target" x1="${left}" y1="${targetY.toFixed(1)}" x2="${width - right}" y2="${targetY.toFixed(1)}"></line>
+            <text class="rollout-hz-chart__target-label" x="${width - right - 4}" y="${targetLabelY.toFixed(1)}" text-anchor="end">Target ${formatRolloutHzTick(target)} Hz</text>`
         : "";
 
+    const baseY = (height - bottom).toFixed(2);
     let drawing = false;
     let path = "";
+    let area = "";
+    let segmentStartX = 0;
+    let lastPoint = null;
     visibleMetrics.forEach((sample, index) => {
         if (!Number.isFinite(sample.hz)) {
+            if (drawing) {
+                area += `L${lastPoint[0]},${baseY} L${segmentStartX},${baseY} Z `;
+            }
             drawing = false;
             return;
         }
-        const x = xForSample(sample, index);
-        const y = yFor(sample.hz);
-        path += `${drawing ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)} `;
+        const x = xForSample(sample, index).toFixed(2);
+        const y = yFor(sample.hz).toFixed(2);
+        path += `${drawing ? "L" : "M"}${x},${y} `;
+        area += `${drawing ? "L" : "M"}${x},${y} `;
+        if (!drawing) {
+            segmentStartX = x;
+        }
+        lastPoint = [x, y];
         drawing = true;
     });
+    if (drawing) {
+        area += `L${lastPoint[0]},${baseY} L${segmentStartX},${baseY} Z`;
+    }
     const lineMarkup = path.trim()
-        ? `<path class="trend-chart__line" style="--trend-color:#8de0ff" d="${path.trim()}"></path>`
+        ? `<path class="rollout-hz-chart__area" d="${area.trim()}"></path>
+            <path class="trend-chart__line" d="${path.trim()}"></path>
+            ${drawing ? `<circle class="rollout-hz-chart__dot" cx="${lastPoint[0]}" cy="${lastPoint[1]}" r="4"></circle>` : ""}`
         : "";
 
     return `
         <svg class="trend-chart__svg" viewBox="0 0 ${width} ${height}" aria-hidden="true">
             <g>${lines.join("")}${labels.join("")}</g>
-            ${targetMarkup}
             ${lineMarkup}
+            ${targetMarkup}
         </svg>
     `;
 }
@@ -7959,6 +8159,7 @@ function renderRolloutMetrics() {
     const targetHz = Number.isFinite(status.target_hz) ? status.target_hz : 0;
     const latest = metrics.length ? metrics[metrics.length - 1] : null;
     const latestHz = latest && Number.isFinite(latest.hz) ? latest.hz : 0;
+    chart.classList.toggle("rollout-hz-chart--empty", !metrics.length);
 
     if (!metrics.length) {
         setMarkupIfChanged(
@@ -7973,7 +8174,7 @@ function renderRolloutMetrics() {
     }
 
     delete chart.dataset.renderKey;
-    chart.innerHTML = buildRolloutHzSvg(metrics, targetHz);
+    chart.innerHTML = buildRolloutHzSvg(metrics, targetHz, { width: chart.clientWidth, height: chart.clientHeight });
 
     if (badge) {
         const tone = resolveFpsTone(latestHz, targetHz * 0.9);
@@ -8007,6 +8208,12 @@ function bindGlobalEvents() {
             }
         });
     });
+    const navSegments = document.querySelector(".app-nav__segments");
+    if (navSegments && "ResizeObserver" in window) {
+        new ResizeObserver(() => syncNavThumb({ animate: false })).observe(navSegments);
+    }
+    window.addEventListener("resize", () => syncNavThumb({ animate: false }));
+    document.fonts?.ready.then(() => syncNavThumb({ animate: false }));
 
     const notificationCenter = byId("notification-center");
     const notificationToggle = byId("notification-toggle");
@@ -8143,6 +8350,26 @@ function bindGlobalEvents() {
                 showToast(error.message, true);
             }
             setTeleopHomeBusy(false);
+        }
+    };
+    // Always enabled: the Setup view does not poll teleop status, so any
+    // disabled state would go stale. A server error is the robust signal.
+    byId("home-posture-record").onclick = async () => {
+        try {
+            const result = await api("/teleop/follower-posture");
+            if (result.error) {
+                showToast(result.error, true);
+                return;
+            }
+            const posture = getHomePosture();
+            result.posture_deg.forEach((value, index) => {
+                posture[index] = value;
+            });
+            await saveRobotConfigNow();
+            renderHomePosture();
+            showToast("Home posture recorded from the follower.");
+        } catch (error) {
+            showToast(error.message, true);
         }
     };
     const jobNameField = byId("record-job-name");

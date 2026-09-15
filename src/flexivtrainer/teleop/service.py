@@ -857,6 +857,39 @@ class TeleopService:
             empty_error="No leader arms were matched",
         )
 
+    def follower_posture(self) -> dict[str, Any]:
+        """Read the first pair's follower joint posture, in degrees."""
+
+        # Lighter than _posture_motion_guard: nothing moves, so a running
+        # control loop is harmless and flexivrdk is not needed.
+        if self._controller is None:
+            return {
+                "ok": False,
+                "error": "Teleoperation controller is not initialized",
+            }
+        instances_reader = getattr(self._controller, "instances", None)
+        if not callable(instances_reader):
+            return {
+                "ok": False,
+                "error": "Connected controller does not expose robot instances",
+            }
+
+        try:
+            handles = instances_reader(0)
+        except Exception as exc:  # pragma: no cover - hardware specific
+            return {"ok": False, "error": describe_exception(exc)}
+        pair = handles if isinstance(handles, tuple | list) else ()
+        if len(pair) < 2:
+            return {
+                "ok": False,
+                "error": "Controller did not report a leader/follower pair",
+            }
+
+        posture = self._follower_posture_deg(pair[1])
+        if isinstance(posture, str):
+            return {"ok": False, "error": posture}
+        return {"ok": True, "posture_deg": posture}
+
     def _follower_posture_deg(self, follower: Any) -> list[float] | str:
         states_reader = getattr(follower, "states", None)
         if not callable(states_reader):
