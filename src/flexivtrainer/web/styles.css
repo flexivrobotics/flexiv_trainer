@@ -1650,7 +1650,6 @@ input[type="range"]:focus-visible::-moz-range-thumb {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
-    max-width: 320px;
     margin-top: auto;
 }
 
@@ -2819,9 +2818,10 @@ input[type="range"]:focus-visible::-moz-range-thumb {
     gap: 5px;
 }
 
-.trend-legend__item sub {
+.trend-legend__label sub {
     font-size: 0.75em;
     line-height: 0;
+    vertical-align: sub;
 }
 
 .trend-legend__swatch {

@@ -30,7 +30,7 @@ def test_root_serves_packaged_ui() -> None:
 
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "/static/app.js?v=20260910-07" in response.text
+    assert "/static/app.js?v=20260915-01" in response.text
 
 
 def test_docs_route_is_available() -> None:
@@ -64,6 +64,41 @@ def test_camera_frame_route_returns_png() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_follower_posture_route_returns_the_recorded_posture() -> None:
+    app = create_app()
+    posture = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+
+    class FakeRuntime:
+        teleop = SimpleNamespace(
+            follower_posture=lambda: {"ok": True, "posture_deg": posture}
+        )
+
+    app.dependency_overrides[get_runtime_manager] = lambda: FakeRuntime()
+    client = TestClient(app)
+
+    response = client.get("/teleop/follower-posture")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "posture_deg": posture}
+
+
+def test_follower_posture_route_reports_a_service_error() -> None:
+    app = create_app()
+
+    class FakeRuntime:
+        teleop = SimpleNamespace(
+            follower_posture=lambda: {"ok": False, "error": "no controller"}
+        )
+
+    app.dependency_overrides[get_runtime_manager] = lambda: FakeRuntime()
+    client = TestClient(app)
+
+    response = client.get("/teleop/follower-posture")
+
+    assert response.status_code == 200
+    assert response.json()["error"] == "no controller"
 
 
 def test_camera_frame_route_colorizes_depth() -> None:

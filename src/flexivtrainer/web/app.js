@@ -4753,7 +4753,7 @@ function renderTrendGraph(side, kind, history, currentVector, label) {
         ? ((history.length - 1) * TELEOP_POLL_INTERVAL_MS) / 1000
         : windowSeconds;
     const legend = meta.labels.map((axis, index) =>
-        `<span class="trend-legend__item"><span class="trend-legend__swatch" style="--swatch:${meta.colors[index]}"></span>${axis}</span>`,
+        `<span class="trend-legend__item"><span class="trend-legend__swatch" style="--swatch:${meta.colors[index]}"></span><span class="trend-legend__label">${axis}</span></span>`,
     ).join("");
     const header = `
         <div class="telemetry-card__header">
@@ -8350,6 +8350,26 @@ function bindGlobalEvents() {
                 showToast(error.message, true);
             }
             setTeleopHomeBusy(false);
+        }
+    };
+    // Always enabled: the Setup view does not poll teleop status, so any
+    // disabled state would go stale. A server error is the robust signal.
+    byId("home-posture-record").onclick = async () => {
+        try {
+            const result = await api("/teleop/follower-posture");
+            if (result.error) {
+                showToast(result.error, true);
+                return;
+            }
+            const posture = getHomePosture();
+            result.posture_deg.forEach((value, index) => {
+                posture[index] = value;
+            });
+            await saveRobotConfigNow();
+            renderHomePosture();
+            showToast("Home posture recorded from the follower.");
+        } catch (error) {
+            showToast(error.message, true);
         }
     };
     const jobNameField = byId("record-job-name");

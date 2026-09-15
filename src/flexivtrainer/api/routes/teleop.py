@@ -404,6 +404,16 @@ def match_leader(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict
     return result
 
 
+@router.get("/follower-posture")
+def follower_posture(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    result = runtime.teleop.follower_posture()
+    if result.get("error"):
+        warn("Home posture record failed", str(result.get("error")))
+    else:
+        ok("Home posture read from the follower")
+    return result
+
+
 @router.post("/recording/start")
 def start_recording(
     request: StartRecordingRequest,

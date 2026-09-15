@@ -330,7 +330,10 @@ class RuntimeManager:
         # These save on every toggle; they must not bounce the services. Camera
         # slots too: set_active_locations() below already applies them, and no
         # robot service depends on the camera layout.
+        # home_posture_deg too: reset_home() re-reads it from config on every
+        # run, so nothing live holds a copy to rebuild.
         ignored = {
+            "home_posture_deg": [],
             "recording_entries": [],
             "record_resolution": "",
             "gripper_default_width_m": None,

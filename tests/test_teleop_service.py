@@ -1025,6 +1025,65 @@ def test_match_rejects_a_controller_without_pair_handles(tmp_path, monkeypatch) 
     assert not robot.calls
 
 
+def test_follower_posture_reads_pair_zero_in_degrees(tmp_path, monkeypatch) -> None:
+    pairs = (
+        (FakeRobot(), _ExternalAxisRobot()),
+        (FakeRobot(), FakeRobot()),
+    )
+    service = _matchable_service(tmp_path, monkeypatch, pairs)
+
+    result = service.follower_posture()
+
+    follower = pairs[0][1]
+    expected = [math.degrees(value) for value in follower.states()["q"][-7:]]
+    assert result["ok"] is True
+    assert len(follower.states()["q"]) == 8
+    assert result["posture_deg"] == pytest.approx(expected)
+    assert len(result["posture_deg"]) == 7
+    assert all(not robot.calls for pair in pairs for robot in pair)
+
+
+def test_follower_posture_errors_without_a_controller(tmp_path, monkeypatch) -> None:
+    pairs = ((FakeRobot(), FakeRobot()),)
+    service = _matchable_service(tmp_path, monkeypatch, pairs)
+    service._controller = None
+
+    result = service.follower_posture()
+
+    assert result["ok"] is False
+    assert "not initialized" in str(result["error"])
+
+
+def test_follower_posture_rejects_a_controller_without_pair_handles(
+    tmp_path, monkeypatch
+) -> None:
+    class SingleHandleController:
+        def __init__(self, robot: FakeRobot) -> None:
+            self._robot = robot
+
+        def instances(self, idx: int):
+            return self._robot
+
+    robot = FakeRobot()
+    service = _homeable_service(
+        tmp_path, (robot,), monkeypatch, controller=SingleHandleController(robot)
+    )
+
+    result = service.follower_posture()
+
+    assert result["ok"] is False
+    assert "leader/follower pair" in str(result["error"])
+
+
+def test_follower_posture_runs_while_teleop_is_started(tmp_path, monkeypatch) -> None:
+    # Read-only, so unlike the homing commands it is not gated on a stopped loop.
+    pairs = ((FakeRobot(), FakeRobot()),)
+    service = _matchable_service(tmp_path, monkeypatch, pairs)
+    service._started = True
+
+    assert service.follower_posture()["ok"] is True
+
+
 def test_robot_data_snapshot_uses_instance_states_and_actions(tmp_path) -> None:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     pairs = [
