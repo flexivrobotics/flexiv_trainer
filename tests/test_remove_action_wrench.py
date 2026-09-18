@@ -117,6 +117,26 @@ def test_remove_action_wrench_slices_only_action(tmp_path, monkeypatch) -> None:
     assert len(episode_metadata.iloc[0]["stats/action/mean"]) == 3
 
 
+def test_remove_action_wrench_preserves_gripper_command(tmp_path, monkeypatch) -> None:
+    from datasets import config as datasets_config
+
+    monkeypatch.setattr(
+        datasets_config,
+        "HF_DATASETS_CACHE",
+        str(tmp_path / "hf-cache"),
+    )
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    _make_dataset(source)
+    command = {"format_version": 1, "velocity_m_s": 0.2, "force_limit_n": 20.0}
+    (source / "meta" / "gripper_command.json").write_text(json.dumps(command))
+
+    remove_action_wrench(source, output)
+
+    converted = json.loads((output / "meta" / "gripper_command.json").read_text())
+    assert converted == command
+
+
 def test_remove_action_wrench_refuses_dataset_without_wrench(
     tmp_path, monkeypatch
 ) -> None:
