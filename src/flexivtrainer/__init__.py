@@ -14,6 +14,16 @@
 
 """Flexiv Trainer backend package."""
 
+import os
+
+# PyArrow 25.0.0's bundled mimalloc can segfault when first loaded by a
+# short-lived worker (recording/preview), then used by another (e.g. merge).
+# Select the system allocator before any dependency imports Arrow. Keeping this
+# here covers the server, CLI tools, and their child processes without eagerly
+# importing PyArrow. Explicit operator configuration still takes precedence.
+# https://github.com/apache/arrow/issues/50471
+os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
+
 __all__ = ["__version__"]
 
 __version__ = "0.5.0"

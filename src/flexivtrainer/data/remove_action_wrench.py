@@ -37,6 +37,8 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.data.gripper_command import GRIPPER_COMMAND_RELATIVE_PATH
+
 _WRENCH_ACTION_MARKER = ".tcp_wrench."
 
 
@@ -155,6 +157,14 @@ def _refresh_action_statistics(
         raise ValueError(
             f"Episode metadata is missing rows for episodes: {sorted(missing)}"
         )
+
+
+def _copy_gripper_command(source: Path, staging: Path) -> None:
+    """Carry the sidecar across; LeRobot only rebuilds its own metadata files."""
+
+    command_path = source / GRIPPER_COMMAND_RELATIVE_PATH
+    if command_path.is_file():
+        shutil.copy2(command_path, staging / GRIPPER_COMMAND_RELATIVE_PATH)
 
 
 def _validate_output(
@@ -323,6 +333,7 @@ def remove_action_wrench(
             projected_feature,
             dict(dataset.meta.stats or {}),
         )
+        _copy_gripper_command(source, staging)
         _validate_output(staging, len(actions), projected_names)
         staging.replace(output)
     except Exception:
