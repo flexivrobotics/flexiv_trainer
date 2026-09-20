@@ -835,23 +835,25 @@ function _buildDatasetPlotSvg(seriesData, group, numFrames, currentFrame, scope,
     const innerWidth = width - left - right;
     const innerHeight = height - top - bottom;
 
-    // Collect all values for scale
-    const allValues = [];
+    // Scan the values without copying them or expanding them into function
+    // arguments: whole-dataset plots can exceed the engine's argument limit.
+    let min = Infinity;
+    let max = -Infinity;
     for (const keys of [group.stateKeys, group.actionKeys]) {
-        keys.forEach((key) => {
+        for (const key of keys) {
             const arr = key && seriesData[key];
-            if (arr) {
-                arr.forEach((v) => { if (v !== null && Number.isFinite(v)) allValues.push(v); });
+            if (!arr) continue;
+            for (const value of arr) {
+                if (!Number.isFinite(value)) continue;
+                if (value < min) min = value;
+                if (value > max) max = value;
             }
-        });
+        }
     }
 
-    let min, max;
-    if (!allValues.length) {
+    if (min === Infinity) {
         min = -1; max = 1;
     } else {
-        min = Math.min(...allValues);
-        max = Math.max(...allValues);
         if (Math.abs(max - min) < 1e-6) {
             const pad = Math.max(1, Math.abs(max) * 0.12 || 1);
             min -= pad; max += pad;
@@ -1233,6 +1235,33 @@ function _updateMergeProgressBars(prog) {
 }
 
 function renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, playingKey) {
+    try {
+        _renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, playingKey);
+    } catch (error) {
+        _stopDatasetPlayback(playingKey);
+        state[playingKey] = false;
+        const container = byId(containerId);
+        const detail = `${error.name || "Error"}: ${error.message || error}`;
+        if (container) {
+            container.innerHTML = `
+                <div class="callout callout--warning" role="alert">
+                    <strong>WARNING: Dataset preview failed to render.</strong>
+                    <p>The preview has stopped; it is not still loading. You can still use the page navigation.</p>
+                    <p>${escapeHtml(detail)}</p>
+                    <p>Preview scope: ${Number(preview?.num_frames || 0).toLocaleString()} frames. See the browser console for diagnostic details.</p>
+                </div>`;
+        }
+        console.warn("Dataset preview rendering failed", {
+            path: preview?.path,
+            numFrames: preview?.num_frames,
+            numericKeys: preview?.numeric_keys,
+            error,
+        });
+        // Keep an optional preview failure from interrupting the wizard.
+    }
+}
+
+function _renderDatasetPreviewBlock(containerId, preview, seriesData, frameKey, playingKey) {
     const container = byId(containerId);
     if (!container || !preview) return;
 
@@ -5341,12 +5370,6 @@ function renderProcessing() {
             picker.appendChild(row);
         });
         restorePickerScroll();
-        const previewBlock = byId("episode-preview-block");
-        if (!state.preview) {
-            previewBlock.innerHTML = `<div class="dataset-preview-empty">${WIZARD_PREVIEW_SVG}<span>Select an episode to preview.</span></div>`;
-        } else {
-            renderDatasetPreviewBlock("episode-preview-block", state.preview, state.previewSeries?.series || null, "previewFrame", "previewPlaying");
-        }
         byId("training-select-all").onclick = () => {
             state.selectedEpisodes = state.selectedEpisodes.length === state.episodes.length ? [] : state.episodes.map((episode) => episode.path);
             renderProcessing();
@@ -5377,6 +5400,12 @@ function renderProcessing() {
                 showToast(error.message, true);
             }
         };
+        const previewBlock = byId("episode-preview-block");
+        if (!state.preview) {
+            previewBlock.innerHTML = `<div class="dataset-preview-empty">${WIZARD_PREVIEW_SVG}<span>Select an episode to preview.</span></div>`;
+        } else {
+            renderDatasetPreviewBlock("episode-preview-block", state.preview, state.previewSeries?.series || null, "previewFrame", "previewPlaying");
+        }
         return;
     }
 
@@ -5409,10 +5438,6 @@ function renderProcessing() {
             <div class="control-bar control-bar--floating-step-nav"><button class="secondary-button" id="merge-prev" type="button">Back</button><button id="merge-next" type="button">Next</button></div>
         `;
 
-        _renderDatasetEpisodePicker(byId("merged-episode-picker"), "processing");
-        restorePickerScroll();
-
-        renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
         byId("merge-prev").onclick = () => {
             state.processingStep = 2;
             renderProcessing();
@@ -5425,6 +5450,9 @@ function renderProcessing() {
                 .then(() => renderTraining())
                 .catch((error) => showToast(error.message, true));
         };
+        _renderDatasetEpisodePicker(byId("merged-episode-picker"), "processing");
+        restorePickerScroll();
+        renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
         return;
     }
 }
@@ -5775,13 +5803,6 @@ function renderTraining() {
                 <button id="training-flow-next" type="button">Next</button>
             </div>`;
 
-        _renderDatasetEpisodePicker(byId("training-dataset-episode-picker"), "training");
-        restorePickerScroll();
-        if (state.mergedDatasetPreview) {
-            renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
-        } else {
-            byId("merged-dataset-preview-block").innerHTML = `<div class="dataset-preview-empty">${WIZARD_PREVIEW_SVG}<span>Loading dataset preview…</span></div>`;
-        }
         byId("training-prev-dataset").onclick = () => {
             state.trainingStep = datasetStep;
             renderTraining();
@@ -5792,6 +5813,13 @@ function renderTraining() {
             renderTraining();
             _animateWizardStep(container);
         };
+        _renderDatasetEpisodePicker(byId("training-dataset-episode-picker"), "training");
+        restorePickerScroll();
+        if (state.mergedDatasetPreview) {
+            renderDatasetPreviewBlock("merged-dataset-preview-block", state.mergedDatasetPreview, state.mergedDatasetSeries?.series || null, "mergedDatasetFrame", "mergedDatasetPlaying");
+        } else {
+            byId("merged-dataset-preview-block").innerHTML = `<div class="dataset-preview-empty">${WIZARD_PREVIEW_SVG}<span>Loading dataset preview…</span></div>`;
+        }
         return;
     }
 
