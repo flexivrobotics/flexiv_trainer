@@ -33,7 +33,7 @@ def test_gripper_panel_uses_backend_session_lifecycle() -> None:
 def test_gripper_panel_asset_revision_is_current() -> None:
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
 
-    assert "/static/app.js?v=20260915-01" in index
+    assert "/static/app.js?v=20260919-preview-fix" in index
     assert "/static/styles.css?v=20260915-01" in index
 
 
