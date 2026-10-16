@@ -124,6 +124,18 @@ class _UnavailableRolloutService:
     def stop(self) -> dict[str, Any]:
         return self.status()
 
+    def verdict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
+    def evaluation_sessions(self) -> list[dict[str, Any]]:
+        return []
+
+    def evaluation_session(self, name: str) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
+    def start_next_trial(self, name: str) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
     def shutdown(self) -> None:
         return None
 

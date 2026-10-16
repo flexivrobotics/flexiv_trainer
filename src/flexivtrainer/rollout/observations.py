@@ -199,6 +199,14 @@ def read_robot_snapshot(
                 "tcp_pose": tcp_pose,
                 "tcp_vel": tcp_vel,
                 "ext_wrench_in_world": wrench,
+                # Not policy inputs. Kept for the rollout recording, where joint
+                # positions and external torques let the arm's behaviour be
+                # identified later; read from the same states() call.
+                **{
+                    key: [float(v) for v in getattr(states, key)]
+                    for key in ("q", "tau_ext")
+                    if getattr(states, key, None) is not None
+                },
             },
             # Values are placeholders; the feature builder reads only axes.
             "actions": {

@@ -572,6 +572,7 @@ def build_features_from_sample(
     sides: list[str] | None = None,
     depths: dict[str, np.ndarray] | None = None,
     cameras: list[str] | None = None,
+    pose_format: str = POSE_FORMAT_ROTATION_6D,
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
     resolved_list = resolve_recording_entries(entries, sides, cameras)
     resolved_entries = set(resolved_list)
@@ -620,7 +621,7 @@ def build_features_from_sample(
     state_keys: list[str] = []
     action_keys: list[str] = []
     for key, values, axis_names in _iter_combined_features(
-        robot_snapshot, resolved_entries, sides
+        robot_snapshot, resolved_entries, sides, pose_format
     ):
         features[key] = {
             "dtype": "float32",

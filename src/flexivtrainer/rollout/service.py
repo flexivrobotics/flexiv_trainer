@@ -19,11 +19,22 @@ from __future__ import annotations
 import threading
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass, replace
+from datetime import datetime
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.data.lerobot_io import active_camera_names
+from flexivtrainer.evaluation.outcome import (
+    DEFAULT_FAILURE_MODES,
+    RolloutOutcome,
+    Verdict,
+    read_outcome,
+    write_outcome,
+)
+from flexivtrainer.evaluation.session import ADHOC_SESSION, SessionStore
 from flexivtrainer.jobs.train_policy import _encode_ui_log
 from flexivtrainer.observability import describe_exception, ok, warn
 from flexivtrainer.policies import act as act_policy
@@ -54,8 +65,10 @@ from flexivtrainer.rollout.executors.waypoint import (
     recorded_layout_confirmation,
 )
 from flexivtrainer.rollout.hardware import _default_robot_factory
+from flexivtrainer.rollout.recorder import RecordingPlan, RolloutRecorder
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
+from flexivtrainer.rollout.safety import SafetyEnvelope
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
 _ROLLOUT_OVERRIDES = {
@@ -64,6 +77,26 @@ _ROLLOUT_OVERRIDES = {
     "diffusion": diffusion_policy.apply_rollout_overrides,
     "multi_task_dit": dit_policy.apply_rollout_overrides,
 }
+
+
+@dataclass(frozen=True)
+class TrialContext:
+    """The planned trial a rollout runs as (evaluation/session.py)."""
+
+    session: str
+    trial: int
+    arm: str
+    condition: str
+    description: str
+    blind: bool
+    failure_modes: tuple[str, ...]
+
+
+def _episode_name(trial: TrialContext | None) -> str:
+    """Timestamp plus trial number. Never the checkpoint: a blind trial's
+    directory name is shown to the operator."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{stamp}_t{trial.trial:03d}" if trial is not None else f"{stamp}_rollout"
 
 
 def _describe_rollout_overrides(rollout_cfg: Any) -> str:
@@ -141,6 +174,13 @@ class RolloutService:
         self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
         # ~3 s at the sampled rate; only the newest drives the UI gauges.
         self._wrench: deque[dict[str, Any]] = deque(maxlen=30)
+        self._send_twist: bool | None = None
+        self._safety: SafetyEnvelope | None = None
+        self._trial: TrialContext | None = None
+        # The recording of the current or last rollout while it is written.
+        self._recording: dict[str, Any] | None = None
+        # The recorded rollout whose verdict is still to be given.
+        self._awaiting: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -152,12 +192,24 @@ class RolloutService:
                 status = "failed"
             else:
                 status = "idle"
+            blind = self._trial is not None and self._trial.blind
             return {
                 "status": status,
-                "checkpoint_path": self._checkpoint_path,
+                # A blind trial shows only its arm's label; the checkpoint would
+                # tell the operator which policy they are judging.
+                "checkpoint_path": None if blind else self._checkpoint_path,
                 # Set for Hub rollouts so the UI shows "acme/policy" rather than
                 # an opaque cache directory.
-                "checkpoint_repo_id": self._checkpoint_repo_id,
+                "checkpoint_repo_id": None if blind else self._checkpoint_repo_id,
+                "checkpoint_label": (
+                    self._trial.arm if self._trial is not None else None
+                ),
+                "trial": self._public_trial(self._trial),
+                "send_twist": self._send_twist,
+                "send_twist_default": bool(self._settings.rollout.send_twist),
+                "safety": self._safety.describe() if self._safety is not None else None,
+                "recording": self._recording_status(),
+                "awaiting_verdict": self._public_awaiting(),
                 "task": self._task,
                 "error": self._error,
                 "stop_reason": self._stop_reason,
@@ -183,10 +235,21 @@ class RolloutService:
         repo_id: str | None = None,
         revision: str | None = None,
         action_names: list[str] | None = None,
+        record: bool = False,
+        send_twist: bool | None = None,
+        trial: TrialContext | None = None,
     ) -> dict[str, Any]:
         task = task.strip() if isinstance(task, str) else None
         task = task or None
+        record = record or trial is not None
         with self._lock:
+            if self._awaiting is not None:
+                raise RuntimeError(
+                    "The last recorded rollout is waiting for its verdict; give it "
+                    "one (or mark it unknown) before starting another."
+                )
+            if self._recording is not None and self._recording.get("saving"):
+                raise RuntimeError("The last rollout's recording is still being saved.")
             # A Python thread cannot be killed and torch.compile is not
             # interruptible, so refuse rather than let two planners overlap.
             active_runner = self._runner
@@ -251,6 +314,11 @@ class RolloutService:
             policy, "name", ""
         )
         is_bspline = policy_type == "bspline_diffusion"
+        if is_bspline and record:
+            raise RuntimeError(
+                "Recording B-spline rollouts is not supported yet; start it without "
+                "recording."
+            )
         image_resolutions = checkpoint_image_resolutions(checkpoint_path)
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
         dataset_hz = self._resolve_target_hz(
@@ -278,6 +346,7 @@ class RolloutService:
         waypoint_layout: list[dict[str, Any]] | None = None
         waypoint_action_dim: int | None = None
         waypoint_layout_inferred = False
+        waypoint_action_names: list[str] | None = None
         waypoint_gripper_sides: tuple[str, ...] = ()
         waypoint_gripper_target_mode = "width"
         gripper_command_parameters = None
@@ -307,6 +376,7 @@ class RolloutService:
                 waypoint_layout,
                 waypoint_action_dim,
                 waypoint_layout_inferred,
+                waypoint_action_names,
             ) = self._preflight_waypoint(
                 checkpoint_path,
                 policy,
@@ -344,6 +414,13 @@ class RolloutService:
                 )
             self._apply_n_action_steps(policy, rollout_cfg)
 
+        safety = SafetyEnvelope.from_settings(self._settings.rollout)
+        effective_twist = (
+            self._settings.rollout.send_twist
+            if send_twist is None
+            else bool(send_twist)
+        )
+
         # Per run: a zombie planner keeps the old event, which stays set, so
         # clearing a shared one can no longer un-stop it.
         self._stop_event = threading.Event()
@@ -370,89 +447,119 @@ class RolloutService:
             app_rollout.max_linear_acc,
             app_rollout.max_angular_acc,
         )
+        recording: dict[str, Any] | None = None
+        if record:
+            recording = self._open_recording(
+                checkpoint_origin=str(checkpoint_origin),
+                task=task,
+                trial=trial,
+                target_hz=target_hz,
+                action_names=waypoint_action_names,
+                sides=sides,
+                camera_names=camera_names,
+                send_twist=effective_twist,
+                safety=safety,
+            )
+        on_finished = partial(self._on_runner_finished, recording=recording)
         runner: WaypointRunner | BSplineRunner
-        if bspline_layout is not None:
-            runner = BSplineRunner(
-                policy=policy,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                robots=robots,
-                sides=sides,
-                followers=followers,
-                cameras=self._cameras,
-                image_resolutions=image_resolutions,
-                rollout_cfg=rollout_cfg,
-                target_hz=target_hz,
-                device=device,
-                task=task,
-                bspline_layout=bspline_layout,
-                state_dim=state_dim,
-                end_effector_config=end_effector_config,
-                motion_limits=motion_limits,
-                max_steps=app_rollout.max_steps,
-                stop_event=self._stop_event,
-                append_log=self._append_log,
-                append_metric=self._metrics.append,
-                append_wrench=self._wrench.append,
-                on_error=self._on_runner_error,
-                on_cleanup_error=self._on_runner_cleanup_error,
-                on_finished=self._on_runner_finished,
-                release_robots=self._make_release_robots(robots),
-                stop_robots=hardware.stop_robots,
-                prepare_motion=self._prepare_motion,
-                gripper_default_width_m=gripper_default_width_m,
-                gripper_initialization_registry=(self._gripper_initialization_registry),
-                gripper_command_parameters=gripper_command_parameters,
-                camera_names=camera_names,
-            )
-        else:
-            assert waypoint_layout is not None
-            assert waypoint_action_dim is not None
-            runner = WaypointRunner(
-                policy=policy,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                robots=robots,
-                sides=sides,
-                followers=followers,
-                cameras=self._cameras,
-                image_resolutions=image_resolutions,
-                rollout_cfg=rollout_cfg,
-                target_hz=target_hz,
-                device=device,
-                task=task,
-                action_layout=waypoint_layout,
-                action_dim=waypoint_action_dim,
-                state_dim=state_dim,
-                gripper_sides=waypoint_gripper_sides,
-                gripper_target_mode=waypoint_gripper_target_mode,
-                end_effector_config=end_effector_config,
-                motion_limits=motion_limits,
-                planner_hz_fallback=app_rollout.planner_hz,
-                expected_hz_fallback=app_rollout.action_dt_hz,
-                max_steps=app_rollout.max_steps,
-                stop_event=self._stop_event,
-                append_log=self._append_log,
-                append_metric=self._metrics.append,
-                append_wrench=self._wrench.append,
-                on_error=self._on_runner_error,
-                on_cleanup_error=self._on_runner_cleanup_error,
-                on_finished=self._on_runner_finished,
-                release_robots=self._make_release_robots(robots),
-                stop_robots=hardware.stop_robots,
-                prepare_policy=(
-                    partial(act_policy.compile_model, mode=compile_mode)
-                    if compile_act
-                    else None
-                ),
-                uses_cuda_graphs=uses_cuda_graphs,
-                gripper_default_width_m=gripper_default_width_m,
-                gripper_initialization_registry=(self._gripper_initialization_registry),
-                gripper_command_parameters=gripper_command_parameters,
-                camera_names=camera_names,
-            )
+        try:
+            if bspline_layout is not None:
+                runner = BSplineRunner(
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    robots=robots,
+                    sides=sides,
+                    followers=followers,
+                    cameras=self._cameras,
+                    image_resolutions=image_resolutions,
+                    rollout_cfg=rollout_cfg,
+                    target_hz=target_hz,
+                    device=device,
+                    task=task,
+                    bspline_layout=bspline_layout,
+                    state_dim=state_dim,
+                    end_effector_config=end_effector_config,
+                    motion_limits=motion_limits,
+                    max_steps=app_rollout.max_steps,
+                    stop_event=self._stop_event,
+                    append_log=self._append_log,
+                    append_metric=self._metrics.append,
+                    append_wrench=self._wrench.append,
+                    on_error=self._on_runner_error,
+                    on_cleanup_error=self._on_runner_cleanup_error,
+                    on_finished=self._on_runner_finished,
+                    release_robots=self._make_release_robots(robots),
+                    stop_robots=hardware.stop_robots,
+                    prepare_motion=self._prepare_motion,
+                    gripper_default_width_m=gripper_default_width_m,
+                    gripper_initialization_registry=(self._gripper_initialization_registry),
+                    gripper_command_parameters=gripper_command_parameters,
+                    camera_names=camera_names,
+                )
+            else:
+                assert waypoint_layout is not None
+                assert waypoint_action_dim is not None
+                runner = WaypointRunner(
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    robots=robots,
+                    sides=sides,
+                    followers=followers,
+                    cameras=self._cameras,
+                    image_resolutions=image_resolutions,
+                    rollout_cfg=rollout_cfg,
+                    target_hz=target_hz,
+                    device=device,
+                    task=task,
+                    action_layout=waypoint_layout,
+                    action_dim=waypoint_action_dim,
+                    state_dim=state_dim,
+                    gripper_sides=waypoint_gripper_sides,
+                    gripper_target_mode=waypoint_gripper_target_mode,
+                    end_effector_config=end_effector_config,
+                    motion_limits=motion_limits,
+                    planner_hz_fallback=app_rollout.planner_hz,
+                    expected_hz_fallback=app_rollout.action_dt_hz,
+                    max_steps=app_rollout.max_steps,
+                    stop_event=self._stop_event,
+                    append_log=self._append_log,
+                    append_metric=self._metrics.append,
+                    append_wrench=self._wrench.append,
+                    on_error=self._on_runner_error,
+                    on_cleanup_error=self._on_runner_cleanup_error,
+                    on_finished=on_finished,
+                    release_robots=self._make_release_robots(robots),
+                    stop_robots=hardware.stop_robots,
+                    prepare_policy=(
+                        partial(act_policy.compile_model, mode=compile_mode)
+                        if compile_act
+                        else None
+                    ),
+                    uses_cuda_graphs=uses_cuda_graphs,
+                    gripper_default_width_m=gripper_default_width_m,
+                    gripper_initialization_registry=(self._gripper_initialization_registry),
+                    gripper_command_parameters=gripper_command_parameters,
+                    camera_names=camera_names,
+                    safety=safety,
+                    recorder=recording["recorder"] if recording is not None else None,
+                    send_twist=effective_twist,
+                )
+                if recording is not None:
+                    recording["runner"] = runner
+
+        except BaseException:
+            # A runner that never started leaves no trial behind.
+            if recording is not None:
+                recording["recorder"].abort()
+            raise
 
         with self._lock:
+            self._send_twist = effective_twist if bspline_layout is None else None
+            self._safety = safety if bspline_layout is None else None
+            self._trial = trial
+            self._recording = recording
             self._checkpoint_path = checkpoint_path
             self._checkpoint_repo_id = repo_id if source == "hub" else None
             self._task = task
@@ -480,6 +587,31 @@ class RolloutService:
                     f"device={device} sides={'+'.join(sides)}",
                 )
             )
+            if bspline_layout is None:
+                self._logs.append(
+                    _encode_ui_log(
+                        "INFO",
+                        "ROLLOUT",
+                        "Safety envelope",
+                        f"{safety.describe()}; velocity feedforward "
+                        f"{'on' if effective_twist else 'off'}",
+                    )
+                )
+            if recording is not None:
+                where = (
+                    f"session {trial.session} trial {trial.trial} (arm {trial.arm}, "
+                    f"condition {trial.condition})"
+                    if trial is not None
+                    else "ad hoc"
+                )
+                self._logs.append(
+                    _encode_ui_log(
+                        "INFO",
+                        "ROLLOUT",
+                        "Recording this rollout",
+                        f"{recording['episode']} -- {where}",
+                    )
+                )
             if waypoint_layout_inferred:
                 confirmation = layout_confirmation(waypoint_action_dim, len(sides))
                 # OK, not WARNING: the width matched, so this confirms the
@@ -530,6 +662,272 @@ class RolloutService:
         runner.start()
         return self.status()
 
+    # --- recording, verdicts and evaluation sessions -----------------------
+
+    def _open_recording(
+        self,
+        *,
+        checkpoint_origin: str,
+        task: str | None,
+        trial: TrialContext | None,
+        target_hz: float,
+        action_names: list[str] | None,
+        sides: list[str],
+        camera_names: list[str],
+        send_twist: bool,
+        safety: SafetyEnvelope,
+    ) -> dict[str, Any]:
+        storage = self._settings.storage
+        session = trial.session if trial is not None else ADHOC_SESSION
+        episode = _episode_name(trial)
+        destination = storage.rollouts_root / session / episode
+        suffix = 1
+        while destination.exists():
+            suffix += 1
+            destination = storage.rollouts_root / session / f"{episode}_{suffix}"
+        plan = RecordingPlan(
+            destination=destination,
+            staging=storage.staging_root / f"rollout_{destination.name}",
+            fps=max(1, round(target_hz)),
+            task=task,
+            robot_type=self._settings.robot_type,
+            video_codec=self._settings.video_codec,
+            action_names=list(action_names or []),
+            sides=list(sides),
+            cameras=list(camera_names),
+        )
+        outcome = RolloutOutcome(
+            episode=destination.name,
+            checkpoint=checkpoint_origin,
+            task=task,
+            started_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            session=trial.session if trial is not None else None,
+            trial=trial.trial if trial is not None else None,
+            arm=trial.arm if trial is not None else None,
+            condition=trial.condition if trial is not None else None,
+            send_twist=send_twist,
+            safety=safety.to_dict(),
+        )
+        return {
+            "recorder": RolloutRecorder(plan, outcome),
+            "episode": destination.name,
+            "trial": trial,
+            "saving": False,
+            "runner": None,
+        }
+
+    def _finalize_recording(
+        self, recording: dict[str, Any], stop_reason: str | None, steps: int
+    ) -> None:
+        runner = recording.get("runner")
+        with self._lock:
+            error = self._error
+        try:
+            destination, outcome, saved = recording["recorder"].finish(
+                stop_reason=stop_reason,
+                error=error,
+                steps=steps,
+                safety_stop=getattr(runner, "safety_stop", None),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            detail = describe_exception(exc)
+            warn("Rollout recording could not be finalized", detail)
+            with self._lock:
+                recording["saving"] = False
+                recording["error"] = detail
+            return
+        trial: TrialContext | None = recording.get("trial")
+        with self._lock:
+            recording["saving"] = False
+            recording["path"] = str(destination)
+            recording["saved"] = saved
+            self._awaiting = {
+                "path": destination,
+                "episode": destination.name,
+                "trial": trial,
+                "failure_modes": tuple(trial.failure_modes)
+                if trial is not None
+                else DEFAULT_FAILURE_MODES,
+                "frames": outcome.frames,
+                "stop_reason": outcome.stop_reason,
+            }
+            self._logs.append(
+                _encode_ui_log(
+                    "OK" if saved else "WARN",
+                    "ROLLOUT",
+                    "Rollout recorded"
+                    if saved
+                    else "Rollout outcome saved without data",
+                    f"{destination.name}: {outcome.frames} frames, "
+                    f"{outcome.dropped_frames} dropped; waiting for a verdict",
+                )
+            )
+
+    def _recording_status(self) -> dict[str, Any] | None:
+        recording = self._recording
+        if recording is None:
+            return None
+        live = recording["recorder"].status()
+        return {
+            "episode": recording["episode"],
+            "frames": live["frames"],
+            "dropped_frames": live["dropped_frames"],
+            "saving": bool(recording.get("saving")),
+            "error": live["error"] or recording.get("error"),
+        }
+
+    @staticmethod
+    def _public_trial(trial: TrialContext | None) -> dict[str, Any] | None:
+        if trial is None:
+            return None
+        return {
+            "session": trial.session,
+            "trial": trial.trial,
+            "arm": trial.arm,
+            "condition": trial.condition,
+            "description": trial.description,
+            "blind": trial.blind,
+        }
+
+    def _public_awaiting(self) -> dict[str, Any] | None:
+        awaiting = self._awaiting
+        if awaiting is None:
+            return None
+        return {
+            "episode": awaiting["episode"],
+            "trial": self._public_trial(awaiting["trial"]),
+            "failure_modes": list(awaiting["failure_modes"]),
+            "frames": awaiting["frames"],
+            "stop_reason": awaiting["stop_reason"],
+        }
+
+    def verdict(
+        self,
+        outcome: str,
+        *,
+        failure_mode: str | None = None,
+        note: str = "",
+        session: str | None = None,
+        episode: str | None = None,
+    ) -> dict[str, Any]:
+        """Judge the recorded rollout that is waiting, or a named one on disk.
+
+        Naming one (`session` and `episode`) is for a trial whose verdict was not
+        given before the application restarted; it must not have one yet.
+        """
+        if outcome == "failure":
+            failure_mode = (failure_mode or "").strip() or None
+            if failure_mode is None:
+                raise ValueError("a failure needs a failure mode")
+        else:
+            failure_mode = None
+        judged = Verdict(outcome=outcome, failure_mode=failure_mode, note=note.strip())
+        with self._lock:
+            awaiting = self._awaiting
+        if episode is not None:
+            directory = self._named_episode(session, episode)
+            current = read_outcome(directory)
+            if current is None:
+                raise RuntimeError(f"{episode} has no rollout outcome")
+            if current.verdict is not None:
+                raise RuntimeError(f"{episode} already has a verdict")
+            modes = self._failure_modes_for(current.session)
+        elif awaiting is not None:
+            directory = awaiting["path"]
+            current = read_outcome(directory)
+            if current is None:
+                raise RuntimeError(f"{awaiting['episode']} lost its rollout outcome")
+            modes = tuple(awaiting["failure_modes"])
+        else:
+            raise RuntimeError("No recorded rollout is waiting for a verdict")
+        if failure_mode is not None and failure_mode not in modes:
+            raise ValueError(
+                f"failure mode {failure_mode!r} is not one of {list(modes)}"
+            )
+        write_outcome(directory, replace(current, verdict=judged))
+        with self._lock:
+            if awaiting is not None and directory == awaiting["path"]:
+                self._awaiting = None
+            self._logs.append(
+                _encode_ui_log(
+                    "OK",
+                    "ROLLOUT",
+                    "Verdict saved",
+                    f"{directory.name}: {outcome}"
+                    + (f" ({failure_mode})" if failure_mode else ""),
+                )
+            )
+        return {"episode": directory.name, "verdict": judged.outcome}
+
+    def _named_episode(self, session: str | None, episode: str) -> Path:
+        name = session or ADHOC_SESSION
+        root = self._settings.storage.rollouts_root
+        if name != ADHOC_SESSION:
+            SessionStore(root).plan(name)  # validates the name and that it exists
+        if not episode or "/" in episode or "\\" in episode or episode.startswith("."):
+            raise ValueError(f"{episode!r} is not an episode name")
+        directory = root / name / episode
+        if not directory.is_dir():
+            raise FileNotFoundError(f"no recorded rollout {name}/{episode}")
+        return directory
+
+    def _failure_modes_for(self, session: str | None) -> tuple[str, ...]:
+        if session is None:
+            return DEFAULT_FAILURE_MODES
+        store = SessionStore(self._settings.storage.rollouts_root)
+        return store.plan(session).failure_modes
+
+    def evaluation_sessions(self) -> list[dict[str, Any]]:
+        store = SessionStore(self._settings.storage.rollouts_root)
+        sessions = []
+        for name in store.sessions():
+            try:
+                progress = store.progress(name)
+            except (ValueError, KeyError, TypeError) as exc:
+                sessions.append({"name": name, "error": str(exc)})
+                continue
+            sessions.append(
+                {key: progress[key] for key in ("name", "about", "total", "judged")}
+            )
+        return sessions
+
+    def evaluation_session(self, name: str) -> dict[str, Any]:
+        return SessionStore(self._settings.storage.rollouts_root).progress(name)
+
+    def start_next_trial(self, session: str) -> dict[str, Any]:
+        """Run the session's next planned trial, recorded, as its arm's checkpoint."""
+        store = SessionStore(self._settings.storage.rollouts_root)
+        progress = store.progress(session)
+        if progress["awaiting_verdict"]:
+            first = progress["awaiting_verdict"][0]
+            raise RuntimeError(
+                f"Trial {first['trial']} ({first['episode']}) is waiting for its "
+                "verdict; give it one first."
+            )
+        upcoming = progress["next"]
+        if upcoming is None:
+            raise RuntimeError(f"Every trial of session {session!r} has a verdict.")
+        plan = store.plan(session)
+        arm = plan.arms[upcoming["arm"]]
+        trial = TrialContext(
+            session=session,
+            trial=int(upcoming["trial"]),
+            arm=upcoming["arm"],
+            condition=upcoming["condition"],
+            description=upcoming["description"],
+            blind=plan.blind,
+            failure_modes=tuple(plan.failure_modes),
+        )
+        return self.start(
+            arm.checkpoint,
+            task=arm.task,
+            source=arm.source,
+            repo_id=arm.repo_id,
+            revision=arm.revision,
+            send_twist=arm.send_twist,
+            trial=trial,
+        )
+
     def _on_runner_error(self, detail: str) -> None:
         with self._lock:
             self._error = detail
@@ -542,7 +940,24 @@ class RolloutService:
         with self._lock:
             self._error = self._error or detail
 
-    def _on_runner_finished(self, stop_reason: str | None, step: int) -> None:
+    def _on_runner_finished(
+        self,
+        stop_reason: str | None,
+        step: int,
+        *,
+        recording: dict[str, Any] | None = None,
+    ) -> None:
+        if recording is not None:
+            # Saving flushes the video encoder, which can take seconds; it runs
+            # off the planner thread so stop() is not held up by the disk.
+            with self._lock:
+                recording["saving"] = True
+            threading.Thread(
+                target=self._finalize_recording,
+                args=(recording, stop_reason or self._stop_reason or "stopped", step),
+                name="rollout-recording-finalize",
+                daemon=True,
+            ).start()
         with self._lock:
             self._running = False
             self._stopping = False
@@ -733,7 +1148,7 @@ class RolloutService:
         sides: list[str],
         followers: list[str],
         action_names: list[str] | None = None,
-    ) -> tuple[list[dict[str, Any]], int, bool]:
+    ) -> tuple[list[dict[str, Any]], int, bool, list[str]]:
         """Resolve a waypoint action contract before any robot is connected."""
 
         if len(followers) != len(sides):
@@ -774,7 +1189,7 @@ class RolloutService:
             layout = build_action_layout(names, sides, action_dim)
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
-        return layout, action_dim, inferred
+        return layout, action_dim, inferred, list(names)
 
     @staticmethod
     def _preflight_bspline(

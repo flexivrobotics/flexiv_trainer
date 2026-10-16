@@ -96,6 +96,8 @@ class StorageConfig(BaseModel):
     merged_dirname: str = "datasets"
     training_dirname: str = "training"
     cache_dirname: str = "cache"
+    # Recorded rollouts and evaluation sessions (rollouts/<session>/<episode>).
+    rollouts_dirname: str = "rollouts"
 
     @property
     def episodes_root(self) -> Path:
@@ -118,6 +120,10 @@ class StorageConfig(BaseModel):
         return self.root / self.cache_dirname
 
     @property
+    def rollouts_root(self) -> Path:
+        return self.root / self.rollouts_dirname
+
+    @property
     def hub_cache_root(self) -> Path:
         # Inside the storage root on purpose: a downloaded checkpoint then passes
         # the same resolve_checkpoint_path validation as a local one.
@@ -138,6 +144,7 @@ class StorageConfig(BaseModel):
         self.merged_root.mkdir(parents=True, exist_ok=True)
         self.training_root.mkdir(parents=True, exist_ok=True)
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        self.rollouts_root.mkdir(parents=True, exist_ok=True)
         (self.hub_cache_root / "datasets").mkdir(parents=True, exist_ok=True)
         (self.hub_cache_root / "checkpoints").mkdir(parents=True, exist_ok=True)
 
@@ -185,6 +192,20 @@ class RolloutLoopConfig(BaseModel):
     max_angular_vel: float = Field(default=0.6, gt=0)  # rad/s
     max_linear_acc: float = Field(default=1.0, gt=0)  # m/s^2
     max_angular_acc: float = Field(default=2.5, gt=0)  # rad/s^2
+    # Stream the policy's predicted twist to the controller as a velocity
+    # feedforward. Off sends zero twist: a policy that stalls in contact still
+    # predicts the velocity its demonstrations had there, and the feedforward
+    # then pushes the arm while the pose target says hold. A start request can
+    # override this per rollout.
+    send_twist: bool = True
+    # Safety envelope (rollout/safety.py). Every bound is off when unset;
+    # non-finite commands always stop a rollout. Positions are metres in each
+    # arm's base frame.
+    workspace_min_m: tuple[float, float, float] | None = None
+    workspace_max_m: tuple[float, float, float] | None = None
+    max_reference_offset_m: float | None = Field(default=None, gt=0)
+    max_force_n: float | None = Field(default=None, gt=0)
+    stale_plan_s: float | None = Field(default=None, gt=0)
 
 
 class EndEffectorSideConfig(BaseModel):

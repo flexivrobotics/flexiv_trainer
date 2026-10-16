@@ -43,7 +43,20 @@ from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     pose_command,
 )
+from flexivtrainer.rollout.recorder import RolloutRecorder
+from flexivtrainer.rollout.safety import SafetyEnvelope, SafetyStop
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
+
+
+def _measured_arms(snapshot: dict[str, Any], key: str) -> list[list[float]]:
+    """One measured vector per arm, in arm order, from a robot snapshot."""
+    robots = snapshot.get("robots") if isinstance(snapshot, dict) else None
+    out: list[list[float]] = []
+    for payload in (robots or {}).values():
+        states = payload.get("states") if isinstance(payload, dict) else None
+        vector = states.get(key) if isinstance(states, dict) else None
+        out.append([float(v) for v in vector] if vector is not None else [])
+    return out
 
 
 class WaypointRunner:
@@ -89,7 +102,15 @@ class WaypointRunner:
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
         gripper_command_parameters: GripperCommandMetadata | None = None,
         camera_names: list[str] | None = None,
+        safety: SafetyEnvelope | None = None,
+        recorder: RolloutRecorder | None = None,
+        send_twist: bool = True,
     ) -> None:
+        self._safety = safety or SafetyEnvelope()
+        self._recorder = recorder
+        self._send_twist = send_twist
+        #: Set when the envelope stopped the rollout: {"code", "detail"}.
+        self.safety_stop: dict[str, str] | None = None
         self._policy = policy
         self._preprocessor = preprocessor
         self._postprocessor = postprocessor
@@ -261,7 +282,10 @@ class WaypointRunner:
                 self._motion_limits,
                 action_dim=self._action_dim,
                 submit_gripper=(gripper.submit if gripper is not None else None),
+                send_twist=self._send_twist,
             )
+            safety = self._safety
+            last_fresh: float | None = None
             self._waypoint_executor = waypoint_executor
             if gripper is not None:
                 gripper.start()
@@ -310,6 +334,8 @@ class WaypointRunner:
                 snapshot = observations.read_robot_snapshot(
                     robots, gripper_states, sides
                 )
+                safety.check_force(_measured_arms(snapshot, "ext_wrench_in_world"))
+                safety.check_stale(time.monotonic(), last_fresh)
                 now = time.monotonic()
                 stage_times["read_states"].append(now - mark)
                 mark = now
@@ -347,6 +373,21 @@ class WaypointRunner:
                 mark = now
 
                 action_lists = self._actions_to_lists(actions)
+                safety.check_finite(action_lists)
+                commanded = [
+                    [
+                        pose_command(plan, action)[:3]
+                        for plan in layout
+                        if plan["pose"] is not None
+                    ]
+                    for action in action_lists
+                ]
+                safety.check_workspace(commanded)
+                if fresh:
+                    safety.check_reference(
+                        commanded[0], _measured_arms(snapshot, "tcp_pose")
+                    )
+                    last_fresh = time.monotonic()
                 waypoint_executor.validate_actions(action_lists)
                 now = time.monotonic()
                 stage_times["to_list"].append(now - mark)
@@ -388,6 +429,17 @@ class WaypointRunner:
                         "fresh": bool(fresh),
                     }
                 )
+                if self._recorder is not None:
+                    self._recorder.add_tick(
+                        state=observation.get("observation.state", []),
+                        action=action_lists[0],
+                        images=images,
+                        snapshot=snapshot,
+                        step=step,
+                        fresh=fresh,
+                        infer_ms=infer_seconds * 1000.0,
+                        pose_format=pose_format,
+                    )
                 self._last_wrench_t = observations.sample_wrench(
                     self._append_wrench,
                     snapshot,
@@ -421,6 +473,14 @@ class WaypointRunner:
                 elapsed = time.monotonic() - loop_start
                 if period - elapsed > 0:
                     self._stop_event.wait(period - elapsed)
+        except SafetyStop as exc:
+            # Not a crash: the envelope did its job. Recorded as the stop
+            # reason, and still reported as an error so the run reads as failed.
+            self._stop_reason = "safety"
+            self.safety_stop = {"code": exc.code, "detail": exc.detail}
+            self._error = str(exc)
+            self._on_error(str(exc))
+            warn("Rollout stopped by the safety envelope", str(exc))
         except Exception as exc:
             detail = describe_exception(exc)
             self._error = detail

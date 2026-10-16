@@ -35,6 +35,10 @@ class StartRolloutRequest(BaseModel):
     # Escape hatch for a checkpoint that carries no action-name metadata; the
     # layout is validated against the policy's action width before use.
     action_names: list[str] | None = None
+    # Record this rollout as a dataset with an outcome awaiting a verdict.
+    record: bool = False
+    # Override rollout.send_twist for this rollout; None keeps the setting.
+    send_twist: bool | None = None
 
     @model_validator(mode="after")
     def _check_source(self) -> StartRolloutRequest:
@@ -50,6 +54,16 @@ class StartRolloutRequest(BaseModel):
 
 class RolloutDeviceRequest(BaseModel):
     device: str = "auto"
+
+
+class VerdictRequest(BaseModel):
+    outcome: Literal["success", "failure", "unknown"]
+    failure_mode: str | None = None
+    note: str = ""
+    # Name a recorded rollout on disk instead of the one waiting in memory --
+    # for a verdict that was not given before the application restarted.
+    session: str | None = None
+    episode: str | None = None
 
 
 @router.get("/devices")
@@ -93,6 +107,8 @@ def start_rollout(
             repo_id=request.repo_id,
             revision=request.revision,
             action_names=request.action_names,
+            record=request.record,
+            send_twist=request.send_twist,
         )
     # Hub errors subclass RuntimeError, so they must precede the 409 handler.
     except HubNotFoundError as exc:
@@ -228,3 +244,66 @@ def stop_rollout(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict
 @router.get("/status")
 def rollout_status(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return runtime.rollout.status()
+
+
+@router.post("/verdict")
+def rollout_verdict(
+    request: VerdictRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    try:
+        result = runtime.rollout.verdict(
+            request.outcome,
+            failure_mode=request.failure_mode,
+            note=request.note,
+            session=request.session,
+            episode=request.episode,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Rollout verdict saved", f"{result['episode']}: {result['verdict']}")
+    return result
+
+
+@router.get("/evaluations")
+def list_evaluations(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    return {"sessions": runtime.rollout.evaluation_sessions()}
+
+
+@router.get("/evaluations/{name}")
+def get_evaluation(
+    name: str, runtime: RuntimeManager = Depends(get_runtime_manager)
+) -> dict:
+    try:
+        return runtime.rollout.evaluation_session(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/evaluations/{name}/next")
+def start_next_trial(
+    name: str, runtime: RuntimeManager = Depends(get_runtime_manager)
+) -> dict:
+    info("Evaluation trial requested", f"session={name}")
+    try:
+        result = runtime.rollout.start_next_trial(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HubNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HubAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except HubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Evaluation trial started")
+    return result
