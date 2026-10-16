@@ -146,3 +146,23 @@ test('the summary shows each arm with its interval', () => {
     assert.match(html, /3\/4 · 75% \(30%–95%\)/);
     assert.match(html, /Every trial of this session has a verdict/);
 });
+
+test('checks are shown as agreement over judged trials, not per pending trial', () => {
+    const { run, element } = harness();
+    run(`
+        state.rolloutStatus = {status: 'idle', awaiting_verdict: {
+            episode: 'e9', trial: {session: 'cmp', trial: 9, arm: 'A', condition: 'home', blind: true},
+            failure_modes: ['stalled'], frames: 30, stop_reason: 'done'}};
+        state.rolloutEvaluationName = 'cmp';
+        state.rolloutEvaluationSessions = [{name: 'cmp', total: 10, judged: 9}];
+        state.rolloutEvaluation = {name: 'cmp', next: null, awaiting_verdict: [{trial: 9, episode: 'e9'}],
+            failure_modes: ['stalled'], summary: {arms: {}, checks: {placed: {
+                agree: 8, trials: 9, rate: 8 / 9, ci95: [0.56, 0.98], passed_but_failure: 1,
+                failed_but_success: 0, unscored: 0}}}};
+        renderRolloutEvaluation();
+    `);
+    const html = element('rollout-evaluation').innerHTML;
+    assert.match(html, /placed/);
+    assert.match(html, /8\/9 · 89% \(56%–98%\)/);
+    assert.match(html, /How did <code>e9<\/code> go\?/);
+});

@@ -35,8 +35,12 @@ The plan is written by whoever prepares the comparison, before any trial runs:
       "trials_per_condition": 3,
       "seed": 7,
       "blind": true,
-      "failure_modes": ["missed the target", "stalled", "dropped the part"]
+      "failure_modes": ["missed the target", "stalled", "dropped the part"],
+      "checks": {"placed": {"kind": "settled_in_box", ...}}
     }
+
+`checks` are optional automatic checks, scored from each trial's tick log and
+reported beside the verdicts with how often they agree (`checks.py`).
 
 WHY A PLAN AND NOT AD HOC STARTS. Deciding the trials before seeing results is
 what stops a comparison from being steered by them -- "one more try" for the
@@ -54,10 +58,11 @@ from __future__ import annotations
 import json
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .checks import SettledInBox, agreement, parse_checks
 from .outcome import DEFAULT_FAILURE_MODES, OUTCOME_FILE, RolloutOutcome, read_outcome
 from .stats import paired_exact_p, wilson_interval
 
@@ -131,6 +136,7 @@ class EvaluationPlan:
     blind: bool = True
     failure_modes: tuple[str, ...] = DEFAULT_FAILURE_MODES
     about: str = ""
+    checks: dict[str, SettledInBox] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.arms:
@@ -172,6 +178,7 @@ class EvaluationPlan:
             "seed",
             "blind",
             "failure_modes",
+            "checks",
         }
         unknown = sorted(set(data) - known)
         if unknown:
@@ -200,6 +207,7 @@ class EvaluationPlan:
             blind=bool(data.get("blind", True)),
             failure_modes=tuple(data.get("failure_modes") or DEFAULT_FAILURE_MODES),
             about=str(data.get("about", "")),
+            checks=parse_checks(data.get("checks")),
         )
 
 
@@ -222,10 +230,12 @@ def summarize(plan: EvaluationPlan, outcomes: list[RolloutOutcome]) -> dict[str,
     """Success rates per arm and per condition, and paired comparisons.
 
     Only "success" and "failure" verdicts count; "unknown" is reported but kept
-    out of every rate, because a trial nobody could judge is not evidence.
+    out of every rate, because a trial nobody could judge is not evidence. Each
+    of the plan's checks is reported by how often it agrees with those verdicts.
     """
     by_trial = {t.index: t for t in schedule(plan)}
     judged: dict[int, str] = {}
+    results: dict[int, dict[str, Any]] = {}
     unknown: dict[str, int] = {arm: 0 for arm in plan.arms}
     modes: dict[str, dict[str, int]] = {arm: {} for arm in plan.arms}
     for outcome in outcomes:
@@ -240,6 +250,7 @@ def summarize(plan: EvaluationPlan, outcomes: list[RolloutOutcome]) -> dict[str,
             unknown[trial.arm] += 1
             continue
         judged[trial.index] = outcome.verdict.outcome
+        results[trial.index] = outcome.checks or {}
         if outcome.verdict.outcome == "failure":
             mode = outcome.verdict.failure_mode or "unspecified"
             modes[trial.arm][mode] = modes[trial.arm].get(mode, 0) + 1
@@ -293,7 +304,13 @@ def summarize(plan: EvaluationPlan, outcomes: list[RolloutOutcome]) -> dict[str,
                     "p_value": paired_exact_p(only_a, only_b),
                 }
             )
-    return {"arms": arms, "comparisons": comparisons}
+    checks = {
+        name: agreement(
+            [(results[index].get(name), verdict) for index, verdict in judged.items()]
+        )
+        for name in plan.checks
+    }
+    return {"arms": arms, "comparisons": comparisons, "checks": checks}
 
 
 @dataclass
@@ -316,12 +333,16 @@ class SessionStore:
         )
 
     def outcomes(self, name: str) -> list[RolloutOutcome]:
+        return [outcome for _, outcome in self.episodes(name)]
+
+    def episodes(self, name: str) -> list[tuple[Path, RolloutOutcome]]:
+        """Each recorded trial's directory and outcome."""
         directory = self._session_dir(name)
         found = []
         for path in sorted(directory.glob(f"*/{OUTCOME_FILE.as_posix()}")):
             outcome = read_outcome(path.parent.parent)
             if outcome is not None and outcome.session == name:
-                found.append(outcome)
+                found.append((path.parent.parent, outcome))
         return found
 
     def progress(self, name: str) -> dict[str, Any]:
