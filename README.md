@@ -369,6 +369,119 @@ Datasets are only ever recorded in rotation-6D, so this affects rollout of older
 checkpoints, not new recordings. Datasets recorded before the change are
 converted on read when they are used as B-spline training targets.
 
+## Policy Types From Other Packages
+
+A policy family maintained outside this repository registers its LeRobot policy
+type when its package is imported. List the package so rollout imports it
+before loading a checkpoint. Give such types their own rollout settings, which
+otherwise default to chunked execution:
+
+```bash
+export FLEXIV_TRAINER_POLICIES__PLUGIN_PACKAGES='["my_models.family_a"]'
+# For a policy that blends its chunks itself when stepped every tick:
+export FLEXIV_TRAINER_POLICIES__PLUGIN_ROLLOUT__N_ACTION_STEPS=1
+export FLEXIV_TRAINER_POLICIES__PLUGIN_ROLLOUT__REPLAN_STEPS=0
+```
+
+The package must be installed in the same environment as the trainer, and its
+checkpoints must carry the standard `policy_preprocessor.json` and
+`policy_postprocessor.json`.
+
+## Record And Evaluate Rollouts
+
+A training loss says how well a policy imitates its demonstrations, not how
+often the robot finishes the task. The `Recording & Evaluation` panel on the
+`Policy Rollout` page measures that.
+
+### Record a rollout
+
+Tick `Record single rollouts` before `Start`. The rollout is saved under
+`.local/rollouts/adhoc/<timestamp>_rollout/` as a LeRobot dataset with the same
+`observation.state` and `action` columns as a teleoperated episode, so it can
+be reviewed and merged like any demonstration. Two files sit beside the data:
+
+- `meta/rollout_ticks.jsonl`: one line per control tick, with the measured
+  pose, force, joint positions and torques, inference time, and whether the
+  plan was fresh.
+- `meta/rollout_outcome.json`: the checkpoint, why the rollout stopped, any
+  safety stop, and your verdict.
+
+The images are the frames the policy saw, at the resolution it was given them.
+B-spline rollouts cannot be recorded yet.
+
+When the rollout ends, the panel asks how it went: `Success`, `Failure` (with
+what went wrong), or `Can't tell`. A new rollout cannot start until the last
+recorded one has a verdict. A verdict given later from memory is worth less
+than one given now.
+
+### Run a planned evaluation session
+
+To compare checkpoints, write a plan before running anything, at
+`.local/rollouts/<session>/session.json`:
+
+```json
+{
+  "about": "new defaults against old",
+  "arms": {
+    "A": {"checkpoint": "training/run_a/checkpoints/100000/pretrained_model"},
+    "B": {"checkpoint": "training/run_b/checkpoints/100000/pretrained_model"}
+  },
+  "conditions": [
+    {"id": "home", "description": "start from HOME"},
+    {"id": "offset", "description": "part 5 cm to the left of its usual place"}
+  ],
+  "trials_per_condition": 10,
+  "seed": 1,
+  "blind": true,
+  "failure_modes": ["missed the target", "stalled", "dropped the part"]
+}
+```
+
+Choose the session in the panel. `Start trial` runs the next planned trial and
+tells you which start condition to set up first. Trials are shuffled by the
+seed, in blocks that cover every arm and condition once before any repeats.
+With `"blind": true` the page shows only the arm's label, never its
+checkpoint. An arm may also set `"send_twist"` and `"task"`, or use
+`"source": "hub"` with a `"repo_id"`.
+
+The panel shows each arm's success rate with a 95% Wilson interval.
+`GET /rollout/evaluations/<session>` also returns paired comparisons between
+arms on the same conditions, with an exact p-value. As a guide, telling 50%
+from 80% takes about 33 paired trials, or about 39 per arm unpaired. Telling
+60% from 80% takes about 80 per arm.
+
+### Velocity feedforward and the safety envelope
+
+`Send velocity feedforward` streams the policy's predicted twist to the
+controller along with the pose target. Switching it off sends zero twist, which
+stops a policy that stalls in contact from pushing on the part. The default is
+`FLEXIV_TRAINER_ROLLOUT__SEND_TWIST` (on).
+
+A command with a non-finite value always stops the rollout before it reaches
+the arm. These bounds are off until you set them for your cell:
+
+| Setting | Stops the rollout when |
+|---|---|
+| `FLEXIV_TRAINER_ROLLOUT__WORKSPACE_MIN_M`, `..._WORKSPACE_MAX_M` (e.g. `[0.3,-0.2,0.1]`) | a commanded position leaves the box, in each arm's base frame |
+| `FLEXIV_TRAINER_ROLLOUT__MAX_REFERENCE_OFFSET_M` | a new plan's first target is further than this from the arm |
+| `FLEXIV_TRAINER_ROLLOUT__MAX_FORCE_N` | the measured external force exceeds this |
+| `FLEXIV_TRAINER_ROLLOUT__STALE_PLAN_S` | no fresh plan arrives within this many seconds |
+
+A pose target is also a force target. Under impedance control, a target 2 cm
+away pushes with stiffness times 2 cm, so set the reference offset above the
+largest offset your task presses with. Safety stops are recorded in the
+outcome. The envelope applies to waypoint policies, not yet to B-spline ones.
+
+### Stiffness
+
+A pose-target policy learns targets that sit beyond where the arm ends up, by
+force divided by stiffness. Roll it out at the stiffness its demonstrations were
+recorded under, or the same targets press harder. Set the controller's spring
+and contact-wrench ceiling for rollouts with
+`FLEXIV_TRAINER_ROLLOUT__CARTESIAN_STIFFNESS` (`[kx,ky,kz,krx,kry,krz]`, N/m and
+N·m/rad) and `FLEXIV_TRAINER_ROLLOUT__MAX_CONTACT_WRENCH` (N and N·m). Unset,
+the controller's defaults apply. Both are recorded in each rollout's outcome.
+
 ## Typical End-To-End Session
 
 For a normal session, the order is:

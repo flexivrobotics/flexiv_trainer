@@ -53,6 +53,17 @@ const state = {
     rolloutRequiresTask: true,
     rolloutStatus: null,
     rolloutDevices: null,
+    // Recording and evaluation (the Evaluation panel of the rollout page).
+    // rolloutSendTwist is null until the server's default is known.
+    rolloutRecord: false,
+    rolloutSendTwist: null,
+    rolloutEvaluationSessions: [],
+    rolloutEvaluationName: "",
+    rolloutEvaluation: null,
+    rolloutVerdictOutcome: "",
+    rolloutVerdictMode: "",
+    rolloutVerdictNote: "",
+    rolloutVerdictBusy: false,
     teleopBootstrapped: false,
     rolloutBootstrapped: false,
     trainingBootstrapped: false,
@@ -7499,6 +7510,7 @@ async function bootstrapRollout() {
     }
     // Warm the device list (reuses the training device probe on the backend).
     refreshRolloutDevices({ silent: true }).catch((error) => showToast(error.message, true));
+    refreshRolloutEvaluations().catch(() => { });
     startRolloutPolling();
 }
 
@@ -7535,6 +7547,9 @@ function startRolloutPolling() {
         }
         if (tick % 3 === 0) {
             refreshTeleopStatus().catch(() => { });
+        }
+        if (tick % 9 === 0) {
+            refreshRolloutEvaluations().catch(() => { });
         }
         tick += 1;
         renderRollout();
@@ -7662,9 +7677,14 @@ async function startRolloutRun() {
     }
     const task = state.rolloutRequiresTask ? state.rolloutTaskText || "" : "";
     const revision = (state.rolloutCheckpointRevision || "").trim();
-    const payload = useHub
+    const base = useHub
         ? { source: "hub", repo_id: repoId, task, ...(revision ? { revision } : {}) }
         : { source: "local", checkpoint_path: checkpoint, task };
+    const payload = {
+        ...base,
+        record: !!state.rolloutRecord,
+        ...(state.rolloutSendTwist === null ? {} : { send_twist: !!state.rolloutSendTwist }),
+    };
     try {
         state.rolloutStatus = await withHubToken(() =>
             api("/rollout/start", {
@@ -7679,6 +7699,244 @@ async function startRolloutRun() {
         await refreshSummary().catch(() => {});
     }
     renderRollout();
+}
+
+// ---------------------------------------------------------------------------
+// Recording and evaluation: record a rollout, judge it, run a planned session.
+// ---------------------------------------------------------------------------
+
+async function refreshRolloutEvaluations() {
+    const listing = await api("/rollout/evaluations");
+    state.rolloutEvaluationSessions = (listing && listing.sessions) || [];
+    const name = state.rolloutEvaluationName;
+    if (name && !state.rolloutEvaluationSessions.some((entry) => entry.name === name)) {
+        state.rolloutEvaluationName = "";
+    }
+    state.rolloutEvaluation = state.rolloutEvaluationName
+        ? await api(`/rollout/evaluations/${encodeURIComponent(state.rolloutEvaluationName)}`)
+        : null;
+    renderRolloutEvaluation();
+}
+
+// The rollout waiting for a verdict: the one just recorded, or -- after a
+// restart -- the first trial on disk that still has none.
+function pendingVerdict() {
+    const status = state.rolloutStatus || {};
+    if (status.awaiting_verdict) {
+        return { ...status.awaiting_verdict, onDisk: false };
+    }
+    const progress = state.rolloutEvaluation;
+    const waiting = progress && (progress.awaiting_verdict || [])[0];
+    if (waiting) {
+        return {
+            episode: waiting.episode,
+            trial: { session: progress.name, trial: waiting.trial },
+            failure_modes: progress.failure_modes || [],
+            onDisk: true,
+        };
+    }
+    return null;
+}
+
+async function startRolloutTrial() {
+    const name = state.rolloutEvaluationName;
+    if (!name) {
+        return;
+    }
+    try {
+        state.rolloutStatus = await api(`/rollout/evaluations/${encodeURIComponent(name)}/next`, {
+            method: "POST",
+        });
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        await refreshTeleopStatus().catch(() => {});
+        await refreshRolloutEvaluations().catch(() => {});
+    }
+    renderRollout();
+}
+
+async function saveRolloutVerdict() {
+    const pending = pendingVerdict();
+    const outcome = state.rolloutVerdictOutcome;
+    if (!pending || !outcome || state.rolloutVerdictBusy) {
+        return;
+    }
+    if (outcome === "failure" && !state.rolloutVerdictMode) {
+        showToast("Choose what went wrong", true);
+        return;
+    }
+    const payload = {
+        outcome,
+        note: state.rolloutVerdictNote || "",
+        ...(outcome === "failure" ? { failure_mode: state.rolloutVerdictMode } : {}),
+        ...(pending.onDisk ? { session: pending.trial.session, episode: pending.episode } : {}),
+    };
+    state.rolloutVerdictBusy = true;
+    renderRolloutEvaluation();
+    try {
+        await api("/rollout/verdict", { method: "POST", body: JSON.stringify(payload) });
+        state.rolloutVerdictOutcome = "";
+        state.rolloutVerdictMode = "";
+        state.rolloutVerdictNote = "";
+        showToast(`Verdict saved: ${outcome}`);
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.rolloutVerdictBusy = false;
+        state.rolloutStatus = await api("/rollout/status").catch(() => state.rolloutStatus);
+        await refreshRolloutEvaluations().catch(() => {});
+    }
+}
+
+function formatRate(entry) {
+    if (!entry || !entry.trials) {
+        return "–";
+    }
+    const pct = (value) => `${Math.round(value * 100)}%`;
+    const [low, high] = entry.ci95 || [0, 1];
+    return `${entry.successes}/${entry.trials} · ${pct(entry.rate)} (${pct(low)}–${pct(high)})`;
+}
+
+function renderRolloutEvaluation() {
+    const panel = byId("rollout-evaluation");
+    if (!panel) {
+        return;
+    }
+    const status = state.rolloutStatus || {};
+    const isRunning = status.status === "running";
+    if (state.rolloutSendTwist === null && typeof status.send_twist_default === "boolean") {
+        state.rolloutSendTwist = status.send_twist_default;
+    }
+    const progress = state.rolloutEvaluation;
+    const pending = pendingVerdict();
+    const recording = status.recording;
+    const trial = status.trial;
+    const sessions = state.rolloutEvaluationSessions || [];
+
+    // Like renderRollout: rebuild only when something shown changed, so the
+    // poll never wipes the note being typed or a select that is open.
+    const renderKey = JSON.stringify([
+        isRunning, state.rolloutRecord, state.rolloutSendTwist,
+        sessions, state.rolloutEvaluationName, progress, pending && pending.episode,
+        recording && [recording.episode, recording.saving, recording.error],
+        trial, status.checkpoint_label,
+        state.rolloutVerdictOutcome, state.rolloutVerdictMode, state.rolloutVerdictBusy,
+    ]);
+    if (panel.dataset.renderKey === renderKey) {
+        const frames = byId("rollout-eval-frames");
+        if (frames && recording) {
+            frames.textContent = `${recording.frames} frames${recording.dropped_frames ? `, ${recording.dropped_frames} dropped` : ""}`;
+        }
+        return;
+    }
+    panel.dataset.renderKey = renderKey;
+
+    const sessionOptions = [`<option value="">No session — single rollouts</option>`]
+        .concat(sessions.map((entry) => {
+            const selected = entry.name === state.rolloutEvaluationName ? " selected" : "";
+            const label = entry.error
+                ? `${entry.name} (unreadable plan)`
+                : `${entry.name} — ${entry.judged}/${entry.total} judged`;
+            return `<option value="${escapeHtml(entry.name)}"${selected}>${escapeHtml(label)}</option>`;
+        })).join("");
+    const next = progress && progress.next;
+    const canStartTrial = !!next && !isRunning && !pending;
+    const modes = (pending && pending.failure_modes) || [];
+    const verdictButton = (value, label) => `<button type="button" class="secondary-button rollout-eval-outcome${
+        state.rolloutVerdictOutcome === value ? " rollout-eval-outcome--active" : ""
+    }" data-outcome="${value}" ${state.rolloutVerdictBusy ? "disabled" : ""}>${label}</button>`;
+    const arms = (progress && progress.summary && progress.summary.arms) || {};
+
+    panel.innerHTML = `
+        <div class="panel-header"><h3>Recording &amp; Evaluation</h3></div>
+        <label class="rollout-eval-check"><input type="checkbox" id="rollout-eval-record" ${
+            state.rolloutRecord ? "checked" : ""} ${isRunning ? "disabled" : ""}> Record single rollouts</label>
+        <label class="rollout-eval-check"><input type="checkbox" id="rollout-eval-twist" ${
+            state.rolloutSendTwist ? "checked" : ""} ${isRunning ? "disabled" : ""}> Send velocity feedforward</label>
+        ${recording ? `<p class="rollout-eval-line">Recording <code>${escapeHtml(recording.episode)}</code>: <span id="rollout-eval-frames">${
+            recording.frames} frames${recording.dropped_frames ? `, ${recording.dropped_frames} dropped` : ""}</span>${
+            recording.saving ? " — saving…" : ""}</p>` : ""}
+        ${recording && recording.error ? `<p class="rollout-verdict rollout-error">${escapeHtml(recording.error)}</p>` : ""}
+        <label class="field-label" for="rollout-eval-session">Evaluation session</label>
+        <select id="rollout-eval-session" ${isRunning ? "disabled" : ""}>${sessionOptions}</select>
+        ${trial ? `<p class="rollout-eval-line">Running trial ${trial.trial} · arm <strong>${escapeHtml(status.checkpoint_label || trial.arm)}</strong> · ${
+            escapeHtml(trial.condition)}${trial.description ? ` — ${escapeHtml(trial.description)}` : ""}</p>` : ""}
+        ${next && !isRunning ? `<p class="rollout-eval-line">Next: trial ${next.trial} — set up <strong>${escapeHtml(next.condition)}</strong>${
+            next.description ? `: ${escapeHtml(next.description)}` : ""}</p>` : ""}
+        ${progress && !next && !pending && !isRunning ? `<p class="rollout-eval-line">Every trial of this session has a verdict.</p>` : ""}
+        ${state.rolloutEvaluationName ? `<button type="button" class="start-button" id="rollout-eval-next" ${
+            canStartTrial ? "" : "disabled"}>Start trial</button>` : ""}
+        ${pending ? `
+            <div class="rollout-eval-verdict">
+                <p class="rollout-eval-line">How did <code>${escapeHtml(pending.episode)}</code> go?</p>
+                <div class="rollout-eval-outcomes">
+                    ${verdictButton("success", "Success")}
+                    ${verdictButton("failure", "Failure")}
+                    ${verdictButton("unknown", "Can't tell")}
+                </div>
+                ${state.rolloutVerdictOutcome === "failure" ? `
+                    <select id="rollout-eval-mode">
+                        <option value="">What went wrong?</option>
+                        ${modes.map((mode) => `<option value="${escapeHtml(mode)}"${
+                            mode === state.rolloutVerdictMode ? " selected" : ""}>${escapeHtml(mode)}</option>`).join("")}
+                    </select>` : ""}
+                <input type="text" id="rollout-eval-note" placeholder="Note (optional)" autocomplete="off" maxlength="2000">
+                <button type="button" class="start-button" id="rollout-eval-save" ${
+                    state.rolloutVerdictOutcome && !state.rolloutVerdictBusy ? "" : "disabled"}>Save verdict</button>
+            </div>` : ""}
+        ${Object.keys(arms).length ? `
+            <table class="rollout-eval-summary">
+                <thead><tr><th>Arm</th><th>Success (95% CI)</th><th>Unclear</th></tr></thead>
+                <tbody>${Object.entries(arms).map(([arm, entry]) => `<tr><td>${escapeHtml(arm)}</td><td>${
+                    escapeHtml(formatRate(entry))}</td><td>${entry.unknown || 0}</td></tr>`).join("")}</tbody>
+            </table>` : ""}
+    `;
+
+    const record = byId("rollout-eval-record");
+    if (record) {
+        record.onchange = () => { state.rolloutRecord = record.checked; };
+    }
+    const twist = byId("rollout-eval-twist");
+    if (twist) {
+        twist.onchange = () => { state.rolloutSendTwist = twist.checked; };
+    }
+    const session = byId("rollout-eval-session");
+    if (session) {
+        session.onchange = () => {
+            state.rolloutEvaluationName = session.value;
+            refreshRolloutEvaluations().catch((error) => showToast(error.message, true));
+        };
+    }
+    const nextBtn = byId("rollout-eval-next");
+    if (nextBtn) {
+        nextBtn.onclick = () => startRolloutTrial();
+    }
+    panel.querySelectorAll(".rollout-eval-outcome").forEach((button) => {
+        button.onclick = () => {
+            state.rolloutVerdictOutcome = button.dataset.outcome;
+            if (state.rolloutVerdictOutcome !== "failure") {
+                state.rolloutVerdictMode = "";
+            }
+            renderRolloutEvaluation();
+        };
+    });
+    const mode = byId("rollout-eval-mode");
+    if (mode) {
+        mode.onchange = () => {
+            state.rolloutVerdictMode = mode.value;
+            renderRolloutEvaluation();
+        };
+    }
+    const note = byId("rollout-eval-note");
+    if (note) {
+        note.value = state.rolloutVerdictNote || "";
+        note.oninput = () => { state.rolloutVerdictNote = note.value; };
+    }
+    const save = byId("rollout-eval-save");
+    if (save) {
+        save.onclick = () => saveRolloutVerdict();
+    }
 }
 
 function renderRollout() {
@@ -7746,6 +8004,7 @@ function renderRollout() {
         renderRolloutTerminal();
         renderRolloutMetrics();
         renderRolloutWrench();
+        renderRolloutEvaluation();
         return;
     }
     container.dataset.renderKey = renderKey;
@@ -7816,6 +8075,7 @@ function renderRollout() {
                         ${status.error ? `<p class="rollout-verdict rollout-error">${escapeHtml(status.error)}</p>` : ""}
                     </div>
                 </section>
+                <section class="panel rollout-evaluation" id="rollout-evaluation"></section>
             </div>
             <div class="rollout-main">
                 <section class="panel">
@@ -7845,6 +8105,7 @@ function renderRollout() {
     renderRolloutTerminal();
     renderRolloutMetrics();
     renderRolloutWrench();
+    renderRolloutEvaluation();
 
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {

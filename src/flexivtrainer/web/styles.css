@@ -4725,3 +4725,60 @@ input[type="range"]:focus-visible::-moz-range-thumb {
         scrollbar-width: none;
     }
 }
+
+/* Recording & Evaluation panel on the rollout page. */
+.rollout-evaluation {
+    display: grid;
+    gap: 8px;
+}
+
+.rollout-eval-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink-2);
+    font-size: 13px;
+}
+
+.rollout-eval-line {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.rollout-eval-line strong {
+    color: var(--ink);
+}
+
+.rollout-eval-verdict {
+    display: grid;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--separator);
+}
+
+.rollout-eval-outcomes {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.rollout-eval-outcome--active {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.rollout-eval-summary {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.rollout-eval-summary th,
+.rollout-eval-summary td {
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--separator);
+    text-align: left;
+}

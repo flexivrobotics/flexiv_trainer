@@ -152,8 +152,42 @@ class PolicyConfig(BaseModel):
         default_factory=bspline_policy.PolicyFamilyConfig
     )
     multi_task_dit: DiTConfig = Field(default_factory=DiTConfig)
+    # Python packages that register more LeRobot policy types when imported --
+    # a model family maintained outside this repository. Imported before a
+    # checkpoint is loaded for rollout, so its type resolves.
+    plugin_packages: list[str] = Field(default_factory=list)
+    # Rollout knobs for a policy type with no family entry above, such as one
+    # registered by a plugin package. For a policy that blends chunks itself
+    # when stepped every tick, set n_action_steps=1 and replan_steps=0.
+    plugin_rollout: SharedRolloutConfig = Field(default_factory=SharedRolloutConfig)
 
     def rollout_for(self, policy_type: str) -> SharedRolloutConfig:
         family = getattr(self, policy_type, None)
         rollout = getattr(family, "rollout", None)
-        return rollout if rollout is not None else SharedRolloutConfig()
+        if isinstance(rollout, SharedRolloutConfig):
+            return rollout
+        return self.plugin_rollout
+
+
+def import_policy_plugins(packages: list[str]) -> list[str]:
+    """Import each plugin package so its policy types register; returns them.
+
+    A package that fails to import stops the rollout with its name, rather than
+    surfacing later as an unknown policy type.
+    """
+    import importlib  # noqa: PLC0415
+
+    imported = []
+    for name in packages:
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            importlib.import_module(name)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to import policy plugin package {name!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        imported.append(name)
+    return imported

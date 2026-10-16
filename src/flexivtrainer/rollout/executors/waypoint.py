@@ -417,12 +417,15 @@ class WaypointExecutor:
         *,
         action_dim: int | None = None,
         submit_gripper: Callable[[Mapping[str, float]], None] | None = None,
+        send_twist: bool = True,
     ) -> None:
         self._robots = robots
         self._layout = layout
         self._stop_event = stop_event
         self._motion_limits = motion_limits
         self._submit_gripper = submit_gripper
+        # False streams zero twist: the pose target alone drives the arm.
+        self._send_twist = send_twist
         required_dim = max(
             (
                 section.stop if isinstance(section, slice) else section + 1
@@ -496,7 +499,7 @@ class WaypointExecutor:
                         ),
                         twist=(
                             list(action[twist_slice])
-                            if twist_slice is not None
+                            if twist_slice is not None and self._send_twist
                             else [0.0] * _TWIST_DIM
                         ),
                     )
@@ -544,6 +547,15 @@ class WaypointExecutor:
                     raise ValueError(
                         f"Waypoint action {index} has non-finite {target_label} "
                         f"for {arm['side']}"
+                    )
+            # The last check before the arm: a NaN pose, twist or wrench sent to
+            # the controller is undefined behaviour, and a policy produces one
+            # without raising.
+            for position, value in enumerate(action):
+                if not math.isfinite(float(value)):
+                    raise ValueError(
+                        f"Waypoint action {index} has a non-finite value at "
+                        f"position {position}"
                     )
 
     def _send_waypoint(self, waypoint: _TimedWaypoint) -> None:
