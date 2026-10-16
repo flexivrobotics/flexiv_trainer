@@ -50,6 +50,7 @@ from flexivtrainer.rollout.safety import SafetyEnvelope, SafetyStop
 from flexivtrainer.rollout.service import RolloutService
 from flexivtrainer.rollout.takeover import (
     LeaderTrigger,
+    Takeover,
     TakeoverRefused,
     operator_action,
 )
@@ -79,6 +80,7 @@ class _Arm(_FakeRobot):
         }
         self.inputs = [False] * 16
         self.wrench: list[float] | None = None
+        self.position: list[float] | None = None
         self.fail_switch = 0
 
     def SendCartesianMotionForce(self, pose, *args, **kwargs):  # noqa: N802
@@ -109,6 +111,8 @@ class _Arm(_FakeRobot):
         states = super().states()
         if self.wrench is not None:
             states.ext_wrench_in_world = list(self.wrench)
+        if self.position is not None:
+            states.tcp_pose = list(self.position) + list(states.tcp_pose[3:])
         return states
 
     def actions(self):
@@ -658,6 +662,34 @@ def test_a_safety_stop_under_the_operator_disengages_and_holds(make_rig) -> None
         rig.service.hand_back()
 
 
+def test_leaving_the_workspace_under_the_operator_is_a_safety_stop(
+    make_rig,
+) -> None:
+    # The fake arm measures [1, 2, 3] and the policy commands about [0.4, 0, 0.3]:
+    # both inside the box until the operator moves the arm out of it.
+    def configure(settings) -> None:
+        settings.rollout.workspace_min_m = (-1.0, -1.0, -1.0)
+        settings.rollout.workspace_max_m = (5.0, 5.0, 5.0)
+
+    rig = make_rig(configure=configure)
+    _start(rig)
+    _take_over(rig)
+    time.sleep(0.2)
+    assert rig.service.status()["status"] == "running"
+    mark = len(rig.log)
+    rig.follower.position = [1.0, 2.0, 6.0]
+    _wait(lambda: rig.service.status()["status"] == "failed", "the safety stop")
+
+    assert "Safety stop (workspace)" in rig.service.status()["error"]
+    assert "measures z=6.0000" in rig.service.status()["error"]
+    assert rig.service._runner.safety_stop["code"] == "workspace"
+    disengage = _index(rig.log, "tdk", "Engage", 0, False, start=mark)
+    _index(rig.log, "tdk", "StopWithIdx", 0, start=disengage)
+    assert not rig.tdk.running, "the robots must be left holding"
+    assert _sends(rig.log, mark) == []
+    _wait(lambda: not rig.teleop.snapshot().lent, "the robots to be returned")
+
+
 def test_the_workspace_box_is_checked_where_the_operator_puts_the_arm() -> None:
     envelope = SafetyEnvelope(workspace_min_m=(0, 0, 0), workspace_max_m=(1, 1, 1))
     envelope.check_measured_workspace([[0.5, 0.5, 0.5, 1, 0, 0, 0]])
@@ -972,6 +1004,115 @@ def test_a_paused_executor_sends_nothing() -> None:
         executor.join()
 
 
+class _PauseFirst:
+    """Stands in for a lock. The first time `thread` takes it, `pause` runs to
+    completion on another thread before the real lock is taken -- the worst
+    moment for a pause to arrive."""
+
+    def __init__(self, real, pause, thread: str) -> None:
+        self._real = real
+        self._pause = pause
+        self._thread = thread
+        self.fired = threading.Event()
+
+    def __enter__(self):
+        if threading.current_thread().name == self._thread and not self.fired.is_set():
+            self.fired.set()
+            pausing = threading.Thread(target=self._pause)
+            pausing.start()
+            pausing.join(timeout=2.0)
+            assert not pausing.is_alive()
+        self._real.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._real.release()
+
+
+def test_a_waypoint_popped_just_before_a_pause_is_not_sent() -> None:
+    robot = _Arm("F1", [])
+    executor = _waypoint_executor(robot)
+    # The executor pops waypoint 0, then pause() completes before the executor
+    # takes its send lock. The popped waypoint is stale and must be dropped.
+    gate = _PauseFirst(executor._send_lock, executor.pause, "rollout-waypoint-executor")
+    executor._send_lock = gate
+    executor.start()
+    try:
+        now = time.monotonic()
+        executor.replace_waypoints([_pose_action(0.4)], [now + 0.05], now)
+        assert gate.fired.wait(timeout=2.0)
+        time.sleep(0.2)
+        assert executor.paused
+        assert robot.commands == [], "a waypoint was sent after pause() returned"
+    finally:
+        executor._stop_event.set()
+        executor.join()
+
+
+def _gripper_executor(moves: list[float], **kwargs) -> GripperExecutor:
+    class Gripper(_Gripper):
+        def Move(self, width, velocity, force) -> None:  # noqa: N802
+            moves.append(float(width))
+
+    executor = GripperExecutor(
+        [SimpleNamespace(mode=lambda: "IDLE")],
+        ["single_arm"],
+        {"single_arm": {"follower": "gripper", "gripper_model": "fake"}},
+        ["single_arm"],
+        gripper_factory=Gripper,
+        tool_factory=lambda robot: SimpleNamespace(Switch=lambda model: None),
+        idle_mode="IDLE",
+        **kwargs,
+    )
+    executor.initialize()
+    return executor
+
+
+def test_a_paused_gripper_executor_reads_no_target_and_resends_after() -> None:
+    moves: list[float] = []
+    reads: list[float] = []
+    target = {"single_arm": 0.05}
+
+    def source() -> dict[str, float]:
+        reads.append(target["single_arm"])
+        return dict(target)
+
+    executor = _gripper_executor(moves, target_source=source)
+    executor._send_pending()
+    assert moves == [0.05] and reads == [0.05]
+
+    executor.pause()
+    target["single_arm"] = 0.02
+    executor.submit({"single_arm": 0.03})
+    executor._send_pending()
+    assert moves == [0.05], "a paused executor moved the jaws"
+    assert reads == [0.05], "a paused executor must not take a policy target"
+
+    executor.resume()
+    # The same target as before the pause goes out again: the operator may
+    # have moved the jaws meanwhile.
+    target["single_arm"] = 0.05
+    executor._send_pending()
+    assert moves == [0.05, 0.05]
+
+
+def test_a_pause_during_a_gripper_send_stops_the_move() -> None:
+    moves: list[float] = []
+    executor = _gripper_executor(moves)
+    executor.submit({"single_arm": 0.05})
+    # _send_pending has read the pending target; pause() completes before the
+    # Move is issued.
+    gate = _PauseFirst(
+        executor._io_locks["single_arm"],
+        executor.pause,
+        threading.current_thread().name,
+    )
+    executor._io_locks["single_arm"] = gate
+    executor._send_pending()
+    assert gate.fired.is_set()
+    assert moves == []
+
+
 def test_a_paused_gripper_executor_sends_nothing_and_resends_after() -> None:
     moves: list[float] = []
 
@@ -1005,6 +1146,53 @@ def test_a_paused_gripper_executor_sends_nothing_and_resends_after() -> None:
     executor.submit({"single_arm": 0.05})
     executor._send_pending()
     assert moves == [0.05, 0.05]
+
+
+class _RunnerStub:
+    ready = True
+
+    def pause_policy(self) -> None:
+        pass
+
+    def reclaim(self) -> None:
+        pass
+
+    def resume_policy(self) -> None:
+        pass
+
+
+class _LeakyTeleop:
+    """A teleop whose takeover fails with its loop left running."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.returns = 0
+
+    def resume_for_takeover(self, lease, **kwargs) -> None:
+        self.started = True
+        raise RuntimeError("Engage failed")
+
+    def return_from_takeover(self, lease) -> None:
+        self.returns += 1
+        self.started = False
+
+
+def test_a_failed_switch_stops_a_teleop_loop_left_running() -> None:
+    teleop = _LeakyTeleop()
+    takeover = Takeover(
+        teleop=teleop, lease=SimpleNamespace(pairs=(0,)), sides=["single_arm"]
+    )
+    takeover.bind(_RunnerStub())
+    takeover.take_over()
+    _wait(lambda: takeover.status()["state"] == "error", "the failed switch")
+
+    assert not teleop.started, "the teleop loop must not be left running"
+    assert teleop.returns == 1
+    status = takeover.status()
+    assert "Engage failed" in status["error"]
+    assert status["control"] == "switching"
+    assert status["last_switch"]["to"] == "operator"
+    assert "Engage failed" in status["last_switch"]["error"]
 
 
 # --- the API --------------------------------------------------------------------------
