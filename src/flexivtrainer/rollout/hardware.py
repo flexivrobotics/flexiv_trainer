@@ -97,13 +97,16 @@ def prepare_robot_motion(
     *,
     stiffness: Sequence[float] | None = None,
     max_contact_wrench: Sequence[float] | None = None,
+    zero_ft: bool = True,
 ) -> None:
     """Zero the F/T sensor, enter Cartesian motion-force mode, set the spring.
 
     The stiffness is set in the mode it applies to and before any pose is
-    sent: the first target is already interpreted through it.
+    sent: the first target is already interpreted through it. `zero_ft=False`
+    is for taking the arm back in the middle of a trial, when the tool may be
+    in contact and zeroing would offset every later force reading.
     """
-    if _zero_ft_sensor(robot, stop_event):
+    if zero_ft and _zero_ft_sensor(robot, stop_event):
         append_log("INFO", "ROLLOUT", "F/T sensor zeroed", serial)
     mode = _rdk_mode()
     robot.SwitchMode(mode.NRT_CARTESIAN_MOTION_FORCE)

@@ -136,6 +136,10 @@ class EndEffectorController:
         # each reused, digitally controlled gripper, ignore Open until the
         # leader has requested Close once; then resume normal mirroring.
         self._takeover_pending: set[int] = set()
+        # Pairs left as they are until their leader trigger changes level; the
+        # value is the level first read (None until then). See
+        # hold_until_trigger_change().
+        self._held: dict[int, bool | None] = {}
         self._errors: dict[int, str] = {}
 
     @staticmethod
@@ -298,6 +302,28 @@ class EndEffectorController:
     def _with_reinitialize_instruction(message: str) -> str:
         return f"{message}. Reinitialize the gripper and retry"
 
+    def hold_until_trigger_change(self) -> None:
+        """Leave every mirrored follower as it is until its leader trigger moves.
+
+        For teleoperation that resumes in the middle of a task: a takeover from
+        a running policy, or a restart after one. The jaws may be holding a part
+        that the trigger's current level would open, so nothing is sent until
+        the operator actuates the trigger. Each pair's first reading is its
+        reference; the first different reading resumes normal mirroring.
+        """
+        with self._gripper_command_lock:
+            for index, cfg in enumerate(self._configs):
+                if not self._should_mirror(cfg):
+                    continue
+                self._held[index] = None
+                # A command from before the hand-over says nothing about the
+                # jaws now; forget it so the next change is always sent.
+                self._last_gripper_command.pop(index, None)
+                self._last_do.pop(index, None)
+
+    def holding(self, index: int) -> bool:
+        return index in self._held
+
     def start(self) -> None:
         """Start the mirror thread (on teleop Start).
 
@@ -336,6 +362,7 @@ class EndEffectorController:
             with self._gripper_command_lock:
                 self._last_gripper_command.clear()
             self._takeover_pending.clear()
+            self._held.clear()
 
     def _run(self) -> None:  # pragma: no cover - hardware specific
         period = 1.0 / self.POLL_HZ
@@ -357,6 +384,12 @@ class EndEffectorController:
 
     def _tick(self, index: int, cfg: EndEffectorSideConfig) -> None:
         triggered = self._leader_triggered(index, cfg)
+        if index in self._held:
+            if self._held[index] in (None, triggered):
+                self._held[index] = triggered
+                return
+            # The operator actuated the trigger: mirror from here on.
+            self._held.pop(index, None)
         if cfg.follower == "digital_output":
             self._drive_digital_output(index, cfg, triggered)
         elif cfg.follower == "gripper":
@@ -643,6 +676,7 @@ class EndEffectorController:
                 "min_width": params.min_width,
                 "max_width": params.max_width,
                 "takeover_pending": index in self._takeover_pending,
+                "held_until_trigger": index in self._held,
             }
             try:  # pragma: no cover - hardware specific
                 states = gripper.states()

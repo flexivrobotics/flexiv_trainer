@@ -525,6 +525,50 @@ and contact-wrench ceiling for rollouts with
 N·m/rad) and `FLEXIV_TRAINER_ROLLOUT__MAX_CONTACT_WRENCH` (N and N·m). Unset,
 the controller's defaults apply. Both are recorded in each rollout's outcome.
 
+### Taking over with the leader arm
+
+You can take the follower from a running policy with the leader arm, the same
+way you teleoperate it to collect data, and give it back later. Nothing is
+disconnected.
+
+1. Connect teleoperation on `Home` before you start the rollout. The rollout
+   then stops the teleop loop and drives the followers through the same
+   connection. (Without it, the rollout connects as before and cannot be taken
+   over; the page says why.)
+2. Press `Take over` on the `Policy Rollout` page. The policy stops at once.
+   Teleoperation starts without zeroing the force sensors, because the tool may
+   be touching the part, and the leader is engaged. The follower copies the
+   leader's motion from where both arms are now, so you do not need to move the
+   leader onto the follower first. The gripper keeps its state until you press
+   the leader's gripper trigger.
+3. Press `Hand back`. The leader disengages, teleoperation stops and the robots
+   hold. The rollout takes the follower back with its own settings, and the
+   policy starts again with a fresh plan from where you left the arm. Nothing
+   it planned before the takeover is sent.
+
+The page shows who has control and how long the last switch took. If a switch
+fails, the robots hold and the policy stays stopped: press `Hand back` again or
+stop the trial. The safety envelope keeps watching force and the workspace box
+while you drive; a safety stop disengages the leader and ends the trial. The
+stale-plan check rests while you drive. `MAX_CONTACT_WRENCH` also limits the
+follower while you drive. After the rollout, teleoperation is still connected
+but stopped; start it again as usual.
+
+To switch from the leader arm itself, set a free digital input of the leader:
+`FLEXIV_TRAINER_ROLLOUT__TAKEOVER_TRIGGER_CHANNEL` (the input),
+`..._TAKEOVER_TRIGGER_ARM` (which arm's leader, default `0`),
+`..._TAKEOVER_TRIGGER_ACTIVE` (`high` or `low`) and
+`..._TAKEOVER_TRIGGER_DEBOUNCE_S` (default `0.05`). Each press toggles control.
+An input that a gripper trigger already uses is refused.
+
+In a recorded rollout, every line of `rollout_ticks.jsonl` says who had
+control (`policy`, `operator` or `switching`) and whether it was an
+intervention, and the tick where a switch finished carries its duration. While
+you drive, the `action` column holds what teleoperation records, so a corrected
+part reads like a demonstration. `rollout_outcome.json` counts the takeovers,
+the ticks and seconds you drove, and every switch's duration. B-spline policies
+cannot be taken over yet.
+
 ## Typical End-To-End Session
 
 For a normal session, the order is:

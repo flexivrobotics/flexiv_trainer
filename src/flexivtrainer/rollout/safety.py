@@ -149,6 +149,21 @@ class SafetyEnvelope:
                             f"outside [{a}, {b}]",
                         )
 
+    def check_measured_workspace(self, measured: Sequence[Sequence[float]]) -> None:
+        """Every arm's measured position inside the box: while an operator
+        drives the arm there is no command to check, only where it is."""
+        if self.workspace_min_m is None:
+            return
+        low, high = self.workspace_min_m, self.workspace_max_m
+        for arm, pose in enumerate(measured):
+            for axis, (value, a, b) in enumerate(zip(pose[:3], low, high)):
+                if not (a <= value <= b):
+                    raise SafetyStop(
+                        "workspace",
+                        f"arm {arm} measures {'xyz'[axis]}={value:.4f} m "
+                        f"outside [{a}, {b}]",
+                    )
+
     def check_reference(
         self, commanded: Sequence[Sequence[float]], measured: Sequence[Sequence[float]]
     ) -> None:

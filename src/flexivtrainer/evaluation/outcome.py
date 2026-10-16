@@ -109,6 +109,9 @@ class RolloutOutcome:
     safety: dict[str, Any] = field(default_factory=dict)
     verdict: Verdict | None = None
     checks: dict[str, Any] = field(default_factory=dict)
+    #: Leader-arm takeovers, when one was possible: {count, ticks, seconds,
+    #: switch_s}; switch_s holds every switch as {"to", "s"[, "error"]}.
+    interventions: dict[str, Any] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
     @property

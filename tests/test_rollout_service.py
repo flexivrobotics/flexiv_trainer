@@ -1604,9 +1604,10 @@ def test_overlapped_replan_forces_and_extends_committed_path(
     schedules: list[float] = []
     real_replace = WaypointExecutor.replace_waypoints
 
-    def _recording_replace(self, actions, target_times, now):
-        real_replace(self, actions, target_times, now)
+    def _recording_replace(self, actions, target_times, now, **kwargs):
+        installed = real_replace(self, actions, target_times, now, **kwargs)
         schedules.append(self._waypoints[-1].target_time - now)
+        return installed
 
     monkeypatch.setattr(WaypointExecutor, "replace_waypoints", _recording_replace)
 

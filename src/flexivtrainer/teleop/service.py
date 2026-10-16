@@ -91,6 +91,24 @@ class TeleopSnapshot:
     can_home: bool
     fault: str | None
     error: str | None
+    # A policy rollout is driving the robots through this connection.
+    lent: bool = False
+
+
+LENT_MESSAGE = "A policy rollout is using the robots; stop it first"
+
+
+@dataclass(frozen=True)
+class RolloutLease:
+    """The robots a rollout borrows from the teleop connection.
+
+    One entry per rollout arm, in the rollout's arm order: the TDK pair index
+    and that pair's leader and follower rdk::Robot handles.
+    """
+
+    pairs: tuple[int, ...]
+    leaders: tuple[Any, ...]
+    followers: tuple[Any, ...]
 
 
 class TeleopService:
@@ -136,6 +154,13 @@ class TeleopService:
         self._gripper_initializing = False
         self._gripper_init_lock = threading.Lock()
         self._gripper_move_lock = threading.Lock()
+        # Set while a rollout drives the robots through this connection. Every
+        # action that would move them is refused until the rollout returns it.
+        self._lease: RolloutLease | None = None
+        # The next Start must not move the follower end effectors before the
+        # operator actuates the leader trigger: the robots were last driven by
+        # a policy, which may have left a part in the jaws.
+        self._hold_end_effectors = False
 
     @staticmethod
     def _config_value(config: Any, name: str) -> Any:
@@ -426,6 +451,9 @@ class TeleopService:
         # force/torque sensors are zeroed during initialization (the robots must
         # be free of unexpected contact); when disabled the zeroing step is
         # skipped.
+        if self._lease is not None:
+            self._error = LENT_MESSAGE
+            return self.snapshot()
         self.initialize()
         if self._controller is None:
             return self.snapshot()
@@ -458,7 +486,10 @@ class TeleopService:
                 self._end_effectors.set_default_gripper_width(
                     self._get_gripper_default_width()
                 )
+                if self._hold_end_effectors:
+                    self._end_effectors.hold_until_trigger_change()
                 self._end_effectors.start()
+            self._hold_end_effectors = False
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
@@ -527,6 +558,8 @@ class TeleopService:
                 "ok": False,
                 "error": "Connect teleoperation before initializing grippers",
             }
+        if self._lease is not None:
+            return {"ok": False, "error": LENT_MESSAGE}
         if self._started:
             return {
                 "ok": False,
@@ -583,6 +616,9 @@ class TeleopService:
         # resume, so it is no longer the controlling process either way).
         if self._controller is None:
             return self.snapshot()
+        if self._lease is not None and not self._started:
+            # The rollout drives the followers; there is no teleop loop to stop.
+            return self.snapshot()
 
         # Stop the mirror thread first so it stops issuing follower commands;
         # best-effort so a mirror failure cannot block stopping the arms.
@@ -636,6 +672,9 @@ class TeleopService:
         # control loop to be running (Start() called), so guard on it.
         if self._controller is None:
             self._error = "Teleoperation controller is not initialized"
+            return self.snapshot()
+        if self._lease is not None:
+            self._error = LENT_MESSAGE
             return self.snapshot()
         if not self._started:
             self._error = "Start teleoperation before engaging the robots"
@@ -709,6 +748,8 @@ class TeleopService:
     def set_gripper_width(self, width: float) -> dict[str, Any]:
         """Tune every initialized gripper while the teleop loop is stopped."""
 
+        if self._lease is not None:
+            return {"ok": False, "error": LENT_MESSAGE}
         if self._started:
             return {
                 "ok": False,
@@ -738,6 +779,10 @@ class TeleopService:
     def shutdown(self) -> None:
         if self._controller is None:
             return
+        if self._lease is not None:
+            # Dropping the controller would destroy the robot handles the
+            # rollout is commanding.
+            raise RuntimeError(LENT_MESSAGE)
 
         # Disconnect / service reset fully releases the end effectors (enabled
         # grippers + cached params), which a teleop Stop deliberately keeps.
@@ -757,6 +802,160 @@ class TeleopService:
         self._engaged = False
         self._error = None
 
+    # --- lending the robots to a policy rollout ------------------------------
+    #
+    # A fresh RDK connection cannot coexist with this one on the same robots,
+    # so a rollout borrows the rdk::Robot handles that instances(idx) returns
+    # instead. Lending stops the teleop loop (the robots hold); the rollout
+    # then commands the followers directly, and can hand them to the leader
+    # arms and back with resume_for_takeover() / return_from_takeover().
+
+    def _pair_indices(self, follower_serials: list[str]) -> list[int] | str:
+        """The TDK pair index of each follower, or why there is none."""
+        pairs = [
+            pair
+            for pair in self._get_robot_pairs()
+            if pair.leader_serial and pair.follower_serial
+        ]
+        serials = [str(pair.follower_serial).strip() for pair in pairs]
+        indices: list[int] = []
+        for serial in follower_serials:
+            serial = str(serial).strip()
+            if serial not in serials:
+                return f"follower {serial} is not part of a teleoperation pair"
+            indices.append(serials.index(serial))
+        return indices
+
+    def lend_problem(self, follower_serials: list[str]) -> str | None:
+        """Why the rollout cannot borrow these followers, or None if it can."""
+        if self._controller is None or not self._initialized:
+            return "teleoperation is not connected"
+        if self._lease is not None:
+            return "another rollout already holds the robots"
+        if not callable(getattr(self._controller, "instances", None)):
+            return "the teleoperation controller does not expose its robots"
+        indices = self._pair_indices(follower_serials)
+        return indices if isinstance(indices, str) else None
+
+    def lend_to_rollout(self, follower_serials: list[str]) -> RolloutLease:
+        """Stop the teleop loop and hand its robot handles to a rollout.
+
+        Uses this service's own stop path, so the snapshot, the mirror thread
+        and the flags stay consistent; the connection itself stays up.
+        """
+        problem = self.lend_problem(follower_serials)
+        if problem is not None:
+            raise RuntimeError(f"Cannot lend the robots: {problem}")
+        indices = self._pair_indices(follower_serials)
+        assert not isinstance(indices, str)
+        snapshot = self.stop()
+        if snapshot.error:
+            raise RuntimeError(f"Failed to stop teleoperation: {snapshot.error}")
+        leaders: list[Any] = []
+        followers: list[Any] = []
+        for idx in indices:
+            handles = self._controller.instances(idx)
+            if not isinstance(handles, tuple | list) or len(handles) < 2:
+                raise RuntimeError(
+                    f"Teleoperation pair {idx} did not report a leader and follower"
+                )
+            leaders.append(handles[0])
+            followers.append(handles[1])
+        lease = RolloutLease(tuple(indices), tuple(leaders), tuple(followers))
+        self._lease = lease
+        self._hold_end_effectors = True
+        return lease
+
+    def release_lease(self, lease: RolloutLease) -> None:
+        """Take the robots back from a finished rollout; teleop stays stopped."""
+        if self._lease is not lease:
+            return
+        if self._started:
+            self.stop()
+        self._lease = None
+
+    def resume_for_takeover(
+        self,
+        lease: RolloutLease,
+        *,
+        max_contact_wrench: list[float] | None = None,
+    ) -> None:
+        """Give the lent followers to the leader arms, mid-rollout.
+
+        Init() WITHOUT zeroing the force sensors -- the tool may be in contact,
+        and zeroing then would offset every later force reading -- then
+        Start(), then Engage() each pair. The follower mimics the leader's
+        relative motion, so no leader-to-follower matching is needed first.
+        The end effectors keep their state until the leader trigger moves.
+        Raises on failure, with the teleop loop stopped (the robots hold).
+        """
+        if self._lease is not lease or self._controller is None:
+            raise RuntimeError("The rollout no longer holds the robots")
+        if ZeroFTSensor is None:
+            # Init() without the flag would use the controller's default,
+            # which may zero the sensors.
+            raise RuntimeError(
+                "The installed flexivtdk cannot start teleoperation without "
+                "zeroing the force sensors"
+            )
+        controller = self._controller
+        try:
+            controller.Init(zero_ft_sensor=ZeroFTSensor.Disable)
+            if max_contact_wrench is not None:
+                for idx in lease.pairs:
+                    controller.SetFollowerMaxContactWrench(
+                        idx, [float(v) for v in max_contact_wrench]
+                    )
+            # From here the loop may be running, so a failure must stop it.
+            self._started = True
+            controller.Start()
+            for idx in lease.pairs:
+                controller.Engage(idx, True)
+            self._engaged = True
+            self._error = None
+            self._ensure_end_effectors()
+            if self._end_effectors is not None:
+                self._end_effectors.hold_until_trigger_change()
+                self._end_effectors.start()
+        except Exception:
+            if self._started:
+                self.stop()
+            raise
+
+    def return_from_takeover(self, lease: RolloutLease) -> None:
+        """Take the followers back from the leader arms: disengage, then Stop().
+
+        Stop() blocks until the robots hold their pose. Raises on failure; the
+        loop is stopped whatever happens.
+        """
+        if self._lease is not lease:
+            raise RuntimeError("The rollout no longer holds the robots")
+        if not self._started:
+            return
+        errors: list[str] = []
+        for idx in lease.pairs:
+            try:
+                self._controller.Engage(idx, False)
+            except Exception as exc:
+                errors.append(
+                    f"pair {idx} did not disengage: {describe_exception(exc)}"
+                )
+        self._engaged = False
+        snapshot = self.stop()
+        if snapshot.error:
+            errors.append(snapshot.error)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def gripper_targets_by_index(self) -> dict[int, float]:
+        """The last gripper width the leader trigger commanded, by pair index."""
+        commands = self._gripper_commands_by_index()
+        return {
+            index: float(command["target_width"])
+            for index, command in commands.items()
+            if command.get("target_width") is not None
+        }
+
     @staticmethod
     def _pair_robot_label(idx: int, position: int, count: int) -> str:
         """``instances(idx)`` yields (leader, follower), in that order."""
@@ -770,6 +969,8 @@ class TeleopService:
                 {"ok": False, "error": "Teleoperation controller is not initialized"},
                 None,
             )
+        if self._lease is not None:
+            return ({"ok": False, "error": LENT_MESSAGE}, None)
         if self._started:
             # The UI gates these buttons behind Stop, but a running control loop
             # would fight the primitive mode, so guard here as well.
@@ -1099,7 +1300,8 @@ class TeleopService:
             started=started,
             stopped=stopped,
             engaged=engaged,
-            can_home=can_home,
+            can_home=can_home and self._lease is None,
             fault=fault,
             error=self._error,
+            lent=self._lease is not None,
         )

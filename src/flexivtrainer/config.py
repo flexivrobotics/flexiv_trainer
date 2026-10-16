@@ -213,8 +213,20 @@ class RolloutLoopConfig(BaseModel):
     # targets at a stiffer K press proportionally harder.
     cartesian_stiffness: tuple[float, float, float, float, float, float] | None = None
     # The controller's own contact-wrench ceiling, [fx, fy, fz] N then
-    # [mx, my, mz] N*m; unset keeps the controller's default.
+    # [mx, my, mz] N*m; unset keeps the controller's default. It also limits
+    # the follower while an operator has taken over with the leader arm.
     max_contact_wrench: tuple[float, float, float, float, float, float] | None = None
+    # Leader-arm takeover (rollout/takeover.py): an optional leader digital
+    # input that toggles control between the policy and the operator, besides
+    # the page's button. It must not be a channel a gripper trigger uses.
+    takeover_trigger_channel: int | None = Field(default=None, ge=0, le=15)
+    # Which arm's leader has it, by its position among the rollout's arms.
+    takeover_trigger_arm: int = Field(default=0, ge=0)
+    # The input level that means "pressed".
+    takeover_trigger_active: Literal["high", "low"] = "high"
+    # A press counts once the input has held for this long, so contact
+    # bounce does not toggle twice.
+    takeover_trigger_debounce_s: float = Field(default=0.05, ge=0, le=1.0)
 
 
 class EndEffectorSideConfig(BaseModel):

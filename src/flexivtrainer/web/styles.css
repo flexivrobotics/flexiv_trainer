@@ -4484,6 +4484,24 @@ input[type="range"]:focus-visible::-moz-range-thumb {
     margin: 0;
 }
 
+.rollout-takeover {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.rollout-takeover:empty {
+    display: none;
+}
+
+.rollout-takeover .rollout-verdict {
+    margin: 0;
+}
+
+.rollout-takeover-reason {
+    color: var(--ink-3);
+}
+
 .rollout-status {
     display: flex;
     align-items: center;

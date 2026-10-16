@@ -145,6 +145,9 @@ class GripperExecutor:
         self._error: Exception | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # While paused (an operator has the arm) no target is sent; the jaws'
+        # state is still read for the recording.
+        self._paused = False
 
     @staticmethod
     def _config_for_side(configs: Mapping[str, Any], side: str) -> Any:
@@ -343,6 +346,26 @@ class GripperExecutor:
         with self._lock:
             self._pending.update(updates)
 
+    def pause(self) -> None:
+        """Drop pending targets and send none until resume().
+
+        Returns only after a command already under way has finished.
+        """
+        with self._lock:
+            self._paused = True
+            self._pending = {}
+        for lock in self._io_locks.values():
+            with lock:
+                pass
+
+    def resume(self) -> None:
+        """Send again. What was last sent is forgotten: the operator may have
+        moved the jaws since, so the policy's next target always goes out."""
+        with self._lock:
+            self._pending = {}
+            self._last_sent = {}
+            self._paused = False
+
     def start(self) -> None:
         if self._thread is not None:
             return
@@ -395,7 +418,10 @@ class GripperExecutor:
         with self._lock:
             pending = self._pending
             self._pending = {}
-        if self._target_source is not None:
+            paused = self._paused
+        if paused:
+            pending = {}
+        elif self._target_source is not None:
             pending.update(self._target_source())
         for side, target in pending.items():
             params = self._params[side]
@@ -411,8 +437,11 @@ class GripperExecutor:
                 continue
             velocity, force = self._move_parameters(side)
             with self._io_locks[side]:
+                with self._lock:
+                    if self._paused:
+                        break
                 self._grippers[side].Move(width, velocity, force)
-            self._last_sent[side] = width
+                self._last_sent[side] = width
         self._refresh_states()
 
     def _validate_command_parameters(self) -> None:

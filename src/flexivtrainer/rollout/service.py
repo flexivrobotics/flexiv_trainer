@@ -71,6 +71,7 @@ from flexivtrainer.rollout.recorder import RecordingPlan, RolloutRecorder
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
 from flexivtrainer.rollout.safety import SafetyEnvelope
+from flexivtrainer.rollout.takeover import LeaderTrigger, Takeover, TakeoverRefused
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
 _ROLLOUT_OVERRIDES = {
@@ -96,6 +97,30 @@ class TrialContext:
 
 def _as_list(values: Any) -> list[float] | None:
     return None if values is None else [float(v) for v in values]
+
+
+def _takeover_wrench(settings: AppSettings) -> list[float] | None:
+    """The contact-wrench ceiling, also applied to the follower under the
+    leader arm (SetFollowerMaxContactWrench takes the same six numbers)."""
+    return _as_list(settings.rollout.max_contact_wrench)
+
+
+def _borrowed_factory(
+    followers: list[str], handles: tuple[Any, ...]
+) -> Callable[[str], Any]:
+    """A robot factory that hands out the teleop connection's own handles."""
+    by_serial = dict(zip(followers, handles, strict=True))
+
+    def borrow(serial: str) -> Any:
+        robot = by_serial[serial]
+        # Stop() leaves the arm holding in IDLE, the mode the rollout starts
+        # from (gripper preparation requires it); the teleop loop is stopped.
+        stop = getattr(robot, "Stop", None)
+        if callable(stop):
+            stop()
+        return robot
+
+    return borrow
 
 
 def _episode_name(trial: TrialContext | None) -> str:
@@ -187,6 +212,10 @@ class RolloutService:
         self._recording: dict[str, Any] | None = None
         # The recorded rollout whose verdict is still to be given.
         self._awaiting: dict[str, Any] | None = None
+        # Leader-arm takeover of the current or last rollout, or why the
+        # current one has none.
+        self._takeover: Takeover | None = None
+        self._takeover_reason: str | None = None
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -215,6 +244,7 @@ class RolloutService:
                 "send_twist_default": bool(self._settings.rollout.send_twist),
                 "safety": self._safety.describe() if self._safety is not None else None,
                 "recording": self._recording_status(),
+                "takeover": self._takeover_status(),
                 "awaiting_verdict": self._public_awaiting(),
                 "task": self._task,
                 "error": self._error,
@@ -268,7 +298,7 @@ class RolloutService:
             if self._running:
                 raise RuntimeError("Rollout is already running")
 
-        self._preflight_teleop()
+        lend, takeover_reason = self._preflight_teleop(self._follower_serials())
 
         checkpoint_origin = checkpoint_path
         try:
@@ -300,11 +330,7 @@ class RolloutService:
         sides = self._get_active_sides()
         camera_names = self._get_active_cameras()
         self._preflight_cameras(camera_names)
-        followers = [
-            pair.follower_serial
-            for pair in self._get_robot_pairs()
-            if pair.follower_serial
-        ]
+        followers = self._follower_serials()
         if not followers:
             raise RuntimeError("No follower robot serial is configured")
 
@@ -421,6 +447,11 @@ class RolloutService:
                 )
             self._apply_n_action_steps(policy, rollout_cfg)
 
+        trigger_arm: int | None = None
+        if bspline_layout is not None:
+            takeover_reason = "B-spline policies cannot be taken over yet"
+        elif lend:
+            trigger_arm = self._preflight_takeover_trigger(sides)
         safety = SafetyEnvelope.from_settings(self._settings.rollout)
         effective_twist = (
             self._settings.rollout.send_twist
@@ -432,20 +463,47 @@ class RolloutService:
         # clearing a shared one can no longer un-stop it.
         self._stop_event = threading.Event()
         robots: list[Any] = []
+        lease: Any = None
         try:
+            robot_factory = self._robot_factory
+            if lend:
+                # The teleop connection already holds these robots; a second
+                # RDK connection cannot. Borrow its handles instead.
+                lease = self._teleop.lend_to_rollout(followers)
+                robot_factory = _borrowed_factory(followers, lease.followers)
+                self._append_log(
+                    "INFO",
+                    "ROLLOUT",
+                    "Borrowed the robots from teleoperation",
+                    "teleoperation stopped; it stays connected",
+                )
             for serial in followers:
                 robots.append(
                     hardware.connect_robot(
-                        self._robot_factory,
+                        robot_factory,
                         serial,
                         self._stop_event,
                     )
                 )
         except Exception as exc:
             hardware.stop_robots(robots)
+            if lease is not None:
+                self._teleop.release_lease(lease)
             raise RuntimeError(
                 f"Failed to connect to robot: {describe_exception(exc)}"
             ) from exc
+
+        takeover: Takeover | None = None
+        if lease is not None and bspline_layout is None:
+            takeover = Takeover(
+                teleop=self._teleop,
+                lease=lease,
+                sides=sides,
+                max_contact_wrench=_takeover_wrench(self._settings),
+                append_log=self._append_log,
+            )
+            if trigger_arm is not None:
+                self._attach_takeover_trigger(takeover, lease, trigger_arm)
 
         app_rollout = self._settings.rollout
         motion_limits = (
@@ -467,6 +525,8 @@ class RolloutService:
                 send_twist=effective_twist,
                 safety=safety,
             )
+        if recording is not None:
+            recording["takeover"] = takeover
         on_finished = partial(self._on_runner_finished, recording=recording)
         runner: WaypointRunner | BSplineRunner
         try:
@@ -496,7 +556,7 @@ class RolloutService:
                     on_error=self._on_runner_error,
                     on_cleanup_error=self._on_runner_cleanup_error,
                     on_finished=self._on_runner_finished,
-                    release_robots=self._make_release_robots(robots),
+                    release_robots=self._make_release_robots(robots, lease),
                     stop_robots=hardware.stop_robots,
                     prepare_motion=self._prepare_motion,
                     gripper_default_width_m=gripper_default_width_m,
@@ -537,7 +597,7 @@ class RolloutService:
                     on_error=self._on_runner_error,
                     on_cleanup_error=self._on_runner_cleanup_error,
                     on_finished=on_finished,
-                    release_robots=self._make_release_robots(robots),
+                    release_robots=self._make_release_robots(robots, lease),
                     stop_robots=hardware.stop_robots,
                     prepare_policy=(
                         partial(act_policy.compile_model, mode=compile_mode)
@@ -554,14 +614,20 @@ class RolloutService:
                     send_twist=effective_twist,
                     cartesian_stiffness=app_rollout.cartesian_stiffness,
                     max_contact_wrench=app_rollout.max_contact_wrench,
+                    takeover=takeover,
+                    action_names=waypoint_action_names,
                 )
                 if recording is not None:
                     recording["runner"] = runner
+                if takeover is not None:
+                    takeover.bind(runner)
 
         except BaseException:
             # A runner that never started leaves no trial behind.
             if recording is not None:
                 recording["recorder"].abort()
+            if lease is not None:
+                self._teleop.release_lease(lease)
             raise
 
         with self._lock:
@@ -569,6 +635,8 @@ class RolloutService:
             self._safety = safety if bspline_layout is None else None
             self._trial = trial
             self._recording = recording
+            self._takeover = takeover
+            self._takeover_reason = None if takeover is not None else takeover_reason
             self._checkpoint_path = checkpoint_path
             self._checkpoint_repo_id = repo_id if source == "hub" else None
             self._task = task
@@ -673,6 +741,8 @@ class RolloutService:
                 )
         self._runner = runner
         runner.start()
+        if takeover is not None:
+            takeover.start_trigger()
         return self.status()
 
     # --- recording, verdicts and evaluation sessions -----------------------
@@ -741,11 +811,13 @@ class RolloutService:
         with self._lock:
             error = self._error
         try:
+            takeover: Takeover | None = recording.get("takeover")
             destination, outcome, saved = recording["recorder"].finish(
                 stop_reason=stop_reason,
                 error=error,
                 steps=steps,
                 safety_stop=getattr(runner, "safety_stop", None),
+                interventions=takeover.summary() if takeover is not None else None,
             )
         except Exception as exc:  # pragma: no cover - defensive
             detail = describe_exception(exc)
@@ -798,6 +870,96 @@ class RolloutService:
             write_outcome(destination, scored)
         except Exception as exc:  # a check must never lose a trial
             warn("Automatic checks were not scored", describe_exception(exc))
+
+    # --- leader-arm takeover ---------------------------------------------------
+
+    def _takeover_status(self) -> dict[str, Any]:
+        takeover = self._takeover
+        if takeover is not None and self._running and not self._stopping:
+            return takeover.status()
+        last = takeover.status()["last_switch"] if takeover is not None else None
+        return {
+            "available": False,
+            "state": None,
+            "control": "policy" if self._running else None,
+            "error": None,
+            "count": 0,
+            "last_switch": last,
+            "action": None,
+            "reason": (
+                self._takeover_reason or "The leader arm cannot take over"
+                if self._running
+                else "No rollout is running"
+            ),
+            "trigger_channel": None,
+        }
+
+    def _active_takeover(self) -> Takeover:
+        with self._lock:
+            running = self._running and not self._stopping
+            takeover, reason = self._takeover, self._takeover_reason
+        if not running:
+            raise TakeoverRefused("No rollout is running")
+        if takeover is None:
+            raise TakeoverRefused(reason or "The leader arm cannot take over")
+        return takeover
+
+    def take_over(self) -> dict[str, Any]:
+        """Stop the policy and give the follower to the leader arm."""
+        self._active_takeover().take_over()
+        return self.status()
+
+    def hand_back(self) -> dict[str, Any]:
+        """Give the follower back to the policy."""
+        self._active_takeover().hand_back()
+        return self.status()
+
+    def _preflight_takeover_trigger(self, sides: list[str]) -> int | None:
+        """The arm whose leader input toggles control, after checking it."""
+        rollout = self._settings.rollout
+        channel = rollout.takeover_trigger_channel
+        if channel is None:
+            return None
+        arm = rollout.takeover_trigger_arm
+        if arm >= len(sides):
+            raise RuntimeError(
+                f"takeover_trigger_arm {arm} is not one of the rollout's "
+                f"{len(sides)} arm(s)"
+            )
+        config = (self._get_end_effector_config() or {}).get(sides[arm])
+        if (
+            config is not None
+            and self._config_value(config, "leader") == "digital_input"
+            and self._config_value(config, "leader_channel") == channel
+        ):
+            raise RuntimeError(
+                f"takeover_trigger_channel {channel} is the gripper trigger of the "
+                f"{sides[arm]} leader; choose another channel"
+            )
+        return arm
+
+    def _attach_takeover_trigger(
+        self, takeover: Takeover, lease: Any, arm: int
+    ) -> None:
+        rollout = self._settings.rollout
+        read_inputs = getattr(lease.leaders[arm], "digital_inputs", None)
+        if not callable(read_inputs):
+            self._append_log(
+                "WARN",
+                "TAKEOVER",
+                "The takeover trigger is off",
+                "the leader robot does not report its digital inputs",
+            )
+            return
+        takeover.attach_trigger(
+            LeaderTrigger(
+                read_inputs,
+                int(rollout.takeover_trigger_channel),
+                takeover.toggle,
+                active_high=rollout.takeover_trigger_active == "high",
+                debounce_s=rollout.takeover_trigger_debounce_s,
+            )
+        )
 
     def _recording_status(self) -> dict[str, Any] | None:
         recording = self._recording
@@ -1047,16 +1209,40 @@ class RolloutService:
         snapshot = self._teleop.snapshot()
         return bool(getattr(snapshot, "initialized", False))
 
-    def _preflight_teleop(self) -> None:
-        """Drop teleop before RDK claims the followers.
+    def _follower_serials(self) -> list[str]:
+        return [
+            pair.follower_serial
+            for pair in self._get_robot_pairs()
+            if pair.follower_serial
+        ]
+
+    def _preflight_teleop(self, followers: list[str]) -> tuple[bool, str]:
+        """Decide how the rollout reaches the followers.
+
+        Returns whether to borrow them from teleoperation, and otherwise why
+        the leader arm will not be able to take over.
 
         A fresh RDK connection cannot coexist with the TDK controller holding
-        the same follower's LAN connection. Disconnecting here rather than
-        refusing keeps the rollout to a single Start click.
+        the same follower's LAN connection. When the teleop connection can
+        lend its robot handles, the rollout borrows them at connect time (and
+        the leader arm can take over). Otherwise teleop is disconnected here
+        rather than refusing, which keeps the rollout to a single Start click.
         """
         if not self._teleop_initialized():
-            return
-        self._append_log("INFO", "ROLLOUT", "Disconnecting teleoperation")
+            return False, (
+                "Teleoperation was not connected when the rollout started; "
+                "connect it first to take over with the leader arm"
+            )
+        lend_problem = getattr(self._teleop, "lend_problem", None)
+        problem = (
+            lend_problem(followers)
+            if callable(lend_problem)
+            else "teleoperation cannot lend its robots"
+        )
+        if problem is None:
+            return True, ""
+        reason = f"The leader arm cannot take over: {problem}"
+        self._append_log("INFO", "ROLLOUT", "Disconnecting teleoperation", problem)
         try:
             self._teleop.shutdown()
         except Exception as exc:
@@ -1068,6 +1254,7 @@ class RolloutService:
                 "Failed to disconnect teleoperation: the service is still "
                 "connected and holds the robot connection."
             )
+        return False, reason
 
     def _started_cameras(self, status: dict[str, Any]) -> set[str]:
         entries = status.get("cameras") or {}
@@ -1351,11 +1538,15 @@ class RolloutService:
             robots, self._robots = self._robots, []
         hardware.stop_robots(robots)
 
-    def _make_release_robots(self, robots: list[Any]) -> Callable[[], None]:
+    def _make_release_robots(
+        self, robots: list[Any], lease: Any = None
+    ) -> Callable[[], None]:
         """Release only this run's robots.
 
         A planner thread that outlives its stop() would otherwise reach the
         shared list and stop the *next* run's robots from its own finally.
+        Borrowed robots go back to teleoperation, which stays connected and
+        stopped; the operator restarts it as usual.
         """
 
         def release() -> None:
@@ -1363,5 +1554,10 @@ class RolloutService:
                 if self._robots is robots:
                     self._robots = []
             hardware.stop_robots(robots)
+            if lease is not None:
+                try:
+                    self._teleop.release_lease(lease)
+                except Exception as exc:  # pragma: no cover - defensive
+                    warn("Teleoperation did not take the robots back", str(exc))
 
         return release
