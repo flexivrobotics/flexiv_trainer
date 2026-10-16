@@ -83,7 +83,7 @@ def test_only_discordant_pairs_decide_a_paired_comparison() -> None:
     assert paired_exact_p(0, 0) == 1.0
 
 
-def test_trial_counts_match_the_roadmap_table() -> None:
+def test_trial_counts_match_the_readme_table() -> None:
     """30 points: ~39 independent trials per arm, ~33 pairs; 20 points: ~80."""
     assert trials_to_detect(0.5, 0.8) == 39
     assert pairs_to_detect(0.3, 0.4) == 33
