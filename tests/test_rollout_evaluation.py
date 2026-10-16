@@ -583,3 +583,56 @@ def test_the_api_reports_no_rollout_waiting_as_a_conflict(tmp_path) -> None:
     assert client.get("/rollout/evaluations").json() == {"sessions": []}
     assert client.get("/rollout/evaluations/nope").status_code == 404
     assert client.post("/rollout/evaluations/nope/next").status_code == 404
+
+
+class _SpringRobot(_FakeRobot):
+    """A fake arm that also takes a stiffness and a contact-wrench ceiling."""
+
+    def __init__(self, serial: str) -> None:
+        super().__init__(serial)
+        self.calls: list[tuple] = []
+
+    def SwitchMode(self, mode) -> None:  # noqa: N802
+        super().SwitchMode(mode)
+        self.calls.append(("mode", mode))
+
+    def SetCartesianImpedance(self, stiffness) -> None:  # noqa: N802
+        self.calls.append(("stiffness", list(stiffness), len(self.commands)))
+
+    def SetMaxContactWrench(self, wrench) -> None:  # noqa: N802
+        self.calls.append(("wrench", list(wrench), len(self.commands)))
+
+
+def test_the_spring_is_set_in_its_mode_before_the_first_target(
+    tmp_path, fake_loop
+) -> None:
+    pytest.importorskip("lerobot")
+    robot = _SpringRobot("F1")
+    stiffness = (2900.0, 2900.0, 2900.0, 250.0, 250.0, 250.0)
+    wrench = (15.0, 25.0, 90.0, 10.0, 10.0, 10.0)
+
+    def configure(settings):
+        settings.rollout.cartesian_stiffness = stiffness
+        settings.rollout.max_contact_wrench = wrench
+
+    service = _service(tmp_path, _FakePolicy(_action()), robot, configure=configure)
+    _run_ticks(
+        service, robot, lambda: service.start(_checkpoint(tmp_path), record=True)
+    )
+    kinds = [call[0] for call in robot.calls]
+    assert kinds[-3:] == ["mode", "stiffness", "wrench"]
+    assert robot.calls[-2] == ("stiffness", list(stiffness), 0)
+    assert robot.calls[-1] == ("wrench", list(wrench), 0)
+    awaiting = _wait_for_verdict_slot(service)["awaiting_verdict"]
+    outcome = read_outcome(tmp_path / "rollouts" / "adhoc" / awaiting["episode"])
+    assert outcome.safety["cartesian_stiffness"] == list(stiffness)
+    assert outcome.safety["max_contact_wrench"] == list(wrench)
+
+
+def test_without_settings_the_controller_keeps_its_own_spring(
+    tmp_path, fake_loop
+) -> None:
+    robot = _SpringRobot("F1")
+    service = _service(tmp_path, _FakePolicy(_action()), robot)
+    _run_ticks(service, robot, lambda: service.start(_checkpoint(tmp_path)))
+    assert [call[0] for call in robot.calls] == ["mode"] * len(robot.calls)

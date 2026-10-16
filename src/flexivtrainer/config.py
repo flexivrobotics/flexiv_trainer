@@ -206,6 +206,15 @@ class RolloutLoopConfig(BaseModel):
     max_reference_offset_m: float | None = Field(default=None, gt=0)
     max_force_n: float | None = Field(default=None, gt=0)
     stale_plan_s: float | None = Field(default=None, gt=0)
+    # The controller's Cartesian stiffness for rollout, [x, y, z] N/m then
+    # [rx, ry, rz] N*m/rad; unset keeps the controller's default. A pose-target
+    # policy learns targets that sit F/K beyond where the arm ends up, so K must
+    # match the stiffness the demonstrations were recorded under: the same
+    # targets at a stiffer K press proportionally harder.
+    cartesian_stiffness: tuple[float, float, float, float, float, float] | None = None
+    # The controller's own contact-wrench ceiling, [fx, fy, fz] N then
+    # [mx, my, mz] N*m; unset keeps the controller's default.
+    max_contact_wrench: tuple[float, float, float, float, float, float] | None = None
 
 
 class EndEffectorSideConfig(BaseModel):

@@ -93,6 +93,10 @@ class TrialContext:
     failure_modes: tuple[str, ...]
 
 
+def _as_list(values: Any) -> list[float] | None:
+    return None if values is None else [float(v) for v in values]
+
+
 def _episode_name(trial: TrialContext | None) -> str:
     """Timestamp plus trial number. Never the checkpoint: a blind trial's
     directory name is shown to the operator."""
@@ -547,6 +551,8 @@ class RolloutService:
                     safety=safety,
                     recorder=recording["recorder"] if recording is not None else None,
                     send_twist=effective_twist,
+                    cartesian_stiffness=app_rollout.cartesian_stiffness,
+                    max_contact_wrench=app_rollout.max_contact_wrench,
                 )
                 if recording is not None:
                     recording["runner"] = runner
@@ -596,7 +602,11 @@ class RolloutService:
                         "ROLLOUT",
                         "Safety envelope",
                         f"{safety.describe()}; velocity feedforward "
-                        f"{'on' if effective_twist else 'off'}",
+                        f"{'on' if effective_twist else 'off'}; stiffness "
+                        + str(
+                            _as_list(app_rollout.cartesian_stiffness)
+                            or "controller default"
+                        ),
                     )
                 )
             if recording is not None:
@@ -680,6 +690,7 @@ class RolloutService:
         safety: SafetyEnvelope,
     ) -> dict[str, Any]:
         storage = self._settings.storage
+        rollout = self._settings.rollout
         session = trial.session if trial is not None else ADHOC_SESSION
         episode = _episode_name(trial)
         destination = storage.rollouts_root / session / episode
@@ -708,7 +719,11 @@ class RolloutService:
             arm=trial.arm if trial is not None else None,
             condition=trial.condition if trial is not None else None,
             send_twist=send_twist,
-            safety=safety.to_dict(),
+            safety={
+                **safety.to_dict(),
+                "cartesian_stiffness": _as_list(rollout.cartesian_stiffness),
+                "max_contact_wrench": _as_list(rollout.max_contact_wrench),
+            },
         )
         return {
             "recorder": RolloutRecorder(plan, outcome),
@@ -1303,7 +1318,14 @@ class RolloutService:
             )
 
     def _prepare_motion(self, robot: Any, serial: str) -> None:
-        hardware.prepare_robot_motion(robot, serial, self._stop_event, self._append_log)
+        hardware.prepare_robot_motion(
+            robot,
+            serial,
+            self._stop_event,
+            self._append_log,
+            stiffness=self._settings.rollout.cartesian_stiffness,
+            max_contact_wrench=self._settings.rollout.max_contact_wrench,
+        )
 
     def _release_robots(self) -> None:
         with self._lock:

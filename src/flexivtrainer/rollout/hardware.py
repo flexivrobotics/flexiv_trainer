@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from flexivtrainer.observability import describe_exception, warn
@@ -94,11 +94,32 @@ def prepare_robot_motion(
     serial: str,
     stop_event: threading.Event,
     append_log: Callable[[str, str, str, str], None],
+    *,
+    stiffness: Sequence[float] | None = None,
+    max_contact_wrench: Sequence[float] | None = None,
 ) -> None:
+    """Zero the F/T sensor, enter Cartesian motion-force mode, set the spring.
+
+    The stiffness is set in the mode it applies to and before any pose is
+    sent: the first target is already interpreted through it.
+    """
     if _zero_ft_sensor(robot, stop_event):
         append_log("INFO", "ROLLOUT", "F/T sensor zeroed", serial)
     mode = _rdk_mode()
     robot.SwitchMode(mode.NRT_CARTESIAN_MOTION_FORCE)
+    if stiffness is not None:
+        robot.SetCartesianImpedance([float(v) for v in stiffness])
+        append_log(
+            "INFO", "ROLLOUT", "Cartesian stiffness set", f"{serial} {list(stiffness)}"
+        )
+    if max_contact_wrench is not None:
+        robot.SetMaxContactWrench([float(v) for v in max_contact_wrench])
+        append_log(
+            "INFO",
+            "ROLLOUT",
+            "Contact wrench limit set",
+            f"{serial} {list(max_contact_wrench)}",
+        )
 
 
 def stop_robots(robots: list[Any]) -> None:

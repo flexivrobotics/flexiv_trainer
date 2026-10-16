@@ -472,6 +472,16 @@ away pushes with stiffness times 2 cm, so set the reference offset above the
 largest offset your task presses with. Safety stops are recorded in the
 outcome. The envelope applies to waypoint policies, not yet to B-spline ones.
 
+### Stiffness
+
+A pose-target policy learns targets that sit beyond where the arm ends up, by
+force divided by stiffness. Roll it out at the stiffness its demonstrations were
+recorded under, or the same targets press harder. Set the controller's spring
+and contact-wrench ceiling for rollouts with
+`FLEXIV_TRAINER_ROLLOUT__CARTESIAN_STIFFNESS` (`[kx,ky,kz,krx,kry,krz]`, N/m and
+N·m/rad) and `FLEXIV_TRAINER_ROLLOUT__MAX_CONTACT_WRENCH` (N and N·m). Unset,
+the controller's defaults apply. Both are recorded in each rollout's outcome.
+
 ## Typical End-To-End Session
 
 For a normal session, the order is:

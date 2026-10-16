@@ -105,6 +105,8 @@ class WaypointRunner:
         safety: SafetyEnvelope | None = None,
         recorder: RolloutRecorder | None = None,
         send_twist: bool = True,
+        cartesian_stiffness: Any = None,
+        max_contact_wrench: Any = None,
     ) -> None:
         self._safety = safety or SafetyEnvelope()
         self._recorder = recorder
@@ -164,7 +166,14 @@ class WaypointRunner:
                 executor_factory=GripperExecutor,
             )
             for serial, robot in zip(followers, robots, strict=True):
-                hardware.prepare_robot_motion(robot, serial, stop_event, append_log)
+                hardware.prepare_robot_motion(
+                    robot,
+                    serial,
+                    stop_event,
+                    append_log,
+                    stiffness=cartesian_stiffness,
+                    max_contact_wrench=max_contact_wrench,
+                )
         except Exception as exc:
             if gripper is not None:
                 gripper.stop()
