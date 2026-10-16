@@ -41,6 +41,7 @@ from flexivtrainer.policies import act as act_policy
 from flexivtrainer.policies import bspline_diffusion as bspline_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
+from flexivtrainer.policies import import_policy_plugins
 from flexivtrainer.rollout import hardware
 from flexivtrainer.rollout.checkpoint import (
     _checkpoint_target_hz,
@@ -303,6 +304,7 @@ class RolloutService:
             raise RuntimeError("No follower robot serial is configured")
 
         try:
+            import_policy_plugins(self._settings.policies.plugin_packages)
             policy, preprocessor, postprocessor = self._policy_loader(
                 checkpoint_path, device
             )

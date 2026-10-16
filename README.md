@@ -369,6 +369,24 @@ Datasets are only ever recorded in rotation-6D, so this affects rollout of older
 checkpoints, not new recordings. Datasets recorded before the change are
 converted on read when they are used as B-spline training targets.
 
+## Policy Types From Other Packages
+
+A policy family maintained outside this repository registers its LeRobot policy
+type when its package is imported. List the package so rollout imports it
+before loading a checkpoint. Give such types their own rollout settings, which
+otherwise default to chunked execution:
+
+```bash
+export FLEXIV_TRAINER_POLICIES__PLUGIN_PACKAGES='["my_models.family_a"]'
+# For a policy that blends its chunks itself when stepped every tick:
+export FLEXIV_TRAINER_POLICIES__PLUGIN_ROLLOUT__N_ACTION_STEPS=1
+export FLEXIV_TRAINER_POLICIES__PLUGIN_ROLLOUT__REPLAN_STEPS=0
+```
+
+The package must be installed in the same environment as the trainer, and its
+checkpoints must carry the standard `policy_preprocessor.json` and
+`policy_postprocessor.json`.
+
 ## Record And Evaluate Rollouts
 
 A training loss says how well a policy imitates its demonstrations, not how
