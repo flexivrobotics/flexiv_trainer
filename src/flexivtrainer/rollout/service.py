@@ -27,6 +27,7 @@ from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.data.lerobot_io import active_camera_names
+from flexivtrainer.evaluation.checks import read_ticks, run_checks
 from flexivtrainer.evaluation.outcome import (
     DEFAULT_FAILURE_MODES,
     RolloutOutcome,
@@ -754,6 +755,9 @@ class RolloutService:
                 recording["error"] = detail
             return
         trial: TrialContext | None = recording.get("trial")
+        if trial is not None:
+            # Before `_awaiting` is set, so no verdict can be written meanwhile.
+            self._score_checks(destination, outcome, trial.session)
         with self._lock:
             recording["saving"] = False
             recording["path"] = str(destination)
@@ -779,6 +783,21 @@ class RolloutService:
                     f"{outcome.dropped_frames} dropped; waiting for a verdict",
                 )
             )
+
+    def _score_checks(
+        self, destination: Path, outcome: RolloutOutcome, session: str
+    ) -> None:
+        """Score the session's automatic checks on this trial's tick log."""
+        try:
+            store = SessionStore(self._settings.storage.rollouts_root)
+            checks = store.plan(session).checks
+            if not checks:
+                return
+            results = run_checks(checks, read_ticks(destination))
+            scored = replace(outcome, checks={**outcome.checks, **results})
+            write_outcome(destination, scored)
+        except Exception as exc:  # a check must never lose a trial
+            warn("Automatic checks were not scored", describe_exception(exc))
 
     def _recording_status(self) -> dict[str, Any] | None:
         recording = self._recording

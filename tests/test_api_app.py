@@ -30,7 +30,7 @@ def test_root_serves_packaged_ui() -> None:
 
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "/static/app.js?v=20261015-rollout-eval" in response.text
+    assert "/static/app.js?v=20261016-rollout-checks" in response.text
 
 
 def test_docs_route_is_available() -> None:

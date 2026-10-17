@@ -7798,6 +7798,10 @@ function formatRate(entry) {
     return `${entry.successes}/${entry.trials} · ${pct(entry.rate)} (${pct(low)}–${pct(high)})`;
 }
 
+function formatAgreement(entry) {
+    return formatRate(entry && { ...entry, successes: entry.agree });
+}
+
 function renderRolloutEvaluation() {
     const panel = byId("rollout-evaluation");
     if (!panel) {
@@ -7847,6 +7851,9 @@ function renderRolloutEvaluation() {
         state.rolloutVerdictOutcome === value ? " rollout-eval-outcome--active" : ""
     }" data-outcome="${value}" ${state.rolloutVerdictBusy ? "disabled" : ""}>${label}</button>`;
     const arms = (progress && progress.summary && progress.summary.arms) || {};
+    // Shown only as totals over judged trials, never for the trial awaiting a
+    // verdict: the operator must judge without the check's answer in view.
+    const checks = (progress && progress.summary && progress.summary.checks) || {};
 
     panel.innerHTML = `
         <div class="panel-header"><h3>Recording &amp; Evaluation</h3></div>
@@ -7890,6 +7897,13 @@ function renderRolloutEvaluation() {
                 <thead><tr><th>Arm</th><th>Success (95% CI)</th><th>Unclear</th></tr></thead>
                 <tbody>${Object.entries(arms).map(([arm, entry]) => `<tr><td>${escapeHtml(arm)}</td><td>${
                     escapeHtml(formatRate(entry))}</td><td>${entry.unknown || 0}</td></tr>`).join("")}</tbody>
+            </table>` : ""}
+        ${Object.keys(checks).length ? `
+            <table class="rollout-eval-summary">
+                <thead><tr><th>Check</th><th>Agrees with verdict (95% CI)</th><th>Passed a failure</th><th>Failed a success</th></tr></thead>
+                <tbody>${Object.entries(checks).map(([name, entry]) => `<tr><td>${escapeHtml(name)}</td><td>${
+                    escapeHtml(formatAgreement(entry))}</td><td>${entry.passed_but_failure || 0}</td><td>${
+                    entry.failed_but_success || 0}</td></tr>`).join("")}</tbody>
             </table>` : ""}
     `;
 

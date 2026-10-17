@@ -450,6 +450,49 @@ arms on the same conditions, with an exact p-value. As a guide, telling 50%
 from 80% takes about 33 paired trials, or about 39 per arm unpaired. Telling
 60% from 80% takes about 80 per arm.
 
+### Automatic checks
+
+A session can also declare checks: yes/no questions the robot's own
+measurements can answer, scored from each trial's `rollout_ticks.jsonl` when
+its recording is saved. Today there is one kind, `settled_in_box`: the tool
+comes to rest inside a box, in the arm's base frame, for at least `hold_s`.
+
+```json
+"checks": {
+  "placed": {
+    "kind": "settled_in_box",
+    "box_min_m": [0.40, -0.05, 0.10],
+    "box_max_m": [0.44, -0.01, 0.12],
+    "hold_s": 0.5,
+    "max_speed_m_s": 0.003,
+    "when": "any"
+  }
+}
+```
+
+`when` is `any` (at any point in the rollout) or `end` (still there when the
+rollout ends). `arm` picks an arm by its position in the tick log; the default
+is the first.
+
+Your verdict stays the measurement. The panel shows how often each check
+agrees with the verdicts, how many failures it passed and how many successes
+it failed. It never shows a check's answer for the trial you are judging,
+because a judge who sees the machine's answer first is no longer independent.
+A check that agrees with you over enough trials can then stand in for you, for
+example as the reward for learning on the robot.
+
+To tune a check's thresholds on trials you have already judged, without
+running the robot again:
+
+```bash
+python -m flexivtrainer.evaluation.rescore <session>                       # the plan's checks
+python -m flexivtrainer.evaluation.rescore <session> --checks other.json   # try other values
+python -m flexivtrainer.evaluation.rescore <session> --checks other.json --write
+```
+
+Without `--write` nothing on disk changes. With it, each trial's outcome gets
+the new results; verdicts are never touched.
+
 ### Velocity feedforward and the safety envelope
 
 `Send velocity feedforward` streams the policy's predicted twist to the
