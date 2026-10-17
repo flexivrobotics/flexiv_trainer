@@ -75,13 +75,17 @@ class _Runner(Protocol):
     """What a takeover needs from the rollout runner."""
 
     @property
-    def ready(self) -> bool: ...
+    def ready(self) -> bool:
+        """Whether the policy has sent its first plan."""
 
-    def pause_policy(self) -> None: ...
+    def pause_policy(self) -> None:
+        """Stop the policy; no policy command reaches the robots after this."""
 
-    def reclaim(self) -> None: ...
+    def reclaim(self) -> None:
+        """Take the followers back into the rollout's control mode."""
 
-    def resume_policy(self) -> None: ...
+    def resume_policy(self) -> None:
+        """Let the policy command again, planning afresh."""
 
 
 def _vector(source: Any, field: str) -> list[float] | None:

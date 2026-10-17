@@ -54,12 +54,14 @@ from flexivtrainer.rollout.takeover import (
     TakeoverRefused,
     operator_action,
 )
-from flexivtrainer.teleop.service import LENT_MESSAGE, TeleopService
 
 # --- fakes ----------------------------------------------------------------------------
 
 BASE_X = 0.4
 STEP_X = 1e-4
+# Slack for comparing a measured duration with a sleep: Windows' monotonic
+# clock ticks about every 16 ms, so a 0.3 s sleep can measure as 0.297 s.
+CLOCK_SLACK_S = 0.05
 
 
 def _call_of(pose) -> int:
@@ -271,7 +273,7 @@ def make_rig(tmp_path, monkeypatch):
         leader, follower = _Arm("L1", log), _Arm("F1", log)
         tdk = _TDK(leader, follower, log)
         configs = dict(end_effector or {})
-        teleop = TeleopService(
+        teleop = teleop_module.TeleopService(
             settings,
             get_robot_pairs=teleop_pairs,
             get_active_sides=lambda: ["single_arm"],
@@ -396,13 +398,13 @@ def test_while_lent_teleop_refuses_everything_that_would_move_the_robots(
     rig = make_rig()
     lease = rig.teleop.lend_to_rollout(["F1"])
 
-    assert rig.teleop.start().error == LENT_MESSAGE
+    assert rig.teleop.start().error == teleop_module.LENT_MESSAGE
     assert not [entry for entry in rig.log if entry[:2] == ("tdk", "Start")]
-    assert rig.teleop.set_engaged(True).error == LENT_MESSAGE
-    assert rig.teleop.reset_home() == {"ok": False, "error": LENT_MESSAGE}
-    assert rig.teleop.match_leader_to_follower()["error"] == LENT_MESSAGE
-    assert rig.teleop.init_grippers()["error"] == LENT_MESSAGE
-    assert rig.teleop.set_gripper_width(0.05)["error"] == LENT_MESSAGE
+    assert rig.teleop.set_engaged(True).error == teleop_module.LENT_MESSAGE
+    assert rig.teleop.reset_home() == {"ok": False, "error": teleop_module.LENT_MESSAGE}
+    assert rig.teleop.match_leader_to_follower()["error"] == teleop_module.LENT_MESSAGE
+    assert rig.teleop.init_grippers()["error"] == teleop_module.LENT_MESSAGE
+    assert rig.teleop.set_gripper_width(0.05)["error"] == teleop_module.LENT_MESSAGE
     with pytest.raises(RuntimeError, match="rollout is using the robots"):
         rig.teleop.shutdown()
     assert rig.teleop.snapshot().can_home is False
@@ -488,7 +490,7 @@ def test_taking_over_stops_the_policy_before_teleop_starts_without_zeroing(
     takeover = _takeover(rig)
     assert takeover["control"] == "operator"
     assert takeover["last_switch"]["to"] == "operator"
-    assert takeover["last_switch"]["s"] >= 0.3
+    assert takeover["last_switch"]["s"] >= 0.3 - CLOCK_SLACK_S
     assert takeover["action"] == "hand_back"
 
 
@@ -741,7 +743,7 @@ def test_a_recorded_takeover_marks_its_ticks_and_times_its_switches(
     interventions = outcome.interventions
     assert interventions["count"] == 1
     assert interventions["ticks"] == sum(tick["intervention"] for tick in ticks)
-    assert interventions["seconds"] >= 0.3
+    assert interventions["seconds"] >= 0.3 - CLOCK_SLACK_S
     assert [event["to"] for event in interventions["switch_s"]] == [
         "operator",
         "policy",
