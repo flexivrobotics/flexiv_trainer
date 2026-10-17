@@ -565,6 +565,34 @@ def extract_recording_frame_values(
     }
 
 
+def recorded_action_by_name(
+    robot_snapshot: dict[str, Any],
+    sides: list[str],
+    pose_format: str = POSE_FORMAT_ROTATION_6D,
+) -> dict[str, float]:
+    """Every action axis a teleoperated recording stores this tick, by name.
+
+    Built exactly like a demonstration's `action` column -- each follower's
+    commanded pose, twist and wrench, plus the gripper width last commanded --
+    so a vector laid out by a checkpoint's action names matches its demos. A
+    gripper with no command yet is left out rather than refused.
+    """
+    robots = robot_snapshot.get("robots") if isinstance(robot_snapshot, dict) else None
+    entries: set[str] = set()
+    for index, payload in enumerate((robots or {}).values()):
+        side = sides[index] if index < len(sides) else arm_side_label(index)
+        entries.update(f"action.{side}.{label}" for label, _, _, _ in _METRICS)
+        command = payload.get("gripper_command") if isinstance(payload, dict) else None
+        if isinstance(command, dict) and command.get("target_width") is not None:
+            entries.add(f"action.{side}.{_GRIPPER_LABEL}")
+    for key, values, names in _iter_combined_features(
+        robot_snapshot, entries, sides, pose_format
+    ):
+        if key == "action":
+            return dict(zip(names, values, strict=True))
+    return {}
+
+
 def build_features_from_sample(
     robot_snapshot: dict[str, Any],
     images: dict[str, np.ndarray],

@@ -269,6 +269,31 @@ def rollout_verdict(
     return result
 
 
+@router.post("/takeover")
+def take_over_rollout(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    """Stop the policy and give the follower to the leader arm.
+
+    Returns at once; `takeover` in the status follows the switch.
+    """
+    try:
+        result = runtime.rollout.take_over()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    info("Rollout takeover requested")
+    return result
+
+
+@router.post("/hand-back")
+def hand_back_rollout(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    """Give the follower back to the policy, which plans afresh."""
+    try:
+        result = runtime.rollout.hand_back()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    info("Rollout hand-back requested")
+    return result
+
+
 @router.get("/evaluations")
 def list_evaluations(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     return {"sessions": runtime.rollout.evaluation_sessions()}

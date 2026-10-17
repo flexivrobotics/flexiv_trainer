@@ -23,11 +23,14 @@ merged and trained on like any demonstration.
 
 WHAT IS RECORDED IS WHAT THE POLICY SAW AND SAID: the state vector and camera
 frames it was given (at the resolution it was given them), and the first action
-of the plan it returned. Everything else the dataset format has no column for
-goes beside it:
+of the plan it returned. While an operator has taken over with the leader arm,
+the action is what a teleoperated recording stores instead (rollout/takeover.py),
+and the tick is marked as an intervention. Everything else the dataset format
+has no column for goes beside it:
 
     meta/rollout_ticks.jsonl    per tick: time, measured pose, force, joints,
-                                whether the plan was fresh, inference time
+                                whether the plan was fresh, inference time,
+                                who had control and any switch that finished
     meta/rollout_outcome.json   which checkpoint, which condition, why it
                                 stopped, and later the operator's verdict
 
@@ -150,6 +153,8 @@ class RolloutRecorder:
         self._lock = threading.Lock()
         self._frames = 0
         self._dropped = 0
+        #: Counted at the planner, so a dropped tick is still counted.
+        self._intervention_ticks = 0
         self._error: str | None = None
         self._dataset: Any = None
         self._ticks_stream: Any = None
@@ -174,24 +179,37 @@ class RolloutRecorder:
         fresh: bool,
         infer_ms: float,
         pose_format: str | None = None,
+        control: str = "policy",
+        switches: list[dict[str, Any]] | None = None,
     ) -> None:
         """Queue one tick. Never blocks; a full queue drops the tick and counts it.
 
         `pose_format` is the state layout the policy was fed; the first tick's
-        decides the recording's column names.
+        decides the recording's column names. `control` is who had the arm
+        (`policy`, `operator` or `switching`); `switches` are the takeover
+        switches that finished since the last tick, with their durations.
         """
+        intervention = control != "policy"
+        tick: dict[str, Any] = {
+            "t": round(time.monotonic() - self._started, 4),
+            "step": int(step),
+            "fresh": bool(fresh),
+            "infer_ms": round(float(infer_ms), 2),
+            "control": control,
+            "intervention": intervention,
+        }
+        if switches:
+            tick["switches"] = [dict(event) for event in switches]
+        if intervention:
+            with self._lock:
+                self._intervention_ticks += 1
         item = {
             "pose_format": pose_format or self._plan.pose_format,
             "state": np.asarray(state, dtype=np.float32).reshape(-1),
             "action": np.asarray(action, dtype=np.float32).reshape(-1),
             "images": images,
             "snapshot": snapshot,
-            "tick": {
-                "t": round(time.monotonic() - self._started, 4),
-                "step": int(step),
-                "fresh": bool(fresh),
-                "infer_ms": round(float(infer_ms), 2),
-            },
+            "tick": tick,
         }
         try:
             self._queue.put_nowait(item)
@@ -218,9 +236,12 @@ class RolloutRecorder:
         error: str | None,
         steps: int,
         safety_stop: dict[str, str] | None = None,
+        interventions: dict[str, Any] | None = None,
     ) -> tuple[Path, RolloutOutcome, bool]:
         """Drain, finalize, move into place and write the outcome (no verdict yet).
 
+        `interventions` is the takeover summary (rollout/takeover.py), given
+        when the leader arm could take over; the ticks it covered are added.
         Returns the episode directory, the outcome, and whether any data was
         saved. THE OUTCOME IS WRITTEN EVEN WHEN NO DATA IS: a rollout that faulted
         before its first tick, or whose writer failed, still happened, and an
@@ -235,6 +256,7 @@ class RolloutRecorder:
                 )
         with self._lock:
             frames, dropped, writer_error = self._frames, self._dropped, self._error
+            intervention_ticks = self._intervention_ticks
         safety = dict(self._outcome.safety)
         if safety_stop is not None:
             safety["stop"] = dict(safety_stop)
@@ -247,6 +269,11 @@ class RolloutRecorder:
             stop_reason=stop_reason,
             error=error,
             safety=safety,
+            interventions=(
+                {**interventions, "ticks": intervention_ticks}
+                if interventions is not None
+                else dict(self._outcome.interventions)
+            ),
         )
         destination = self._plan.destination
         destination.parent.mkdir(parents=True, exist_ok=True)

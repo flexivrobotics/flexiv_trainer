@@ -64,6 +64,8 @@ const state = {
     rolloutVerdictMode: "",
     rolloutVerdictNote: "",
     rolloutVerdictBusy: false,
+    // A Take over / Hand back request is on its way.
+    rolloutTakeoverBusy: false,
     teleopBootstrapped: false,
     rolloutBootstrapped: false,
     trainingBootstrapped: false,
@@ -7953,6 +7955,85 @@ function renderRolloutEvaluation() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Leader-arm takeover: who drives the follower, and the switch between.
+// ---------------------------------------------------------------------------
+
+const TAKEOVER_STATES = {
+    policy: "Policy",
+    switching_to_operator: "Switching to the operator…",
+    operator: "Operator (leader arm)",
+    switching_to_policy: "Switching to the policy…",
+    error: "Nobody: the last switch failed",
+};
+
+function formatSwitch(entry) {
+    const who = entry.to === "operator" ? "operator" : "policy";
+    const seconds = Number(entry.s || 0).toFixed(2);
+    return entry.error
+        ? `to the ${who} failed after ${seconds} s`
+        : `to the ${who} in ${seconds} s`;
+}
+
+async function requestTakeover(path) {
+    state.rolloutTakeoverBusy = true;
+    renderRolloutTakeover();
+    try {
+        state.rolloutStatus = await api(path, { method: "POST" });
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.rolloutTakeoverBusy = false;
+    }
+    renderRollout();
+}
+
+function renderRolloutTakeover() {
+    const panel = byId("rollout-takeover");
+    if (!panel) {
+        return;
+    }
+    const status = state.rolloutStatus || {};
+    const takeover = status.takeover || null;
+    const isRunning = status.status === "running";
+    // Rebuild only when something shown changed, like the other panels.
+    const renderKey = JSON.stringify([
+        isRunning, state.rolloutTakeoverBusy,
+        takeover && [takeover.available, takeover.state, takeover.action, takeover.reason,
+            takeover.error, takeover.last_switch, takeover.trigger_channel],
+    ]);
+    if (panel.dataset.renderKey === renderKey) {
+        return;
+    }
+    panel.dataset.renderKey = renderKey;
+    const lastSwitch = takeover && takeover.last_switch
+        ? `<p class="rollout-eval-line">Last switch: ${escapeHtml(formatSwitch(takeover.last_switch))}</p>`
+        : "";
+    if (!isRunning || !takeover) {
+        panel.innerHTML = lastSwitch;
+        return;
+    }
+    const handBack = ["operator", "switching_to_policy", "error"].includes(takeover.state);
+    const enabled = !!takeover.action && !state.rolloutTakeoverBusy;
+    const who = takeover.available ? (TAKEOVER_STATES[takeover.state] || takeover.state) : "Policy";
+    const trigger = takeover.trigger_channel !== null && takeover.trigger_channel !== undefined
+        ? `<p class="rollout-eval-line">Leader input ${escapeHtml(takeover.trigger_channel)} also switches.</p>`
+        : "";
+    panel.innerHTML = `
+        <p class="rollout-eval-line">In control: <strong>${escapeHtml(who)}</strong></p>
+        <button type="button" class="secondary-button" id="rollout-takeover-action" ${enabled ? "" : "disabled"}
+            title="${escapeHtml(enabled ? "" : takeover.reason || "")}">${handBack ? "Hand back" : "Take over"}</button>
+        ${!enabled && takeover.reason ? `<p class="rollout-eval-line rollout-takeover-reason">${escapeHtml(takeover.reason)}</p>` : ""}
+        ${takeover.error ? `<p class="rollout-verdict rollout-error">${escapeHtml(takeover.error)}</p>` : ""}
+        ${lastSwitch}
+        ${trigger}
+    `;
+    const button = byId("rollout-takeover-action");
+    if (button) {
+        button.onclick = () => requestTakeover(handBack ? "/rollout/hand-back" : "/rollout/takeover");
+    }
+}
+
 function renderRollout() {
     const container = byId("rollout-content");
     if (!container) {
@@ -8019,6 +8100,7 @@ function renderRollout() {
         renderRolloutMetrics();
         renderRolloutWrench();
         renderRolloutEvaluation();
+        renderRolloutTakeover();
         return;
     }
     container.dataset.renderKey = renderKey;
@@ -8088,6 +8170,7 @@ function renderRollout() {
                         </button>
                         ${status.error ? `<p class="rollout-verdict rollout-error">${escapeHtml(status.error)}</p>` : ""}
                     </div>
+                    <div class="rollout-takeover" id="rollout-takeover"></div>
                 </section>
                 <section class="panel rollout-evaluation" id="rollout-evaluation"></section>
             </div>
@@ -8120,6 +8203,7 @@ function renderRollout() {
     renderRolloutMetrics();
     renderRolloutWrench();
     renderRolloutEvaluation();
+    renderRolloutTakeover();
 
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {

@@ -136,6 +136,12 @@ class _UnavailableRolloutService:
     def start_next_trial(self, name: str) -> dict[str, Any]:
         raise RuntimeError(self._reason)
 
+    def take_over(self) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
+    def hand_back(self) -> dict[str, Any]:
+        raise RuntimeError(self._reason)
+
     def shutdown(self) -> None:
         return None
 
@@ -357,6 +363,12 @@ class RuntimeManager:
         changed = normalized.model_copy(update=ignored) != (
             self._robot_config.model_copy(update=ignored)
         )
+        if changed and getattr(self.teleop.snapshot(), "lent", False):
+            # Reconnecting teleop would pull the robots from under the rollout.
+            raise ValueError(
+                "Robot settings cannot change while a policy rollout is using "
+                "the robots; stop it first"
+            )
         # A renamed slot keeps its assigned device. Across an arm-mode switch
         # the modes hold separate slot lists, so there is nothing to carry.
         if normalized.arm_mode == self._robot_config.arm_mode:

@@ -455,13 +455,57 @@ class WaypointExecutor:
         self._scheduled_count = 0
         self._starved_replans = 0
         self._thread: threading.Thread | None = None
+        # While paused (an operator has the arm) nothing is sent. The epoch
+        # changes on every pause and resume, so a plan computed before either
+        # is recognised as stale and never installed or sent.
+        self._paused = False
+        self._epoch = 0
+        # Held for the whole of each send, so pause() can wait one out.
+        self._send_lock = threading.Lock()
+
+    @property
+    def epoch(self) -> int:
+        with self._condition:
+            return self._epoch
+
+    @property
+    def paused(self) -> bool:
+        with self._condition:
+            return self._paused
+
+    def pause(self) -> None:
+        """Drop every pending waypoint and send nothing until resume().
+
+        Returns only after a send already under way has finished, so once it
+        returns no policy command can reach the arm.
+        """
+        with self._condition:
+            self._paused = True
+            self._epoch += 1
+            self._waypoints = []
+            self._scheduled_count = 0
+            self._condition.notify()
+        with self._send_lock:
+            pass
+
+    def resume(self) -> None:
+        """Send again, starting from an empty schedule."""
+        with self._condition:
+            self._epoch += 1
+            self._waypoints = []
+            self._scheduled_count = 0
+            self._paused = False
 
     def replace_waypoints(
         self,
         actions: list[list[float]],
         target_times: list[float],
         now: float,
-    ) -> None:
+        *,
+        epoch: int | None = None,
+    ) -> bool:
+        """Install a new plan. False when it was dropped: the executor is paused,
+        or `epoch` (read before the plan was computed) is no longer current."""
         self.validate_actions(actions)
         if len(actions) != len(target_times):
             raise ValueError(
@@ -519,9 +563,12 @@ class WaypointExecutor:
                     "action_anchor_offset_steps or speed up inference",
                 )
         with self._condition:
+            if self._paused or (epoch is not None and epoch != self._epoch):
+                return False
             self._waypoints = waypoints
             self._scheduled_count = len(waypoints)
             self._condition.notify()
+        return True
 
     def validate_actions(self, actions: list[list[float]]) -> None:
         """Reject malformed chunks before constructing any per-arm commands."""
@@ -579,7 +626,7 @@ class WaypointExecutor:
         try:
             while not self._stop_event.is_set():
                 with self._condition:
-                    if not self._waypoints:
+                    if self._paused or not self._waypoints:
                         self._condition.wait(0.1)
                         continue
                     delay = self._waypoints[0].target_time - time.monotonic()
@@ -587,7 +634,14 @@ class WaypointExecutor:
                         self._condition.wait(min(delay, 0.1))
                         continue
                     waypoint = self._waypoints.pop(0)
-                self._send_waypoint(waypoint)
+                    epoch = self._epoch
+                with self._send_lock:
+                    # A pause (or a pause and resume) since the pop makes this
+                    # waypoint stale: the operator may have the arm now.
+                    with self._condition:
+                        stale = self._paused or epoch != self._epoch
+                    if not stale:
+                        self._send_waypoint(waypoint)
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
             self._stop_event.set()

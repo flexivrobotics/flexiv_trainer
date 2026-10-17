@@ -100,3 +100,6 @@ def control_service(
         return runtime.control_service(service_name, action)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # e.g. disconnecting teleoperation while a rollout uses its robots.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

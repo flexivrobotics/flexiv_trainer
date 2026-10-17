@@ -45,6 +45,7 @@ from flexivtrainer.rollout.executors.waypoint import (
 )
 from flexivtrainer.rollout.recorder import RolloutRecorder
 from flexivtrainer.rollout.safety import SafetyEnvelope, SafetyStop
+from flexivtrainer.rollout.takeover import Takeover, operator_action
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
 
@@ -107,8 +108,21 @@ class WaypointRunner:
         send_twist: bool = True,
         cartesian_stiffness: Any = None,
         max_contact_wrench: Any = None,
+        takeover: Takeover | None = None,
+        action_names: list[str] | None = None,
     ) -> None:
         self._safety = safety or SafetyEnvelope()
+        # Leader-arm takeover (rollout/takeover.py), when the robots were
+        # borrowed from teleoperation; None leaves the policy in control.
+        self._takeover = takeover
+        self._action_names = list(action_names or [])
+        self._followers = list(followers)
+        self._cartesian_stiffness = cartesian_stiffness
+        self._max_contact_wrench = max_contact_wrench
+        # Set once the policy has sent its first plan; a takeover needs one.
+        self._ready = False
+        # Set by a hand-back; the planner resets the policy before it plans.
+        self._reset_pending = False
         self._recorder = recorder
         self._send_twist = send_twist
         #: Set when the envelope stopped the rollout: {"code", "detail"}.
@@ -224,6 +238,50 @@ class WaypointRunner:
     def status(self) -> dict[str, Any]:
         return {"error": self._error, "stop_reason": self._stop_reason}
 
+    # --- leader-arm takeover (called from the takeover's switch thread) -------
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    def pause_policy(self) -> None:
+        """No policy command reaches the robots after this returns."""
+        executor = self._waypoint_executor
+        if executor is not None:
+            executor.pause()
+        gripper = self._gripper_executor
+        if gripper is not None:
+            gripper.pause()
+
+    def reclaim(self) -> None:
+        """Take the followers back into the rollout's control mode.
+
+        The same settings as at the start of the rollout, except that the F/T
+        sensor is NOT zeroed: the tool may be in contact mid-trial.
+        """
+        for serial, robot in zip(self._followers, self._robots, strict=True):
+            hardware.prepare_robot_motion(
+                robot,
+                serial,
+                self._stop_event,
+                self._append_log,
+                stiffness=self._cartesian_stiffness,
+                max_contact_wrench=self._max_contact_wrench,
+                zero_ft=False,
+            )
+
+    def resume_policy(self) -> None:
+        """Let the policy command again, re-planning from the current state."""
+        # Before the executors resume, so the planner resets the policy before
+        # it can plan into them.
+        self._reset_pending = True
+        executor = self._waypoint_executor
+        if executor is not None:
+            executor.resume()
+        gripper = self._gripper_executor
+        if gripper is not None:
+            gripper.resume()
+
     def _planner_hz(self) -> float:
         return float(self._target_hz or self._planner_hz_fallback)
 
@@ -271,6 +329,11 @@ class WaypointRunner:
         step = 0
         actions: Any = None
         seeded = False
+        takeover = self._takeover
+        # The policy's last recorded action, which an operator tick falls back
+        # to for any axis teleoperation does not command.
+        last_action: list[float] = []
+        replan_now = False
         try:
             cuda_graph_step_begin: Callable[[], None] | None = None
             if self._uses_cuda_graphs:
@@ -344,6 +407,44 @@ class WaypointRunner:
                     robots, gripper_states, sides
                 )
                 safety.check_force(_measured_arms(snapshot, "ext_wrench_in_world"))
+                control = takeover.control() if takeover is not None else "policy"
+                if control != "policy":
+                    # The operator has the arm, or a switch is under way: the
+                    # policy plans nothing, so its stale-plan watchdog rests.
+                    last_fresh = None
+                    if pose_format is None:
+                        pose_format = observations.resolve_state_pose_format(
+                            snapshot, sides, cameras, self._state_dim, self._append_log
+                        )
+                    self._operator_tick(
+                        snapshot=snapshot,
+                        images=images,
+                        step=step,
+                        control=control,
+                        pose_format=pose_format,
+                        last_action=last_action,
+                    )
+                    self._last_wrench_t = observations.sample_wrench(
+                        self._append_wrench,
+                        snapshot,
+                        sides,
+                        loop_start,
+                        self._last_wrench_t,
+                    )
+                    step += 1
+                    if max_steps and step >= max_steps:
+                        self._stop_reason = "timeout"
+                        break
+                    elapsed = time.monotonic() - loop_start
+                    if period - elapsed > 0:
+                        self._stop_event.wait(period - elapsed)
+                    continue
+                if self._reset_pending:
+                    # Handed back: plan afresh from where the operator left
+                    # the arm, not from the queue or ensemble of before.
+                    self._reset_pending = False
+                    policy.reset()
+                    replan_now = True
                 safety.check_stale(time.monotonic(), last_fresh)
                 now = time.monotonic()
                 stage_times["read_states"].append(now - mark)
@@ -361,7 +462,11 @@ class WaypointRunner:
                 mark = now
 
                 # Replan early enough to retain a committed path during inference.
-                force = replan_steps is None or step % replan_steps == 0
+                force = replan_now or replan_steps is None or step % replan_steps == 0
+                replan_now = False
+                # Read before planning: a takeover during inference changes it,
+                # and the plan then describes an arm that has moved since.
+                epoch = waypoint_executor.epoch
                 if cuda_graph_step_begin is not None:
                     cuda_graph_step_begin()
                 actions, fresh = observations._predict_action_chunk(
@@ -380,6 +485,11 @@ class WaypointRunner:
                 stage_times["inference"].append(infer_seconds)
                 infer_raw.append(infer_seconds)
                 mark = now
+
+                if waypoint_executor.epoch != epoch:
+                    # Taken over (or handed back) while planning: drop the plan
+                    # before any check reads it as the policy's next command.
+                    continue
 
                 action_lists = self._actions_to_lists(actions)
                 safety.check_finite(action_lists)
@@ -422,9 +532,10 @@ class WaypointRunner:
                     target_times = [
                         loop_start + (k + anchor) * dt for k in range(len(action_lists))
                     ]
-                    waypoint_executor.replace_waypoints(
-                        action_lists, target_times, now=time.monotonic()
-                    )
+                    if waypoint_executor.replace_waypoints(
+                        action_lists, target_times, now=time.monotonic(), epoch=epoch
+                    ):
+                        self._ready = True
                 if waypoint_executor.error is not None:
                     raise RuntimeError(waypoint_executor.error)
                 stage_times["dispatch"].append(time.monotonic() - mark)
@@ -438,6 +549,7 @@ class WaypointRunner:
                         "fresh": bool(fresh),
                     }
                 )
+                last_action = list(action_lists[0])
                 if self._recorder is not None:
                     self._recorder.add_tick(
                         state=observation.get("observation.state", []),
@@ -448,6 +560,9 @@ class WaypointRunner:
                         fresh=fresh,
                         infer_ms=infer_seconds * 1000.0,
                         pose_format=pose_format,
+                        switches=(
+                            takeover.drain_events() if takeover is not None else None
+                        ),
                     )
                 self._last_wrench_t = observations.sample_wrench(
                     self._append_wrench,
@@ -483,6 +598,10 @@ class WaypointRunner:
                 if period - elapsed > 0:
                     self._stop_event.wait(period - elapsed)
         except SafetyStop as exc:
+            # The operator may have the arm: the robots hold before the trial
+            # reads as failed.
+            if takeover is not None:
+                takeover.close()
             # Not a crash: the envelope did its job. Recorded as the stop
             # reason, and still reported as an error so the run reads as failed.
             self._stop_reason = "safety"
@@ -491,12 +610,19 @@ class WaypointRunner:
             self._on_error(str(exc))
             warn("Rollout stopped by the safety envelope", str(exc))
         except Exception as exc:
+            if takeover is not None:
+                takeover.close()
             detail = describe_exception(exc)
             self._error = detail
             self._on_error(detail)
             warn("Rollout stopped", detail)
             error("Rollout planner thread crashed", describe_traceback(exc))
         finally:
+            if takeover is not None:
+                # First: the operator may have the arm. Disengage and stop the
+                # teleop loop so the robots hold, whatever ended the trial
+                # (a no-op if an error above already did).
+                takeover.close()
             # Stop commands before releasing robot connections.
             if waypoint_executor is not None:
                 self._stop_event.set()
@@ -521,6 +647,48 @@ class WaypointRunner:
             )
             self._release_robots()
             self._on_finished(self._stop_reason, step)
+
+    def _operator_tick(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        images: dict[str, np.ndarray],
+        step: int,
+        control: str,
+        pose_format: str,
+        last_action: list[float],
+    ) -> None:
+        """A tick under the operator: keep the envelope on, keep recording."""
+        # Nothing is commanded to check, so the box is checked against where
+        # the arm measurably is.
+        self._safety.check_measured_workspace(_measured_arms(snapshot, "tcp_pose"))
+        takeover = self._takeover
+        switches = takeover.drain_events() if takeover is not None else []
+        if self._recorder is None:
+            return
+        observation = observations.build_observation(
+            snapshot, images, self._sides, self._camera_names, pose_format
+        )
+        # Mid-switch too: what the controller commands is what the arm does.
+        action = operator_action(
+            self._robots,
+            self._sides,
+            self._action_names,
+            takeover.gripper_targets() if takeover is not None else {},
+            last_action,
+        )
+        self._recorder.add_tick(
+            state=observation.get("observation.state", []),
+            action=action,
+            images=images,
+            snapshot=snapshot,
+            step=step,
+            fresh=False,
+            infer_ms=0.0,
+            pose_format=pose_format,
+            control=control,
+            switches=switches,
+        )
 
     @staticmethod
     def _actions_to_lists(actions: Any) -> list[list[float]]:
