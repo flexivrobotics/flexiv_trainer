@@ -648,6 +648,15 @@ def test_a_safety_stop_under_the_operator_disengages_and_holds(make_rig) -> None
     rig = make_rig(
         configure=lambda settings: setattr(settings.rollout, "max_force_n", 100.0)
     )
+    # Whether the leader was still engaged when the trial was reported failed.
+    engaged_at_error: list[bool] = []
+    report_error = rig.service._on_runner_error
+
+    def on_error(detail: str) -> None:
+        engaged_at_error.append(rig.teleop.snapshot().engaged)
+        report_error(detail)
+
+    rig.service._on_runner_error = on_error
     _start(rig)
     _take_over(rig)
     mark = len(rig.log)
@@ -655,6 +664,7 @@ def test_a_safety_stop_under_the_operator_disengages_and_holds(make_rig) -> None
     _wait(lambda: rig.service.status()["status"] == "failed", "the safety stop")
 
     assert "Safety stop (force)" in rig.service.status()["error"]
+    assert engaged_at_error == [False], "disengage before reporting the stop"
     disengage = _index(rig.log, "tdk", "Engage", 0, False, start=mark)
     assert _index(rig.log, "tdk", "StopWithIdx", 0, start=disengage)
     assert not rig.tdk.running

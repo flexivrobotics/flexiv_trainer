@@ -477,9 +477,11 @@ class Takeover:
         """Disengage and stop teleoperation (the robots hold); refuse requests.
 
         Called by the planner as the trial ends for any reason, including a
-        safety stop while the operator has control.
+        safety stop while the operator has control. Only the first call acts.
         """
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
         if self._trigger is not None:
             self._trigger.stop()

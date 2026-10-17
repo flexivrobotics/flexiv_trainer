@@ -598,6 +598,10 @@ class WaypointRunner:
                 if period - elapsed > 0:
                     self._stop_event.wait(period - elapsed)
         except SafetyStop as exc:
+            # The operator may have the arm: the robots hold before the trial
+            # reads as failed.
+            if takeover is not None:
+                takeover.close()
             # Not a crash: the envelope did its job. Recorded as the stop
             # reason, and still reported as an error so the run reads as failed.
             self._stop_reason = "safety"
@@ -606,6 +610,8 @@ class WaypointRunner:
             self._on_error(str(exc))
             warn("Rollout stopped by the safety envelope", str(exc))
         except Exception as exc:
+            if takeover is not None:
+                takeover.close()
             detail = describe_exception(exc)
             self._error = detail
             self._on_error(detail)
@@ -614,7 +620,8 @@ class WaypointRunner:
         finally:
             if takeover is not None:
                 # First: the operator may have the arm. Disengage and stop the
-                # teleop loop so the robots hold, whatever ended the trial.
+                # teleop loop so the robots hold, whatever ended the trial
+                # (a no-op if an error above already did).
                 takeover.close()
             # Stop commands before releasing robot connections.
             if waypoint_executor is not None:
