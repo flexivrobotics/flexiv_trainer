@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -22,6 +23,11 @@ from test_rollout_takeover import _take_over, _takeover, _wait, make_rig  # noqa
 from flexivtrainer.evaluation.checks import LearnedCheck, parse_checks, read_ticks
 from flexivtrainer.evaluation.outcome import read_outcome
 from flexivtrainer.rollout.live_checks import LiveChecks
+
+
+# The stand-in loader never reads it; the checks name their models relative to
+# it, as a plan does, so the paths mean the same on every OS.
+STORAGE = Path("storage")
 
 
 class _Model:
@@ -45,7 +51,7 @@ class _Model:
 def _live(checks, models, names=("x", "z")):
     live = LiveChecks(
         checks,
-        None,
+        STORAGE,
         state_names=lambda snapshot, images, pose_format, width: list(names),
         loader=lambda path: models[path.name],
     )
@@ -64,7 +70,7 @@ def _feed(live, ps, dt=0.1, column=1):
 
 
 def _check(name, **options):
-    return LearnedCheck(model=f"/m/{name}", **options)
+    return LearnedCheck(model=f"checks/{name}", **options)
 
 
 def test_a_check_passes_once_its_probability_holds_long_enough() -> None:
@@ -149,7 +155,7 @@ def test_columns_are_found_by_name_and_a_missing_one_is_reported() -> None:
 def test_a_model_that_does_not_load_refuses_the_start() -> None:
     live = LiveChecks(
         {"c": _check("gone", live=True)},
-        None,
+        STORAGE,
         state_names=lambda *args: [],
         loader=lambda path: (_ for _ in ()).throw(FileNotFoundError(str(path))),
     )
