@@ -25,6 +25,7 @@ holding.
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -42,6 +43,11 @@ from test_rollout_service import (
 import flexivtrainer.teleop.end_effector as ee
 import flexivtrainer.teleop.service as teleop_module
 from flexivtrainer.config import EndEffectorSideConfig, TeleopRobotPair
+from flexivtrainer.data.control_settings import (
+    ControlSettings,
+    dataset_control_settings,
+    write_control_settings,
+)
 from flexivtrainer.evaluation.outcome import RolloutOutcome, read_outcome
 from flexivtrainer.rollout.executors.gripper import GripperExecutor
 from flexivtrainer.rollout.executors.waypoint import WaypointExecutor
@@ -157,6 +163,9 @@ class _TDK:
 
     def SetFollowerMaxContactWrench(self, idx, wrench) -> None:  # noqa: N802
         self._call("SetFollowerMaxContactWrench", idx, list(wrench))
+
+    def SetFollowerCartStiff(self, idx, stiffness) -> None:  # noqa: N802
+        self._call("SetFollowerCartStiff", idx, list(stiffness))
 
     def Start(self) -> None:  # noqa: N802
         self._call("Start")
@@ -1240,3 +1249,188 @@ def test_the_api_refuses_a_switch_that_does_not_apply(make_rig) -> None:
     assert again.json()["detail"] == "The operator already has control"
     assert client.post("/rollout/hand-back").status_code == 200
     _wait_state(rig, "policy")
+
+
+# --- the stiffness the rollout runs at ------------------------------------------------
+
+TRAINED = [2600.0, 2600.0, 2900.0, 150.0, 150.0, 150.0]
+SETTING = [5000.0, 5000.0, 5000.0, 300.0, 300.0, 300.0]
+
+
+def _trained_at(rig, stiffness=TRAINED) -> None:
+    """Store, beside the rig's checkpoint, the stiffness its data was recorded at."""
+    write_control_settings(
+        Path(rig.checkpoint),
+        ControlSettings("teleop", stiffness),
+        checkpoint=True,
+    )
+
+
+def _strict(settings) -> None:
+    settings.rollout.allow_controller_default_stiffness = False
+
+
+def _with_setting(settings) -> None:
+    _strict(settings)
+    settings.rollout.cartesian_stiffness = tuple(SETTING)
+
+
+def _impedances(log, start: int = 0) -> list[list[float]]:
+    return [entry[2] for entry in log[start:] if entry[0] == "SetCartesianImpedance"]
+
+
+def _log_lines(rig) -> list[str]:
+    return [line for line in rig.service.status()["logs"] if "stiffness" in line]
+
+
+def test_a_rollout_runs_at_the_stiffness_its_checkpoint_stores(make_rig) -> None:
+    rig = make_rig(configure=_strict)
+    _trained_at(rig)
+    _start(rig)
+
+    log = list(rig.log)
+    assert _impedances(log) == [TRAINED]
+    assert _index(log, "SetCartesianImpedance") < _index(log, "send")
+    assert rig.service.status()["stiffness"] == {
+        "applied": TRAINED,
+        "source": "checkpoint",
+        "trained": TRAINED,
+        "warning": None,
+    }
+    assert any("from the checkpoint" in line for line in _log_lines(rig))
+
+
+def test_the_setting_wins_over_the_checkpoint_with_a_warning(make_rig) -> None:
+    rig = make_rig(configure=_with_setting)
+    _trained_at(rig)
+    _start(rig)
+
+    assert _impedances(rig.log) == [SETTING], "the setting must win"
+    stiffness = rig.service.status()["stiffness"]
+    assert (stiffness["applied"], stiffness["source"]) == (SETTING, "setting")
+    assert stiffness["trained"] == TRAINED
+    assert stiffness["warning"].startswith(
+        "Trained at stiffness [2600, 2600, 2900, 150, 150, 150], running at "
+        "[5000, 5000, 5000, 300, 300, 300]"
+    )
+    warnings = [line for line in _log_lines(rig) if "Trained at" in line]
+    assert len(warnings) == 1 and "WARN" in warnings[0]
+
+
+def test_the_setting_alone_still_works(make_rig) -> None:
+    rig = make_rig(configure=_with_setting)
+    _start(rig)
+
+    assert _impedances(rig.log) == [SETTING]
+    assert rig.service.status()["stiffness"] == {
+        "applied": SETTING,
+        "source": "setting",
+        "trained": "not recorded",
+        "warning": None,
+    }
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_a_rollout_with_no_known_stiffness_is_refused_before_anything_moves(
+    make_rig, stored
+) -> None:
+    rig = make_rig(configure=_strict)
+    rig.teleop._started = True
+    if stored:
+        # Trained on data recorded at the teleop default, whose value is unknown.
+        write_control_settings(
+            Path(rig.checkpoint), ControlSettings("teleop"), checkpoint=True
+        )
+
+    with pytest.raises(RuntimeError, match="ROLLOUT__CARTESIAN_STIFFNESS"):
+        rig.service.start(rig.checkpoint)
+
+    assert rig.log == [], "nothing may reach the hardware"
+    assert rig.policy.calls == 0
+    snapshot = rig.teleop.snapshot()
+    assert snapshot.started and not snapshot.lent, "teleoperation is left alone"
+    assert rig.service.status()["status"] == "idle"
+
+
+def test_the_opt_out_runs_at_the_controller_default_and_says_so(make_rig) -> None:
+    rig = make_rig()  # the shared test settings allow the default
+    assert rig.service._settings.rollout.allow_controller_default_stiffness
+    _start(rig)
+
+    assert _impedances(rig.log) == [], "the controller keeps its own spring"
+    stiffness = rig.service.status()["stiffness"]
+    assert (stiffness["applied"], stiffness["source"]) == (None, "controller default")
+    assert "controller's default" in stiffness["warning"]
+
+
+def test_the_opt_out_does_not_override_a_stored_stiffness(make_rig) -> None:
+    rig = make_rig()
+    _trained_at(rig)
+    _start(rig)
+
+    assert _impedances(rig.log) == [TRAINED]
+    assert rig.service.status()["stiffness"]["source"] == "checkpoint"
+
+
+@pytest.mark.parametrize(
+    ("configure", "expected"),
+    [(_strict, TRAINED), (_with_setting, SETTING)],
+    ids=["checkpoint", "setting"],
+)
+def test_the_follower_keeps_the_rollouts_stiffness_under_the_operator(
+    make_rig, configure, expected
+) -> None:
+    rig = make_rig(configure=configure)
+    _trained_at(rig)
+    _start(rig)
+    mark = _take_over(rig)
+
+    log = list(rig.log)
+    init = _index(log, "tdk", "Init", start=mark)
+    stiff = _index(log, "tdk", "SetFollowerCartStiff", start=mark)
+    start = _index(log, "tdk", "Start", start=mark)
+    assert init < stiff < start, "the TDK takes it after Init and before Start"
+    assert log[stiff] == ("tdk", "SetFollowerCartStiff", 0, expected)
+
+    back = _hand_back(rig)
+    assert _impedances(rig.log, back) == [expected], "taken back at the same spring"
+
+
+def test_teleop_after_a_takeover_records_the_stiffness_it_was_left_at(
+    make_rig,
+) -> None:
+    rig = make_rig(configure=_strict)
+    _trained_at(rig)
+    _start(rig)
+    _take_over(rig)
+    _hand_back(rig)
+    rig.service.stop()
+    _wait(lambda: not rig.teleop.snapshot().lent, "the robots to be returned")
+
+    # The teleop setting is unset, so nothing sets the follower back.
+    assert rig.teleop.start().started
+    assert rig.teleop.control_settings() == ControlSettings("teleop", TRAINED)
+
+
+def test_a_recorded_rollout_stores_its_stiffness(make_rig) -> None:
+    pytest.importorskip("lerobot")
+    rig = make_rig(configure=_with_setting)
+    _trained_at(rig)
+    _start(rig, record=True)
+    rig.service.stop()
+    status = _wait_for_verdict_slot(rig.service)
+
+    episode_dir = (
+        rig.service._settings.storage.rollouts_root
+        / "adhoc"
+        / status["awaiting_verdict"]["episode"]
+    )
+    outcome = read_outcome(episode_dir)
+    assert outcome.stiffness == status["stiffness"]
+    assert outcome.stiffness["applied"] == SETTING
+    assert outcome.stiffness["source"] == "setting"
+    assert outcome.stiffness["trained"] == TRAINED
+    assert "Trained at" in outcome.stiffness["warning"]
+    assert outcome.safety["cartesian_stiffness"] == SETTING
+    # Like a demonstration, so it can be merged and trained on.
+    assert dataset_control_settings(episode_dir) == ControlSettings("rollout", SETTING)

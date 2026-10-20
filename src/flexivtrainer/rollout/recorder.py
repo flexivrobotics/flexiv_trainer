@@ -33,6 +33,8 @@ has no column for goes beside it:
                                 who had control and any switch that finished
     meta/rollout_outcome.json   which checkpoint, which condition, why it
                                 stopped, and later the operator's verdict
+    meta/control.json           the follower stiffness and contact-wrench
+                                limit it ran under (data/control_settings.py)
 
 THE PLANNER NEVER WAITS FOR THE DISK. Ticks go onto a bounded queue and a
 background thread writes them; if the writer falls behind, ticks are dropped
@@ -54,6 +56,10 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.data.control_settings import (
+    ControlSettings,
+    write_control_settings,
+)
 from flexivtrainer.data.lerobot_io import (
     POSE_FORMAT_ROTATION_6D,
     build_features_from_sample,
@@ -86,6 +92,7 @@ class RecordingPlan:
     sides: list[str]
     cameras: list[str] | None
     pose_format: str = POSE_FORMAT_ROTATION_6D
+    control: ControlSettings | None = None
 
 
 def _default_dataset_factory(plan: RecordingPlan, features: dict[str, Any]) -> Any:
@@ -298,6 +305,8 @@ class RolloutRecorder:
                     outcome, checks={**outcome.checks, "recording_error": writer_error}
                 )
         write_outcome(destination, outcome)
+        if self._plan.control is not None:
+            write_control_settings(destination, self._plan.control)
         self._outcome = outcome
         with self._lock:
             self._finished = destination

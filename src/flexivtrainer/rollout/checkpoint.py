@@ -21,6 +21,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+from flexivtrainer.data.control_settings import (
+    ControlSettings,
+    checkpoint_control_settings,
+)
 from flexivtrainer.data.gripper_command import (
     GRIPPER_COMMAND_FILENAME,
     GripperCommandMetadata,
@@ -355,6 +359,11 @@ def checkpoint_gripper_command_metadata(
     if not path.is_file():
         return None
     return read_gripper_command_metadata(path)
+
+
+def checkpoint_control(checkpoint_path: str) -> ControlSettings | None:
+    """The follower settings the training data was recorded under, if stored."""
+    return checkpoint_control_settings(_checkpoint_model_dir(checkpoint_path))
 
 
 def _checkpoint_target_hz(checkpoint_path: str) -> float | None:

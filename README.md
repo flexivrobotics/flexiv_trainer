@@ -218,6 +218,9 @@ On this page you can verify robot and camera health, view the camera feeds, moni
 8. Click the recording `Stop` button when one episode is complete.
 9. Click `Save Episode` to keep the recording, or `Discard Episode` to throw it away.
 
+Each episode stores the follower stiffness it was recorded at. Set it with
+`FLEXIV_TRAINER_TELEOP__FOLLOWER_CARTESIAN_STIFFNESS`; see [Stiffness](#stiffness).
+
 Saved episodes are written to the episode storage directory shown on the home page. By default, episodes are stored under:
 
 ```text
@@ -518,12 +521,45 @@ outcome. The envelope applies to waypoint policies, not yet to B-spline ones.
 ### Stiffness
 
 A pose-target policy learns targets that sit beyond where the arm ends up, by
-force divided by stiffness. Roll it out at the stiffness its demonstrations were
-recorded under, or the same targets press harder. Set the controller's spring
-and contact-wrench ceiling for rollouts with
-`FLEXIV_TRAINER_ROLLOUT__CARTESIAN_STIFFNESS` (`[kx,ky,kz,krx,kry,krz]`, N/m and
-N·m/rad) and `FLEXIV_TRAINER_ROLLOUT__MAX_CONTACT_WRENCH` (N and N·m). Unset,
-the controller's defaults apply. Both are recorded in each rollout's outcome.
+force divided by stiffness. Run it at the stiffness its demonstrations were
+recorded at, or the same targets press with a different force. A stiffer
+spring presses harder. So the stiffness goes with the data, from the
+recording to the rollout:
+
+1. **Teleoperation sets it.** `FLEXIV_TRAINER_TELEOP__FOLLOWER_CARTESIAN_STIFFNESS`
+   (`[kx,ky,kz,krx,kry,krz]`, N/m and N·m/rad) is sent to the follower each
+   time teleoperation starts, after its initialization and before its loop
+   starts. Each value must be between 0 and the robot's nominal stiffness.
+   Unset, the teleop controller keeps its own default.
+2. **Each recording stores it.** Every episode has `meta/control.json`: the
+   follower stiffness, the contact-wrench limit and the force feedback scale it
+   was recorded under. A value the trainer did not set reads
+   `"controller default"`. Recorded rollouts store theirs the same way.
+3. **Merging checks it.** Episodes recorded under different settings are not
+   merged; merge them into separate datasets. A policy runs at one stiffness,
+   so data recorded at another would teach it the wrong force. Episodes
+   recorded before `control.json` existed count as recorded at the teleop
+   controller's default.
+4. **Training copies it.** The checkpoint gets the dataset's settings as
+   `pretrained_model/control.json`. Fine-tuning a checkpoint on data recorded
+   under different settings is refused, for the same reason.
+5. **The rollout applies it.** In order:
+   - `FLEXIV_TRAINER_ROLLOUT__CARTESIAN_STIFFNESS`, when set. If the checkpoint
+     was trained at a different stiffness, the log and the page warn
+     "Trained at X, running at Y".
+   - Otherwise, the stiffness the checkpoint stores.
+   - Otherwise the rollout does not start. This protects you from running at
+     the controller's default, which can be several times stiffer than the
+     demonstrations. Set `FLEXIV_TRAINER_ROLLOUT__ALLOW_CONTROLLER_DEFAULT_STIFFNESS=true`
+     to run at that default anyway. A checkpoint trained on data recorded at
+     the teleop default also needs one of these, because the value of that
+     default is not known.
+
+The page shows the stiffness the rollout uses and where it came from, and
+each rollout's outcome stores it under `stiffness`. When you take over with the
+leader arm, the follower uses the same stiffness. Set the rollout's
+contact-wrench ceiling with `FLEXIV_TRAINER_ROLLOUT__MAX_CONTACT_WRENCH` (N and
+N·m); unset, the controller's default applies.
 
 ### Taking over with the leader arm
 

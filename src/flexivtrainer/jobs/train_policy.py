@@ -29,6 +29,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from flexivtrainer.config import TRAIN_LOAD_DEPTH_ENV, AppSettings
+from flexivtrainer.data.control_settings import (
+    ControlSettings,
+    checkpoint_control_settings,
+    dataset_control_settings,
+    effective_control_settings,
+    write_control_settings,
+)
 from flexivtrainer.data.gripper_command import (
     GRIPPER_COMMAND_FILENAME,
     GRIPPER_COMMAND_RELATIVE_PATH,
@@ -341,6 +348,9 @@ class TrainingJob:
     source_dataset_root: Path | None = None
     converted_dataset_root: Path | None = None
     gripper_command_metadata: GripperCommandMetadata | None = None
+    # The follower settings the training data was recorded under, written
+    # into each saved checkpoint as control.json so rollout applies them.
+    control_settings: ControlSettings | None = None
     # Ordered action-axis names from the training dataset, written into each
     # saved checkpoint so rollout never has to locate that dataset again.
     action_names: list[str] | None = None
@@ -405,6 +415,11 @@ class TrainingJob:
             "last_event": self.last_event,
             "paused": self.paused,
             "phase": self.phase,
+            "control_settings": (
+                self.control_settings.to_dict()
+                if self.control_settings is not None
+                else None
+            ),
         }
 
 
@@ -855,6 +870,7 @@ class TrainingService:
                 if gripper_metadata_path.is_file()
                 else None
             ),
+            "control_settings": checkpoint_control_settings(model_dir),
         }
 
     def _dataset_gripper_command(
@@ -1140,9 +1156,30 @@ class TrainingService:
             if key not in depth_keys and feature["type"] != "ACTION"
         }
 
+    @staticmethod
+    def _validate_checkpoint_control(
+        checkpoint_info: dict[str, Any], dataset_root: Path
+    ) -> None:
+        """Refuse to fine-tune on data recorded under other follower settings.
+
+        The fine-tuned policy is rolled out at one stiffness, so data recorded
+        at another would teach it targets that press with a different force.
+        A checkpoint without control.json was trained before it existed, on
+        teleop data at the teleop controller's default.
+        """
+        checkpoint = checkpoint_info.get("control_settings") or ControlSettings()
+        dataset = effective_control_settings(dataset_root)
+        if not dataset.matches(checkpoint):
+            raise ValueError(
+                "Dataset was recorded under different follower control settings "
+                f"than the source checkpoint: checkpoint {checkpoint.describe()}, "
+                f"dataset {dataset.describe()}"
+            )
+
     def _validate_checkpoint_dataset(
         self, checkpoint_info: dict[str, Any], dataset_root: Path
     ) -> None:
+        self._validate_checkpoint_control(checkpoint_info, dataset_root)
         dataset_info = self._read_json(dataset_root / "meta" / "info.json")
         dataset_gripper = self._dataset_gripper_command_metadata(dataset_root)
         checkpoint_gripper = checkpoint_info.get("gripper_command_metadata")
@@ -1476,6 +1513,7 @@ class TrainingService:
             gripper_command_metadata = self._dataset_preflight(
                 resolved_root
             ).gripper_command_metadata
+            control_settings = dataset_control_settings(resolved_root)
             output_dir = self._resolve_output_dir(output_dir)
             normalized_extra_args = list(extra_args or [])
             checkpoint_info: dict[str, Any] | None = None
@@ -1506,6 +1544,12 @@ class TrainingService:
                 raise ValueError(
                     "B-spline Diffusion cannot convert a Hub dataset in place. "
                     "Download the dataset locally first, then train from it."
+                )
+            if checkpoint_info is not None:
+                # Before a conversion too, which would only fail afterwards.
+                self._validate_checkpoint_control(checkpoint_info, resolved_root)
+                control_settings = control_settings or checkpoint_info.get(
+                    "control_settings"
                 )
             if checkpoint_info is not None and not requires_conversion:
                 self._validate_checkpoint_dataset(checkpoint_info, resolved_root)
@@ -1583,6 +1627,7 @@ class TrainingService:
                 source_dataset_root=resolved_root if requires_conversion else None,
                 converted_dataset_root=effective_root if requires_conversion else None,
                 gripper_command_metadata=gripper_command_metadata,
+                control_settings=control_settings,
                 action_names=self._dataset_action_names(effective_root),
                 phase=phase,
                 status="running",
@@ -1783,6 +1828,15 @@ class TrainingService:
             write_gripper_command_metadata(model_dir, metadata, checkpoint=True)
 
     @staticmethod
+    def _sync_control_settings(job: TrainingJob) -> None:
+        """Write control.json beside every saved checkpoint, for the rollout."""
+        settings = job.control_settings
+        if settings is None or not job.output_dir.is_dir():
+            return
+        for model_dir in TrainingService._checkpoint_model_dirs(job):
+            write_control_settings(model_dir, settings, checkpoint=True)
+
+    @staticmethod
     def _checkpoint_model_dirs(job: TrainingJob) -> set[Path]:
         return {
             path.parent
@@ -1825,6 +1879,7 @@ class TrainingService:
                 self._update_job_from_log(job, text)
                 if job.last_event == "checkpoint_saved":
                     self._sync_gripper_command_metadata(job)
+                    self._sync_control_settings(job)
                     self._sync_action_names(job)
                 stream("TRAIN", text, detail=f"job_id={job.job_id}")
             job.return_code = job.process.wait()
@@ -1861,6 +1916,7 @@ class TrainingService:
                 return
 
             self._sync_gripper_command_metadata(job)
+            self._sync_control_settings(job)
             self._sync_action_names(job)
 
             if job.pulse is not None:

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from flexivtrainer.config import AppSettings, TeleopRobotPair
+from flexivtrainer.data.control_settings import ControlSettings
 from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.evaluation.checks import read_ticks, run_checks
 from flexivtrainer.evaluation.outcome import (
@@ -50,6 +51,7 @@ from flexivtrainer.rollout.checkpoint import (
     _positive_float,
     checkpoint_action_names,
     checkpoint_action_output_dim,
+    checkpoint_control,
     checkpoint_gripper_command_metadata,
     checkpoint_image_resolutions,
     checkpoint_state_input_dim,
@@ -71,6 +73,7 @@ from flexivtrainer.rollout.recorder import RecordingPlan, RolloutRecorder
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
 from flexivtrainer.rollout.safety import SafetyEnvelope
+from flexivtrainer.rollout.stiffness import StiffnessChoice, choose_rollout_stiffness
 from flexivtrainer.rollout.takeover import LeaderTrigger, Takeover, TakeoverRefused
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
@@ -207,6 +210,8 @@ class RolloutService:
         self._wrench: deque[dict[str, Any]] = deque(maxlen=30)
         self._send_twist: bool | None = None
         self._safety: SafetyEnvelope | None = None
+        # The Cartesian stiffness of the current or last rollout, and its source.
+        self._stiffness: StiffnessChoice | None = None
         self._trial: TrialContext | None = None
         # The recording of the current or last rollout while it is written.
         self._recording: dict[str, Any] | None = None
@@ -243,6 +248,9 @@ class RolloutService:
                 "send_twist": self._send_twist,
                 "send_twist_default": bool(self._settings.rollout.send_twist),
                 "safety": self._safety.describe() if self._safety is not None else None,
+                "stiffness": (
+                    self._stiffness.to_dict() if self._stiffness is not None else None
+                ),
                 "recording": self._recording_status(),
                 "takeover": self._takeover_status(),
                 "awaiting_verdict": self._public_awaiting(),
@@ -325,6 +333,15 @@ class RolloutService:
         # HubError propagates as-is so the route can map its subclasses to
         # distinct status codes rather than a blanket 409.
         checkpoint_path = str(resolved_checkpoint)
+        # Before anything is loaded or moved: a rollout with no known stiffness
+        # is refused here.
+        stiffness = choose_rollout_stiffness(
+            self._settings.rollout.cartesian_stiffness,
+            checkpoint_control(checkpoint_path),
+            allow_controller_default=(
+                self._settings.rollout.allow_controller_default_stiffness
+            ),
+        )
 
         device = self._resolve_device(self._settings.training.default_device)
         sides = self._get_active_sides()
@@ -500,6 +517,7 @@ class RolloutService:
                 lease=lease,
                 sides=sides,
                 max_contact_wrench=_takeover_wrench(self._settings),
+                cartesian_stiffness=stiffness.values,
                 append_log=self._append_log,
             )
             if trigger_arm is not None:
@@ -524,6 +542,7 @@ class RolloutService:
                 camera_names=camera_names,
                 send_twist=effective_twist,
                 safety=safety,
+                stiffness=stiffness,
             )
         if recording is not None:
             recording["takeover"] = takeover
@@ -558,7 +577,9 @@ class RolloutService:
                     on_finished=self._on_runner_finished,
                     release_robots=self._make_release_robots(robots, lease),
                     stop_robots=hardware.stop_robots,
-                    prepare_motion=self._prepare_motion,
+                    prepare_motion=partial(
+                        self._prepare_motion, stiffness=stiffness.values
+                    ),
                     gripper_default_width_m=gripper_default_width_m,
                     gripper_initialization_registry=(self._gripper_initialization_registry),
                     gripper_command_parameters=gripper_command_parameters,
@@ -612,7 +633,7 @@ class RolloutService:
                     safety=safety,
                     recorder=recording["recorder"] if recording is not None else None,
                     send_twist=effective_twist,
-                    cartesian_stiffness=app_rollout.cartesian_stiffness,
+                    cartesian_stiffness=stiffness.values,
                     max_contact_wrench=app_rollout.max_contact_wrench,
                     takeover=takeover,
                     action_names=waypoint_action_names,
@@ -633,6 +654,7 @@ class RolloutService:
         with self._lock:
             self._send_twist = effective_twist if bspline_layout is None else None
             self._safety = safety if bspline_layout is None else None
+            self._stiffness = stiffness
             self._trial = trial
             self._recording = recording
             self._takeover = takeover
@@ -671,11 +693,18 @@ class RolloutService:
                         "ROLLOUT",
                         "Safety envelope",
                         f"{safety.describe()}; velocity feedforward "
-                        f"{'on' if effective_twist else 'off'}; stiffness "
-                        + str(
-                            _as_list(app_rollout.cartesian_stiffness)
-                            or "controller default"
-                        ),
+                        f"{'on' if effective_twist else 'off'}",
+                    )
+                )
+            self._logs.append(
+                _encode_ui_log(
+                    "INFO", "ROLLOUT", "Cartesian stiffness", stiffness.describe()
+                )
+            )
+            if stiffness.warning:
+                self._logs.append(
+                    _encode_ui_log(
+                        "WARN", "ROLLOUT", "Cartesian stiffness", stiffness.warning
                     )
                 )
             if recording is not None:
@@ -739,6 +768,8 @@ class RolloutService:
                         _describe_rollout_overrides(rollout_cfg),
                     )
                 )
+        if stiffness.warning:
+            warn("Rollout Cartesian stiffness", stiffness.warning)
         self._runner = runner
         runner.start()
         if takeover is not None:
@@ -759,6 +790,7 @@ class RolloutService:
         camera_names: list[str],
         send_twist: bool,
         safety: SafetyEnvelope,
+        stiffness: StiffnessChoice,
     ) -> dict[str, Any]:
         storage = self._settings.storage
         rollout = self._settings.rollout
@@ -779,6 +811,13 @@ class RolloutService:
             action_names=list(action_names or []),
             sides=list(sides),
             cameras=list(camera_names),
+            # A recorded rollout can be merged and trained on like a
+            # demonstration, so it stores its follower settings the same way.
+            control=ControlSettings(
+                recorded_in="rollout",
+                follower_cartesian_stiffness=stiffness.values,
+                follower_max_contact_wrench=rollout.max_contact_wrench,
+            ),
         )
         outcome = RolloutOutcome(
             episode=destination.name,
@@ -792,9 +831,10 @@ class RolloutService:
             send_twist=send_twist,
             safety={
                 **safety.to_dict(),
-                "cartesian_stiffness": _as_list(rollout.cartesian_stiffness),
+                "cartesian_stiffness": stiffness.values,
                 "max_contact_wrench": _as_list(rollout.max_contact_wrench),
             },
+            stiffness=stiffness.to_dict(),
         )
         return {
             "recorder": RolloutRecorder(plan, outcome),
@@ -1523,13 +1563,15 @@ class RolloutService:
                 )
             )
 
-    def _prepare_motion(self, robot: Any, serial: str) -> None:
+    def _prepare_motion(
+        self, robot: Any, serial: str, *, stiffness: list[float] | None
+    ) -> None:
         hardware.prepare_robot_motion(
             robot,
             serial,
             self._stop_event,
             self._append_log,
-            stiffness=self._settings.rollout.cartesian_stiffness,
+            stiffness=stiffness,
             max_contact_wrench=self._settings.rollout.max_contact_wrench,
         )
 

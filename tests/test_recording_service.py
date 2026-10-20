@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig
+from flexivtrainer.data.control_settings import ControlSettings
 from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.data.recording_service import (
     DEFAULT_JOB_NAME,
@@ -217,6 +218,11 @@ class _FakeTeleop:
     def gripper_command_metadata(self):
         return GripperCommandMetadata(velocity_m_s=0.2, force_limit_n=20.0)
 
+    def control_settings(self):
+        return ControlSettings(
+            follower_cartesian_stiffness=[2500, 2500, 2800, 150, 150, 150]
+        )
+
 
 class _FakeTeleopWithoutCommand(_FakeTeleop):
     def robot_data_snapshot(self, *, include_states=True, include_actions=True):
@@ -298,6 +304,14 @@ def test_records_gripper_state_and_target_command_into_saved_episode(tmp_path) -
         "velocity_m_s": 0.2,
         "force_limit_n": 20.0,
     }
+    # The stiffness the teleop loop ran at is stored with the episode.
+    assert json.loads((Path(result["path"]) / "meta" / "control.json").read_text()) == {
+        "format_version": 1,
+        "recorded_in": "teleop",
+        "follower_cartesian_stiffness": [2500.0, 2500.0, 2800.0, 150.0, 150.0, 150.0],
+        "follower_max_contact_wrench": "controller default",
+        "wrench_feedback_scale": "controller default",
+    }
 
 
 class _FakeTeleopWithQuaternionFlips:
@@ -326,6 +340,9 @@ class _FakeTeleopWithQuaternionFlips:
 
     def gripper_command_metadata(self):
         return None
+
+    def control_settings(self):
+        return ControlSettings()
 
 
 def test_recorded_rotation_is_identical_despite_driver_sign_flips(

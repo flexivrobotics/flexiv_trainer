@@ -37,6 +37,7 @@ from typing import Any
 
 import numpy as np
 
+from flexivtrainer.data.control_settings import CONTROL_RELATIVE_PATH
 from flexivtrainer.data.gripper_command import GRIPPER_COMMAND_RELATIVE_PATH
 
 _WRENCH_ACTION_MARKER = ".tcp_wrench."
@@ -159,12 +160,12 @@ def _refresh_action_statistics(
         )
 
 
-def _copy_gripper_command(source: Path, staging: Path) -> None:
-    """Carry the sidecar across; LeRobot only rebuilds its own metadata files."""
+def _copy_sidecars(source: Path, staging: Path) -> None:
+    """Carry the sidecars across; LeRobot only rebuilds its own metadata files."""
 
-    command_path = source / GRIPPER_COMMAND_RELATIVE_PATH
-    if command_path.is_file():
-        shutil.copy2(command_path, staging / GRIPPER_COMMAND_RELATIVE_PATH)
+    for relative in (GRIPPER_COMMAND_RELATIVE_PATH, CONTROL_RELATIVE_PATH):
+        if (source / relative).is_file():
+            shutil.copy2(source / relative, staging / relative)
 
 
 def _validate_output(
@@ -333,7 +334,7 @@ def remove_action_wrench(
             projected_feature,
             dict(dataset.meta.stats or {}),
         )
-        _copy_gripper_command(source, staging)
+        _copy_sidecars(source, staging)
         _validate_output(staging, len(actions), projected_names)
         staging.replace(output)
     except Exception:

@@ -258,6 +258,7 @@ class Takeover:
         lease: Any,
         sides: Sequence[str],
         max_contact_wrench: Sequence[float] | None = None,
+        cartesian_stiffness: Sequence[float] | None = None,
         append_log: Callable[..., None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -267,6 +268,13 @@ class Takeover:
         self._max_contact_wrench = (
             [float(v) for v in max_contact_wrench]
             if max_contact_wrench is not None
+            else None
+        )
+        # The rollout's stiffness, so the follower is as stiff under the
+        # operator as under the policy. None leaves the teleop controller's.
+        self._cartesian_stiffness = (
+            [float(v) for v in cartesian_stiffness]
+            if cartesian_stiffness is not None
             else None
         )
         self._append_log = append_log or (lambda *args: None)
@@ -408,7 +416,9 @@ class Takeover:
                 return
             try:
                 self._teleop.resume_for_takeover(
-                    self._lease, max_contact_wrench=self._max_contact_wrench
+                    self._lease,
+                    max_contact_wrench=self._max_contact_wrench,
+                    cartesian_stiffness=self._cartesian_stiffness,
                 )
             except Exception as exc:
                 self._failed(OPERATOR, started, exc)

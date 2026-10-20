@@ -107,6 +107,10 @@ class RolloutOutcome:
     condition: str | None = None
     send_twist: bool = True
     safety: dict[str, Any] = field(default_factory=dict)
+    #: The Cartesian stiffness applied and where it came from (rollout/
+    #: stiffness.py): {applied, source, trained, warning}. Empty in outcomes
+    #: written before it was recorded.
+    stiffness: dict[str, Any] = field(default_factory=dict)
     verdict: Verdict | None = None
     checks: dict[str, Any] = field(default_factory=dict)
     #: Leader-arm takeovers, when one was possible: {count, ticks, seconds,
