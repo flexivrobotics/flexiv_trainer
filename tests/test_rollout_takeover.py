@@ -638,12 +638,15 @@ def test_a_failed_hand_back_does_not_resume_the_policy(make_rig, step) -> None:
 def test_the_stale_plan_watchdog_rests_while_the_operator_has_control(
     make_rig,
 ) -> None:
+    # The watchdog has to outlast the first plan after hand-back, which at the
+    # test's 10 Hz takes one to two ticks; the operator holds the arm for twice
+    # the watchdog, which would trip it if it did not rest.
     rig = make_rig(
-        configure=lambda settings: setattr(settings.rollout, "stale_plan_s", 0.25)
+        configure=lambda settings: setattr(settings.rollout, "stale_plan_s", 0.6)
     )
     _start(rig)
     _take_over(rig)
-    time.sleep(0.5)
+    time.sleep(1.2)
     assert rig.service.status()["status"] == "running"
 
     mark = _hand_back(rig)
