@@ -28,6 +28,15 @@ plan and scored when each trial's recording is saved:
       }
     }
 
+A `learned` check (`learned_check.py`) is a small classifier trained from
+labelled frames, for states the arm's pose cannot settle, such as a latch
+having closed. It is scored from the trial's recorded camera frames and state
+rather than its tick log:
+
+    "checks": {
+      "closed": {"kind": "learned", "model": "checks/closed", "hold_s": 0.2}
+    }
+
 THE OPERATOR'S VERDICT STAYS THE MEASUREMENT. A check earns trust only by
 agreeing with verdicts over many trials, which the session summary reports
 (`agreement`). Until then it is a candidate, stored beside the verdict. The
@@ -51,8 +60,11 @@ from .stats import wilson_interval
 
 __all__ = [
     "CHECK_KINDS",
+    "Check",
+    "LearnedCheck",
     "SettledInBox",
     "agreement",
+    "held_runs",
     "parse_checks",
     "read_ticks",
     "run_checks",
@@ -126,28 +138,18 @@ class SettledInBox:
         """`passed`, the longest qualifying stretch, and when the first began."""
         samples = [self._sample(tick) for tick in ticks]
         speeds = self._speeds(samples)
-        runs: list[tuple[float, float, bool]] = []  # (start s, end s, reaches the end)
-        start: float | None = None
-        last: float | None = None
-        for index, (sample, speed) in enumerate(zip(samples, speeds)):
-            inside = (
-                sample is not None
-                and speed is not None
-                and speed <= self.max_speed_m_s
-                and all(
-                    lo <= p <= hi
-                    for p, lo, hi in zip(sample[1], self.box_min_m, self.box_max_m)
-                )
+        inside = [
+            sample is not None
+            and speed is not None
+            and speed <= self.max_speed_m_s
+            and all(
+                lo <= p <= hi
+                for p, lo, hi in zip(sample[1], self.box_min_m, self.box_max_m)
             )
-            if inside:
-                if start is None:
-                    start = sample[0]
-                last = sample[0]
-            elif start is not None:
-                runs.append((start, last, False))
-                start = None
-            if index == len(samples) - 1 and start is not None:
-                runs.append((start, last, True))
+            for sample, speed in zip(samples, speeds)
+        ]
+        times = [sample[0] if sample is not None else None for sample in samples]
+        runs = held_runs(times, inside)
         qualifying = [r for r in runs if r[1] - r[0] >= self.hold_s]
         if self.when == "end":
             qualifying = [r for r in qualifying if r[2]]
@@ -196,10 +198,109 @@ class SettledInBox:
         return speeds
 
 
-CHECK_KINDS = {SettledInBox.kind: SettledInBox}
+@dataclass(frozen=True)
+class LearnedCheck:
+    """Passes when a learned check's probability stays at or above its
+    threshold for at least `hold_s` -- at any time (`when` "any") or at the end
+    of the recording (`when` "end").
+
+    `model` is a folder written by `learned_check.py`, absolute or relative to
+    the storage root. `threshold`, when given, replaces the one it was saved
+    with. Scored from the recorded frames, so a trial whose recording was not
+    saved is left unscored.
+    """
+
+    model: str
+    threshold: float | None = None
+    hold_s: float = 0.2
+    when: str = "any"
+
+    kind = "learned"
+
+    def __post_init__(self) -> None:
+        if not self.model:
+            raise ValueError("a learned check needs a model folder")
+        if self.threshold is not None and not 0.0 < self.threshold < 1.0:
+            raise ValueError("threshold must be between 0 and 1")
+        if not (math.isfinite(self.hold_s) and self.hold_s >= 0):
+            raise ValueError("hold_s must be 0 or more")
+        if self.when not in ("any", "end"):
+            raise ValueError(f"when must be 'any' or 'end', not {self.when!r}")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LearnedCheck:
+        known = {"kind", "model", "threshold", "hold_s", "when"}
+        unknown = sorted(set(data) - known)
+        if unknown:
+            raise ValueError(f"unknown keys {unknown}; known are {sorted(known)}")
+        threshold = data.get("threshold")
+        return cls(
+            model=str(data.get("model") or ""),
+            threshold=None if threshold is None else float(threshold),
+            hold_s=float(data.get("hold_s", cls.hold_s)),
+            when=str(data.get("when", cls.when)),
+        )
+
+    def model_path(self, storage_root: Path | None) -> Path:
+        path = Path(self.model).expanduser()
+        if path.is_absolute():
+            return path
+        if storage_root is None:
+            raise ValueError(
+                f"model {self.model!r} is relative, and no storage root was given"
+            )
+        return Path(storage_root) / path
+
+    def evaluate_recording(
+        self, episode_dir: Path, storage_root: Path | None = None
+    ) -> dict[str, Any]:
+        """`passed`, the longest stretch above the threshold, when the first
+        qualifying one began, and the highest probability."""
+        from .learned_check import judge, load_model, score_episode  # noqa: PLC0415
+
+        model = load_model(self.model_path(storage_root))
+        times, probabilities = score_episode(model, Path(episode_dir))
+        threshold = model.threshold if self.threshold is None else self.threshold
+        return {
+            "kind": self.kind,
+            **judge(times, probabilities, threshold, self.hold_s, self.when),
+            "threshold": threshold,
+            "frames": len(times),
+        }
 
 
-def parse_checks(data: Any) -> dict[str, SettledInBox]:
+Check = SettledInBox | LearnedCheck
+
+CHECK_KINDS: dict[str, type[Check]] = {
+    SettledInBox.kind: SettledInBox,
+    LearnedCheck.kind: LearnedCheck,
+}
+
+
+def held_runs(
+    times: list[float | None], flags: list[bool]
+) -> list[tuple[float, float, bool]]:
+    """Unbroken stretches of True: (start s, end s, reaches the last sample).
+
+    A sample without a time is never part of a stretch.
+    """
+    runs: list[tuple[float, float, bool]] = []
+    start: float | None = None
+    last = 0.0
+    for index, (t, flag) in enumerate(zip(times, flags, strict=True)):
+        if flag and t is not None:
+            if start is None:
+                start = float(t)
+            last = float(t)
+        elif start is not None:
+            runs.append((start, last, False))
+            start = None
+        if index == len(flags) - 1 and start is not None:
+            runs.append((start, last, True))
+    return runs
+
+
+def parse_checks(data: Any) -> dict[str, Check]:
     """A plan's `checks` object -> name -> check. Strict: an unknown kind or key,
     or a malformed number, is refused rather than skipped."""
     if data is None:
@@ -236,17 +337,35 @@ def read_ticks(episode_dir: Path) -> list[dict[str, Any]]:
 
 
 def run_checks(
-    checks: dict[str, SettledInBox], ticks: list[dict[str, Any]]
+    checks: dict[str, Check],
+    ticks: list[dict[str, Any]],
+    *,
+    episode_dir: Path | None = None,
+    storage_root: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Every check's result. One that cannot be scored records why instead of
-    a `passed`, so it is counted as unscored, never as a failure."""
+    a `passed`, so it is counted as unscored, never as a failure.
+
+    `episode_dir` is the recorded trial, which learned checks read; relative
+    model paths are resolved against `storage_root`.
+    """
     results = {}
     for name, check in checks.items():
-        if not ticks:
+        if isinstance(check, LearnedCheck):
+            if (
+                episode_dir is None
+                or not (Path(episode_dir) / "meta" / "info.json").is_file()
+            ):
+                results[name] = {"kind": check.kind, "error": "no recording"}
+                continue
+        elif not ticks:
             results[name] = {"kind": check.kind, "error": "no tick log"}
             continue
         try:
-            results[name] = check.evaluate(ticks)
+            if isinstance(check, LearnedCheck):
+                results[name] = check.evaluate_recording(episode_dir, storage_root)
+            else:
+                results[name] = check.evaluate(ticks)
         except Exception as exc:  # a check must never lose a trial
             results[name] = {
                 "kind": check.kind,
