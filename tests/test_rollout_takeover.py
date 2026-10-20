@@ -39,6 +39,7 @@ from test_rollout_service import (
     _settings,
     _single_arm_pairs,
 )
+from waits import WAIT_S
 
 import flexivtrainer.teleop.end_effector as ee
 import flexivtrainer.teleop.service as teleop_module
@@ -223,7 +224,7 @@ class _CountingPolicy(_FakePolicy):
             self.block_next_plan = False
             self.blocked_call = call
             self.blocked.set()
-            assert self.release.wait(timeout=5.0)
+            assert self.release.wait(timeout=WAIT_S)
         action = list(self._action)
         action[0] = BASE_X + call * STEP_X
         if call == self.blocked_call:
@@ -328,7 +329,7 @@ def make_rig(tmp_path, monkeypatch):
         service.stop()
 
 
-def _wait(predicate, what: str, timeout: float = 5.0) -> None:
+def _wait(predicate, what: str, timeout: float = WAIT_S) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -341,7 +342,7 @@ def _takeover(rig) -> dict:
     return rig.service.status()["takeover"]
 
 
-def _wait_state(rig, state: str, timeout: float = 5.0) -> None:
+def _wait_state(rig, state: str, timeout: float = WAIT_S) -> None:
     _wait(lambda: _takeover(rig)["state"] == state, f"state {state}", timeout)
 
 
@@ -558,7 +559,7 @@ def test_a_plan_computed_across_a_takeover_is_never_sent(make_rig) -> None:
     _start(rig)
     rig.policy.blocked_offset_m = 10.0
     rig.policy.block_next_plan = True
-    assert rig.policy.blocked.wait(timeout=5.0)
+    assert rig.policy.blocked.wait(timeout=WAIT_S)
     stale = rig.policy.blocked_call
 
     _take_over(rig)
@@ -639,14 +640,15 @@ def test_the_stale_plan_watchdog_rests_while_the_operator_has_control(
     make_rig,
 ) -> None:
     # The watchdog has to outlast the first plan after hand-back, which at the
-    # test's 10 Hz takes one to two ticks; the operator holds the arm for twice
-    # the watchdog, which would trip it if it did not rest.
+    # test's 10 Hz takes one to two ticks, five times over for a slow CI runner;
+    # the operator holds the arm for twice the watchdog, which would trip it if
+    # it did not rest.
     rig = make_rig(
-        configure=lambda settings: setattr(settings.rollout, "stale_plan_s", 0.6)
+        configure=lambda settings: setattr(settings.rollout, "stale_plan_s", 1.0)
     )
     _start(rig)
     _take_over(rig)
-    time.sleep(1.2)
+    time.sleep(2.0)
     assert rig.service.status()["status"] == "running"
 
     mark = _hand_back(rig)
@@ -1044,7 +1046,7 @@ class _PauseFirst:
             self.fired.set()
             pausing = threading.Thread(target=self._pause)
             pausing.start()
-            pausing.join(timeout=2.0)
+            pausing.join(timeout=WAIT_S)
             assert not pausing.is_alive()
         self._real.acquire()
         return self
@@ -1064,7 +1066,7 @@ def test_a_waypoint_popped_just_before_a_pause_is_not_sent() -> None:
     try:
         now = time.monotonic()
         executor.replace_waypoints([_pose_action(0.4)], [now + 0.05], now)
-        assert gate.fired.wait(timeout=2.0)
+        assert gate.fired.wait(timeout=WAIT_S)
         time.sleep(0.2)
         assert executor.paused
         assert robot.commands == [], "a waypoint was sent after pause() returned"

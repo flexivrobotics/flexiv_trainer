@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from waits import WAIT_S
 
 # psutil arrives transitively via lerobot, which is not installed in the
 # deps-light CI env. Skip this module rather than fail collection when it's gone.
@@ -287,7 +288,12 @@ def test_pause_resume_suspends_and_continues_process(tmp_path: Path) -> None:
 
         snap = service.pause()
         assert snap["paused"] is True
-        time.sleep(0.3)
+        deadline = time.monotonic() + WAIT_S
+        while (
+            psutil.Process(proc.pid).status() != psutil.STATUS_STOPPED
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
         assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
 
         # Pausing again is idempotent.
@@ -295,7 +301,12 @@ def test_pause_resume_suspends_and_continues_process(tmp_path: Path) -> None:
 
         snap = service.resume()
         assert snap["paused"] is False
-        time.sleep(0.3)
+        deadline = time.monotonic() + WAIT_S
+        while (
+            psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
         assert psutil.Process(proc.pid).status() != psutil.STATUS_STOPPED
     finally:
         proc.terminate()

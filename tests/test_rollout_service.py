@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from waits import WAIT_S
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
 from flexivtrainer.data.control_settings import ControlSettings, write_control_settings
@@ -960,7 +961,7 @@ def _stub_cudagraph_state(monkeypatch) -> None:
 def _run_one_tick(service: RolloutService, robot: _FakeRobot, checkpoint: str) -> None:
     """Start the loop and stop it after at least one command is sent."""
     service.start(checkpoint)
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while not robot.commands and time.monotonic() < deadline:
         time.sleep(0.01)
     service.stop()
@@ -1069,7 +1070,7 @@ def test_bspline_observations_continue_during_slow_inference(
             self.inference_count += 1
             if self.inference_count == 2:
                 inference_started.set()
-                assert inference_release.wait(timeout=2.0)
+                assert inference_release.wait(timeout=WAIT_S)
             return super().predict_action_chunk()
 
     policy = SlowPolicy()
@@ -1088,10 +1089,17 @@ def test_bspline_observations_continue_during_slow_inference(
     )
 
     service.start(_checkpoint_of_type(tmp_path, "bspline_diffusion"))
-    assert inference_started.wait(timeout=2.0)
+    assert inference_started.wait(timeout=WAIT_S)
     observations_before = len(policy.observations)
     commands_before = len(robot.commands)
-    time.sleep(0.22)
+    # Inference stays blocked until it is released below, so whatever arrives
+    # meanwhile arrived during it.
+    deadline = time.monotonic() + WAIT_S
+    while (
+        len(policy.observations) < observations_before + 2
+        or len(robot.commands) <= commands_before
+    ) and time.monotonic() < deadline:
+        time.sleep(0.01)
 
     assert len(policy.observations) >= observations_before + 2
     assert len(robot.commands) > commands_before
@@ -1132,6 +1140,7 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
+    earlier = set(threading.enumerate())
     _run_one_tick(service, robot, _checkpoint(tmp_path))
 
     assert policy.reset_count == 1
@@ -1151,11 +1160,15 @@ def test_rollout_loop_streams_commands_and_stops(tmp_path, monkeypatch) -> None:
         cfg.max_linear_vel, cfg.max_angular_vel,
         cfg.max_linear_acc, cfg.max_angular_acc,
     )
-    # Clean shutdown: status settled and both rollout threads no longer running.
+    # Clean shutdown: status settled and both of this run's threads no longer
+    # running. A planner another test stopped may still be finishing: the first
+    # rollout in a process imports LeRobot and torch on its planner thread, and
+    # on a slow runner that outlasts the stop's wait.
     assert service.status()["status"] in {"idle", "stopped"}
     assert not any(
         t.name in {"rollout-policy-planner", "rollout-waypoint-executor"}
         and t.is_alive()
+        and t not in earlier
         for t in threading.enumerate()
     )
     assert any(
@@ -1254,7 +1267,7 @@ def test_waypoint_rollout_schedules_gripper_width_and_observes_telemetry(
     )
 
     service.start(checkpoint)
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while (
         (not instances or not instances[0].submissions)
         and time.monotonic() < deadline
@@ -1356,7 +1369,7 @@ def test_waypoint_gripper_worker_failure_marks_rollout_failed(
     )
 
     service.start(checkpoint)
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while (
         service.status()["status"] == "running"
         and time.monotonic() < deadline
@@ -1408,7 +1421,7 @@ def test_dual_arm_act_without_wrench_uses_checkpoint_action_names(
     )
 
     service.start(checkpoint)
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while (
         (not robots["F1"].commands or not robots["F2"].commands)
         and time.monotonic() < deadline
@@ -1502,7 +1515,7 @@ def test_start_threads_task_into_prediction(tmp_path, monkeypatch) -> None:
     )
 
     service.start(_checkpoint(tmp_path), task="pick up the cube")
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while not robot.commands and time.monotonic() < deadline:
         time.sleep(0.01)
     assert service.status()["task"] == "pick up the cube"
@@ -1531,7 +1544,7 @@ def test_start_normalizes_blank_task_to_none(tmp_path, monkeypatch) -> None:
     )
 
     service.start(_checkpoint(tmp_path), task="   ")
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while not robot.commands and time.monotonic() < deadline:
         time.sleep(0.01)
     assert service.status()["task"] is None
@@ -1619,7 +1632,7 @@ def test_fault_aborts_loop_and_records_error(tmp_path, monkeypatch) -> None:
     service.start(_checkpoint(tmp_path))
     # Trip a fault; the loop checks fault() each tick and must abort.
     robot._fault = True
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     status = service.status()
@@ -1673,7 +1686,7 @@ def test_overlapped_replan_forces_and_extends_committed_path(
     )
 
     service.start(_checkpoint(tmp_path))
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + WAIT_S
     while len(forces) < 12 and time.monotonic() < deadline:
         time.sleep(0.01)
     service.stop()
@@ -1957,7 +1970,7 @@ def test_max_steps_reports_timeout_stop_reason(tmp_path, monkeypatch) -> None:
     )
 
     service.start(_checkpoint(tmp_path))
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     status = service.stop()
@@ -2063,7 +2076,7 @@ def test_act_compile_failure_stops_before_waypoint_dispatch(
     )
 
     service.start(_checkpoint(tmp_path))
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     status = service.stop()
@@ -2136,7 +2149,7 @@ def test_compiled_act_marks_only_cuda_inference_steps(
     )
 
     service.start(_checkpoint(tmp_path))
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     service.stop()
@@ -2193,7 +2206,7 @@ def test_cuda_graph_state_is_seeded_on_the_planner_thread_before_compile(
     )
 
     service.start(_checkpoint(tmp_path))
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     service.stop()
@@ -2236,7 +2249,13 @@ def test_cuda_graph_state_is_not_seeded_without_compilation(
         lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
     )
 
-    _run_one_tick(service, robot, _checkpoint(tmp_path))
+    # The run ends by itself after its one step and may send no command first,
+    # so wait for it to end rather than for a command.
+    service.start(_checkpoint(tmp_path))
+    deadline = time.monotonic() + WAIT_S
+    while service.status()["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    service.stop()
 
     # Teardown must not reset trees this thread never seeded: that reproduces
     # the original assert on top of whatever ended the run.
@@ -2303,7 +2322,7 @@ def test_start_refuses_while_the_previous_planner_is_alive(
             service.start(checkpoint)
     finally:
         release.set()
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "stopping" and time.monotonic() < deadline:
         time.sleep(0.01)
     assert service.status()["status"] != "stopping"

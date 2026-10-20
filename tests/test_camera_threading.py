@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from waits import WAIT_S
 
 from flexivtrainer.cameras import service as camera_module
 from flexivtrainer.cameras.service import CameraRuntime, CameraService
@@ -121,7 +122,7 @@ def test_fps_uses_exponential_moving_average(tmp_path, monkeypatch) -> None:
     runtime = service._runtimes["ego"]
     # The acquisition thread populates FPS on its own cadence; wait for it to
     # build up history rather than driving it from read_frames calls.
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while runtime.fps <= 0 and time.monotonic() < deadline:
         time.sleep(0.01)
 
@@ -136,6 +137,7 @@ def test_fps_uses_exponential_moving_average(tmp_path, monkeypatch) -> None:
     # Consumers read the latest cached frame without touching the pipeline.
     frames = service.read_frames(block=True, timeout_ms=100, camera_names=["ego"])
     assert "ego" in frames
+    service.stop_streams()
 
 
 def test_concurrent_read_frames_does_not_crash(tmp_path, monkeypatch) -> None:
@@ -160,6 +162,7 @@ def test_concurrent_read_frames_does_not_crash(tmp_path, monkeypatch) -> None:
         t.join()
 
     assert not errors, f"Concurrent read_frames raised: {errors}"
+    service.stop_streams()
 
 
 def test_capture_frame_uses_cached_when_read_fails(tmp_path, monkeypatch) -> None:
@@ -182,6 +185,7 @@ def test_capture_frame_uses_cached_when_read_fails(tmp_path, monkeypatch) -> Non
     frame = service.capture_frame("ego")
     assert frame is not None
     assert "image" in frame
+    service.stop_streams()
 
 
 def test_stop_streams_clears_runtime_state(tmp_path, monkeypatch) -> None:
@@ -211,7 +215,7 @@ def test_stop_streams_clears_cached_frame(tmp_path, monkeypatch) -> None:
 
 def test_streaming_flag_requires_recent_frames(tmp_path, monkeypatch) -> None:
     service = _make_service(tmp_path, monkeypatch)
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while (
         not service.status()["cameras"]["ego"]["streaming"]
         and time.monotonic() < deadline
@@ -278,7 +282,7 @@ def test_warming_up_timeout_is_not_reported_as_error(tmp_path, monkeypatch) -> N
         pipeline_factory=lambda: WarmingPipeline(),
     )
     # While warming (timeouts inside the grace window) no error is surfaced.
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while (
         not service.status()["cameras"]["ego"]["streaming"]
         and time.monotonic() < deadline
@@ -338,7 +342,7 @@ def test_mid_session_dropout_surfaces_error(tmp_path, monkeypatch) -> None:
         ],
         pipeline_factory=lambda: DropoutPipeline(),
     )
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + WAIT_S
     while (
         service.status()["cameras"]["ego"]["error"] is None
         and time.monotonic() < deadline
@@ -374,7 +378,7 @@ def test_silent_pipeline_watchdog_retries_and_resets(tmp_path, monkeypatch) -> N
     fake_device = camera_module.rs.context().devices[0]
     fake_device.hardware_reset = lambda: resets.append("reset")
 
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + WAIT_S
     while len(starts) < 6 and time.monotonic() < deadline:
         time.sleep(0.02)
     # Never gives up: keeps restarting well past the old cap of 3.
@@ -423,11 +427,17 @@ def test_serial_churn_leaves_single_capture_thread(tmp_path, monkeypatch) -> Non
     assert not errors
 
     service.start_streams()
-    time.sleep(0.3)  # let any signalled old threads drain
-    alive = [
-        t for t in threading.enumerate() if t.name == "camera-acquire-churn_ego"
-    ]
-    assert len(alive) == 1
+
+    def alive() -> list[threading.Thread]:
+        return [
+            t for t in threading.enumerate() if t.name == "camera-acquire-churn_ego"
+        ]
+
+    # Let any signalled old threads drain.
+    deadline = time.monotonic() + WAIT_S
+    while len(alive()) > 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(alive()) == 1
     frames = service.read_frames(block=True, timeout_ms=500, camera_names=["churn_ego"])
     assert "churn_ego" in frames
     service.stop_streams()
