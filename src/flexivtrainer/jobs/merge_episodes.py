@@ -31,6 +31,7 @@ from flexivtrainer.data.gripper_command import (
     read_gripper_command_metadata,
     write_gripper_command_metadata,
 )
+from flexivtrainer.evaluation.check_labels import merge_labels
 
 
 def _load_manifest(root: Path) -> Any:
@@ -210,6 +211,9 @@ def merge_episode_datasets(
         write_gripper_command_metadata(target_root, gripper_command)
     if control is not None:
         write_control_settings(target_root, control)
+    # Learned-check labels follow their episodes, renumbered as the merge
+    # numbers them.
+    merge_labels([manifest.root for manifest in manifests], target_root)
 
     return {
         "output_name": output_name,

@@ -456,9 +456,10 @@ from 80% takes about 33 paired trials, or about 39 per arm unpaired. Telling
 ### Automatic checks
 
 A session can also declare checks: yes/no questions the robot's own
-measurements can answer, scored from each trial's `rollout_ticks.jsonl` when
-its recording is saved. Today there is one kind, `settled_in_box`: the tool
-comes to rest inside a box, in the arm's base frame, for at least `hold_s`.
+measurements can answer, scored when each trial's recording is saved. There
+are two kinds. `settled_in_box`, scored from the trial's `rollout_ticks.jsonl`:
+the tool comes to rest inside a box, in the arm's base frame, for at least
+`hold_s`. And `learned` (next section), scored from the recorded frames.
 
 ```json
 "checks": {
@@ -495,6 +496,67 @@ python -m flexivtrainer.evaluation.rescore <session> --checks other.json --write
 
 Without `--write` nothing on disk changes. With it, each trial's outcome gets
 the new results; verdicts are never touched.
+
+### Learned checks
+
+Some states are not settled by where the tool is: a latch has closed, a part
+sits flush, a cap is on. A learned check is a small classifier you train from
+labelled frames of your own recordings, demonstrations or rollouts.
+
+**Label.** For each episode, give the first frame at which the state holds, or
+`--never` when it never does. Frames from that one on are examples of "yes",
+frames before it of "no", and a short margin just before it is left out.
+Near misses labelled `--never` are the most useful labels you can give.
+Labels are stored in the dataset's `meta/check_labels.json` and follow their
+episodes through a merge.
+
+```bash
+python -m flexivtrainer.evaluation.learned_check label <dataset> --check closed --episode 3 --first-frame 412
+python -m flexivtrainer.evaluation.learned_check label <dataset> --check closed --episode 4 --never
+python -m flexivtrainer.evaluation.learned_check labels <dataset>
+```
+
+**Train.** Choose what the check looks at: cameras, each optionally cut to a
+box given as fractions of the frame (`x0,y0,x1,y1`), and `observation.state`
+columns such as a force axis. Each frame goes through a frozen, pretrained
+image network; only a small head is trained, which takes minutes.
+
+```bash
+python -m flexivtrainer.evaluation.learned_check train --check closed \
+    --data <dataset> --data <another dataset> --out <storage>/checks/closed \
+    --camera wrist --crop wrist=0.2,0.4,0.8,1.0 \
+    --state single_arm.tcp_wrench.fz
+```
+
+`--data` also takes a session folder. With `--verdicts`, a judged trial
+without a label counts too, when its verdict is about the check's state: a
+failure gives "no" frames throughout and a success gives "yes" frames at the
+end.
+
+Training holds out whole episodes (`--holdout`, default 20%) and prints, for
+each one, whether the check would have passed and whether that was right. Read
+`false_passes` first. A false pass is a pass that begins on a frame labelled
+"no": on an episode that never gets there, or before the labelled first frame
+of one that does. Whatever runs after the check would then start from a
+failure. `sweep` repeats the totals for thresholds from 0.1 to 0.9.
+
+**Use.** Name the folder in a session plan, as an absolute path or relative to
+the storage root:
+
+```json
+"checks": {
+  "closed": {"kind": "learned", "model": "checks/closed", "hold_s": 0.2}
+}
+```
+
+It passes when its probability stays at or above `threshold` (default: the
+one it was saved with, 0.5) for `hold_s`, at any time or, with `"when":
+"end"`, at the end. Like any check, it earns trust by agreeing with your
+verdicts. To score recordings outside a session:
+
+```bash
+python -m flexivtrainer.evaluation.learned_check score <dataset> --model <storage>/checks/closed
+```
 
 ### Velocity feedforward and the safety envelope
 

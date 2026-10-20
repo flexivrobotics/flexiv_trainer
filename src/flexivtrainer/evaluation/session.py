@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .checks import SettledInBox, agreement, parse_checks
+from .checks import Check, agreement, parse_checks
 from .outcome import DEFAULT_FAILURE_MODES, OUTCOME_FILE, RolloutOutcome, read_outcome
 from .stats import paired_exact_p, wilson_interval
 
@@ -136,7 +136,7 @@ class EvaluationPlan:
     blind: bool = True
     failure_modes: tuple[str, ...] = DEFAULT_FAILURE_MODES
     about: str = ""
-    checks: dict[str, SettledInBox] = field(default_factory=dict)
+    checks: dict[str, Check] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.arms:

@@ -32,7 +32,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .checks import SettledInBox, parse_checks, read_ticks, run_checks
+from .checks import Check, parse_checks, read_ticks, run_checks
 from .outcome import write_outcome
 from .session import SessionStore, summarize
 
@@ -42,11 +42,15 @@ __all__ = ["rescore", "main"]
 def rescore(
     root: Path,
     session: str,
-    checks: dict[str, SettledInBox] | None = None,
+    checks: dict[str, Check] | None = None,
     *,
     write: bool = False,
+    storage_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Score every recorded trial of `session`; `checks` replaces the plan's."""
+    """Score every recorded trial of `session`; `checks` replaces the plan's.
+
+    `storage_root` resolves learned checks' relative model paths.
+    """
     store = SessionStore(Path(root))
     plan = store.plan(session)
     checks = plan.checks if checks is None else checks
@@ -55,7 +59,12 @@ def rescore(
     rescored = []
     trials = []
     for directory, outcome in store.episodes(session):
-        results = run_checks(checks, read_ticks(directory))
+        results = run_checks(
+            checks,
+            read_ticks(directory),
+            episode_dir=directory,
+            storage_root=storage_root,
+        )
         updated = replace(outcome, checks={**outcome.checks, **results})
         if write:
             write_outcome(directory, updated)
@@ -99,17 +108,18 @@ def main(argv: list[str] | None = None) -> int:
         "--write", action="store_true", help="store the results in each outcome"
     )
     args = parser.parse_args(argv)
-    root = args.root
-    if root is None:
-        from flexivtrainer.config import AppSettings  # noqa: PLC0415
+    from flexivtrainer.config import AppSettings  # noqa: PLC0415
 
-        root = AppSettings().storage.rollouts_root
+    storage = AppSettings().storage
+    root = args.root if args.root is not None else storage.rollouts_root
     checks = None
     if args.checks is not None:
         data = json.loads(args.checks.read_text(encoding="utf-8"))
         checks = parse_checks(data.get("checks") if isinstance(data, dict) else data)
     try:
-        report = rescore(root, args.session, checks, write=args.write)
+        report = rescore(
+            root, args.session, checks, write=args.write, storage_root=storage.root
+        )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

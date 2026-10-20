@@ -899,13 +899,18 @@ class RolloutService:
     def _score_checks(
         self, destination: Path, outcome: RolloutOutcome, session: str
     ) -> None:
-        """Score the session's automatic checks on this trial's tick log."""
+        """Score the session's automatic checks on this trial's recording."""
         try:
             store = SessionStore(self._settings.storage.rollouts_root)
             checks = store.plan(session).checks
             if not checks:
                 return
-            results = run_checks(checks, read_ticks(destination))
+            results = run_checks(
+                checks,
+                read_ticks(destination),
+                episode_dir=destination,
+                storage_root=self._settings.storage.root,
+            )
             scored = replace(outcome, checks={**outcome.checks, **results})
             write_outcome(destination, scored)
         except Exception as exc:  # a check must never lose a trial
