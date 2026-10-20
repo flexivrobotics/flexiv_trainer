@@ -552,7 +552,22 @@ the storage root:
 It passes when its probability stays at or above `threshold` (default: the
 one it was saved with, 0.5) for `hold_s`, at any time or, with `"when":
 "end"`, at the end. Like any check, it earns trust by agreeing with your
-verdicts. To score recordings outside a session:
+verdicts.
+
+Two options make it act while a trial runs:
+
+- `"live": true` also scores it on every tick. Each tick of
+  `rollout_ticks.jsonl` records its newest probability, about a tick behind,
+  because a worker thread scores the newest tick while the control loop
+  carries on. The outcome records whether and when it passed (`live_checks`).
+- `"end_on_pass": true` (implies `live`) ends the trial when it passes, under
+  the policy or under the operator after a takeover. The stop reason is
+  `check <name> passed`. A trial whose live check cannot be loaded does not
+  start.
+
+The trial's verdict and the check's agreement still come from scoring the
+saved recording, which sees every frame. To score recordings outside a
+session:
 
 ```bash
 python -m flexivtrainer.evaluation.learned_check score <dataset> --model <storage>/checks/closed
@@ -622,6 +637,15 @@ each rollout's outcome stores it under `stiffness`. When you take over with the
 leader arm, the follower uses the same stiffness. Set the rollout's
 contact-wrench ceiling with `FLEXIV_TRAINER_ROLLOUT__MAX_CONTACT_WRENCH` (N and
 N·m); unset, the controller's default applies.
+
+A rollout zeroes the follower's force/torque sensor when it starts, unless the
+tool already measures more than `FLEXIV_TRAINER_ROLLOUT__FT_ZERO_MAX_FORCE_N`
+(default 1.5 N). Above that, the tool is touching something, and zeroing would
+offset every later force reading by that force. That includes the force limit,
+a force-aware policy's input and a learned check. The log then says "F/T sensor
+not zeroed" with the force it measured. If that appears with the tool in free
+air, the sensor has drifted: zero it from teleoperation, or raise the
+threshold. Unset, the sensor is always zeroed.
 
 ### Taking over with the leader arm
 
