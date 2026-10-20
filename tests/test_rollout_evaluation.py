@@ -40,6 +40,7 @@ from test_rollout_service import (
     _single_arm_pairs,
     _teleop,
 )
+from waits import WAIT_S
 
 from flexivtrainer.evaluation.outcome import (
     RolloutOutcome,
@@ -383,7 +384,7 @@ def _action() -> list[float]:
 
 def _run_ticks(service, robot, start, ticks: int = 5) -> None:
     start()
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + WAIT_S
     while len(robot.commands) < ticks and time.monotonic() < deadline:
         if service.status()["status"] != "running":
             break
@@ -509,7 +510,7 @@ def test_the_force_bound_stops_the_rollout_and_the_outcome_says_why(
 
     service = _service(tmp_path, _FakePolicy(_action()), robot, configure=configure)
     service.start(_checkpoint(tmp_path), record=True)
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     status = service.status()
@@ -534,7 +535,7 @@ def test_a_non_finite_policy_output_never_reaches_the_arm(tmp_path, fake_loop) -
     action[2] = float("nan")
     service = _service(tmp_path, _FakePolicy(action), robot)
     service.start(_checkpoint(tmp_path))
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     status = service.status()

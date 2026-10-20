@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
+from waits import WAIT_S
 
 from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.rollout.executors.gripper import GripperExecutor
@@ -74,7 +76,7 @@ class FakeGripper:
         if self.move_started is not None:
             self.move_started.set()
         if self.move_release is not None:
-            assert self.move_release.wait(timeout=1.0)
+            assert self.move_release.wait(timeout=WAIT_S)
 
 
 class FakeTool:
@@ -399,17 +401,16 @@ def test_submit_is_latest_only_while_move_is_blocked() -> None:
     controller.initialize()
     controller.submit({"left_arm": 0.02})
     controller.start()
-    assert move_started.wait(timeout=1.0)
+    assert move_started.wait(timeout=WAIT_S)
     assert controller.measured_states()["left_arm"]["width"] == 0.04
 
     controller.submit({"left_arm": 0.04})
     controller.submit({"left_arm": 0.08})
     move_release.set()
 
-    for _ in range(20):
-        if len(grippers[0].moves) == 2:
-            break
-        threading.Event().wait(0.01)
+    deadline = time.monotonic() + WAIT_S
+    while len(grippers[0].moves) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
     controller.stop()
 
     assert [move[0] for move in grippers[0].moves] == [0.02, 0.08]
@@ -439,7 +440,7 @@ def test_worker_failure_signals_rollout_stop() -> None:
     controller.submit({"left_arm": 0.04})
     controller.start()
 
-    assert failure_event.wait(timeout=1.0)
+    assert failure_event.wait(timeout=WAIT_S)
     controller.stop()
     assert isinstance(controller.error, RuntimeError)
 

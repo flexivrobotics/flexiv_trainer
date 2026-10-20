@@ -17,6 +17,7 @@
 import time
 
 import numpy as np
+from waits import WAIT_S
 
 from flexivtrainer.cameras.backends import DeviceInfo, FramePair
 from flexivtrainer.cameras.service import CameraService
@@ -229,7 +230,7 @@ def test_mixed_vendor_cameras_stream_together(tmp_path) -> None:
     )
     service.start_streams()
     try:
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + WAIT_S
         while time.monotonic() < deadline:
             cameras = service.status()["cameras"]
             if all(camera["streaming"] for camera in cameras.values()):
@@ -272,7 +273,7 @@ def test_orbbec_depth_is_converted_to_uint16_millimeters(tmp_path) -> None:
     service.acquire_depth_alignment(["ego"])
     service.start_streams()
     try:
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + WAIT_S
         frame = None
         while time.monotonic() < deadline:
             frames = service.read_frames(block=True, timeout_ms=500)
@@ -313,7 +314,7 @@ def test_watchdog_resets_through_the_owning_backend(tmp_path) -> None:
     )
     try:
         service.start_streams()
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + WAIT_S
         while len(backend.opened) < 6 and time.monotonic() < deadline:
             time.sleep(0.02)
 

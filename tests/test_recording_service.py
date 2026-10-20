@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from waits import WAIT_S
 
 from flexivtrainer.config import AppSettings, StorageConfig
 from flexivtrainer.data.control_settings import ControlSettings
@@ -58,10 +59,18 @@ def test_capture_loop_warns_with_deadline_delay(monkeypatch) -> None:
     service._lock = threading.Lock()
     service._frames_captured = 0
     service._grab_camera_data = lambda *args, **kwargs: ({}, {})
+    # `time` is the process-wide module: only this thread reads the scripted
+    # clock, or a camera thread another test left running could take a reading.
+    caller = threading.get_ident()
+    real_monotonic = time.monotonic
     monkeypatch.setattr(
         recording_module.time,
         "monotonic",
-        lambda: next(iterations),
+        lambda: (
+            next(iterations)
+            if threading.get_ident() == caller
+            else real_monotonic()
+        ),
     )
     monkeypatch.setattr(
         recording_module,
@@ -235,7 +244,7 @@ class _FakeTeleopWithoutCommand(_FakeTeleop):
 
 def _drive_capture(service: RecordingService, frames: int) -> None:
     """Spin until the capture thread has written at least `frames` frames."""
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + WAIT_S
     while service.status()["frames_captured"] < frames:
         if time.monotonic() > deadline:
             raise AssertionError(
