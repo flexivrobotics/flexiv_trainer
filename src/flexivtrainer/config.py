@@ -246,6 +246,11 @@ class RolloutLoopConfig(BaseModel):
     # [mx, my, mz] N*m; unset keeps the controller's default. It also limits
     # the follower while an operator has taken over with the leader arm.
     max_contact_wrench: tuple[float, float, float, float, float, float] | None = None
+    # A rollout zeroes the follower's F/T sensor when it starts, unless the
+    # tool already measures more force than this (N): then it is touching
+    # something, and zeroing would offset every later reading. Unset always
+    # zeroes.
+    ft_zero_max_force_n: float | None = Field(default=1.5, gt=0)
     # Leader-arm takeover (rollout/takeover.py): an optional leader digital
     # input that toggles control between the policy and the operator, besides
     # the page's button. It must not be a channel a gripper trigger uses.
