@@ -208,12 +208,18 @@ class LearnedCheck:
     the storage root. `threshold`, when given, replaces the one it was saved
     with. Scored from the recorded frames, so a trial whose recording was not
     saved is left unscored.
+
+    `live` also scores it on every tick while the trial runs
+    (rollout/live_checks.py), and `end_on_pass` ends the trial when it passes,
+    as the end of a skill; `when` applies only to the score of the recording.
     """
 
     model: str
     threshold: float | None = None
     hold_s: float = 0.2
     when: str = "any"
+    live: bool = False
+    end_on_pass: bool = False
 
     kind = "learned"
 
@@ -229,7 +235,7 @@ class LearnedCheck:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LearnedCheck:
-        known = {"kind", "model", "threshold", "hold_s", "when"}
+        known = {"kind", "model", "threshold", "hold_s", "when", "live", "end_on_pass"}
         unknown = sorted(set(data) - known)
         if unknown:
             raise ValueError(f"unknown keys {unknown}; known are {sorted(known)}")
@@ -239,7 +245,13 @@ class LearnedCheck:
             threshold=None if threshold is None else float(threshold),
             hold_s=float(data.get("hold_s", cls.hold_s)),
             when=str(data.get("when", cls.when)),
+            live=_flag(data, "live"),
+            end_on_pass=_flag(data, "end_on_pass"),
         )
+
+    @property
+    def scored_live(self) -> bool:
+        return self.live or self.end_on_pass
 
     def model_path(self, storage_root: Path | None) -> Path:
         path = Path(self.model).expanduser()
@@ -270,6 +282,14 @@ class LearnedCheck:
 
 
 Check = SettledInBox | LearnedCheck
+
+
+def _flag(data: dict[str, Any], key: str) -> bool:
+    value = data.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be true or false")
+    return value
+
 
 CHECK_KINDS: dict[str, type[Check]] = {
     SettledInBox.kind: SettledInBox,

@@ -28,7 +28,7 @@ from typing import Any
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.data.control_settings import ControlSettings
 from flexivtrainer.data.lerobot_io import active_camera_names
-from flexivtrainer.evaluation.checks import read_ticks, run_checks
+from flexivtrainer.evaluation.checks import LearnedCheck, read_ticks, run_checks
 from flexivtrainer.evaluation.outcome import (
     DEFAULT_FAILURE_MODES,
     RolloutOutcome,
@@ -69,7 +69,12 @@ from flexivtrainer.rollout.executors.waypoint import (
     recorded_layout_confirmation,
 )
 from flexivtrainer.rollout.hardware import _default_robot_factory
-from flexivtrainer.rollout.recorder import RecordingPlan, RolloutRecorder
+from flexivtrainer.rollout.live_checks import LiveChecks
+from flexivtrainer.rollout.recorder import (
+    RecordingPlan,
+    RolloutRecorder,
+    recorded_state_names,
+)
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
 from flexivtrainer.rollout.safety import SafetyEnvelope
@@ -588,6 +593,10 @@ class RolloutService:
             else:
                 assert waypoint_layout is not None
                 assert waypoint_action_dim is not None
+                if recording is not None:
+                    recording["live"] = self._start_live_checks(
+                        trial, sides, camera_names
+                    )
                 runner = WaypointRunner(
                     policy=policy,
                     preprocessor=preprocessor,
@@ -638,6 +647,7 @@ class RolloutService:
                     zero_ft_max_force_n=app_rollout.ft_zero_max_force_n,
                     takeover=takeover,
                     action_names=waypoint_action_names,
+                    live_checks=recording.get("live") if recording else None,
                 )
                 if recording is not None:
                     recording["runner"] = runner
@@ -647,6 +657,8 @@ class RolloutService:
         except BaseException:
             # A runner that never started leaves no trial behind.
             if recording is not None:
+                if recording.get("live") is not None:
+                    recording["live"].stop()
                 recording["recorder"].abort()
             if lease is not None:
                 self._teleop.release_lease(lease)
@@ -853,12 +865,16 @@ class RolloutService:
             error = self._error
         try:
             takeover: Takeover | None = recording.get("takeover")
+            live: LiveChecks | None = recording.get("live")
+            if live is not None:
+                live.stop()
             destination, outcome, saved = recording["recorder"].finish(
                 stop_reason=stop_reason,
                 error=error,
                 steps=steps,
                 safety_stop=getattr(runner, "safety_stop", None),
                 interventions=takeover.summary() if takeover is not None else None,
+                live_checks=live.summary() if live is not None else None,
             )
         except Exception as exc:  # pragma: no cover - defensive
             detail = describe_exception(exc)
@@ -896,6 +912,43 @@ class RolloutService:
                     f"{outcome.dropped_frames} dropped; waiting for a verdict",
                 )
             )
+
+    def _start_live_checks(
+        self, trial: TrialContext | None, sides: list[str], camera_names: list[str]
+    ) -> LiveChecks | None:
+        """The trial's learned checks marked `live` or `end_on_pass`, loaded.
+
+        Refuses the start when one cannot be loaded: a trial meant to end when
+        its check passes would otherwise run until someone stops it.
+        """
+        if trial is None:
+            return None
+        plan = SessionStore(self._settings.storage.rollouts_root).plan(trial.session)
+        checks = {
+            name: check
+            for name, check in plan.checks.items()
+            if isinstance(check, LearnedCheck) and check.scored_live
+        }
+        if not checks:
+            return None
+        live = LiveChecks(
+            checks,
+            self._settings.storage.root,
+            state_names=lambda snapshot, images, pose_format, width: (
+                recorded_state_names(
+                    snapshot, images, sides, camera_names, pose_format, width
+                )
+            ),
+        )
+        try:
+            live.start()
+        except Exception as exc:
+            live.stop()
+            raise RuntimeError(
+                f"A live check could not be loaded: {describe_exception(exc)}"
+            ) from exc
+        self._append_log("INFO", "ROLLOUT", "Live checks", ", ".join(sorted(checks)))
+        return live
 
     def _score_checks(
         self, destination: Path, outcome: RolloutOutcome, session: str
