@@ -68,7 +68,7 @@ from flexivtrainer.data.lerobot_io import (
 from flexivtrainer.evaluation.outcome import RolloutOutcome, write_outcome
 from flexivtrainer.observability import describe_exception, warn
 
-__all__ = ["RolloutRecorder", "RecordingPlan", "TICKS_FILE"]
+__all__ = ["RolloutRecorder", "RecordingPlan", "TICKS_FILE", "recorded_state_names"]
 
 TICKS_FILE = Path("meta") / "rollout_ticks.jsonl"
 
@@ -111,6 +111,36 @@ def _default_dataset_factory(plan: RecordingPlan, features: dict[str, Any]) -> A
         streaming_encoding=True,
         rgb_encoder=RGBEncoderConfig(vcodec=resolve_recording_vcodec(plan.video_codec)),
     )
+
+
+def recorded_state_names(
+    snapshot: dict[str, Any],
+    images: dict[str, np.ndarray],
+    sides: list[str],
+    cameras: list[str] | None,
+    pose_format: str,
+    width: int,
+) -> list[str]:
+    """The `observation.state` column names a recording of these ticks gets
+    (`state_i` when the layout does not match the state's width)."""
+    state_entries = [
+        entry
+        for entry in default_recording_entry_keys(sides, cameras)
+        if entry.startswith("observation.state.")
+    ]
+    image_entries = [f"observation.images.{name}" for name in images]
+    features, _, _ = build_features_from_sample(
+        snapshot,
+        images,
+        state_entries + image_entries,
+        sides,
+        cameras=cameras,
+        pose_format=pose_format,
+    )
+    names = (features.get("observation.state") or {}).get("names")
+    if names is None or len(names) != width:
+        return [f"state_{i}" for i in range(width)]
+    return list(names)
 
 
 def _float_list(values: Any) -> list[float]:
@@ -188,6 +218,7 @@ class RolloutRecorder:
         pose_format: str | None = None,
         control: str = "policy",
         switches: list[dict[str, Any]] | None = None,
+        checks: dict[str, float] | None = None,
     ) -> None:
         """Queue one tick. Never blocks; a full queue drops the tick and counts it.
 
@@ -195,6 +226,7 @@ class RolloutRecorder:
         decides the recording's column names. `control` is who had the arm
         (`policy`, `operator` or `switching`); `switches` are the takeover
         switches that finished since the last tick, with their durations.
+        `checks` are the live learned checks' newest probabilities.
         """
         intervention = control != "policy"
         tick: dict[str, Any] = {
@@ -207,6 +239,8 @@ class RolloutRecorder:
         }
         if switches:
             tick["switches"] = [dict(event) for event in switches]
+        if checks:
+            tick["checks"] = dict(checks)
         if intervention:
             with self._lock:
                 self._intervention_ticks += 1
@@ -244,11 +278,13 @@ class RolloutRecorder:
         steps: int,
         safety_stop: dict[str, str] | None = None,
         interventions: dict[str, Any] | None = None,
+        live_checks: dict[str, Any] | None = None,
     ) -> tuple[Path, RolloutOutcome, bool]:
         """Drain, finalize, move into place and write the outcome (no verdict yet).
 
         `interventions` is the takeover summary (rollout/takeover.py), given
         when the leader arm could take over; the ticks it covered are added.
+        `live_checks` is the summary of the checks scored while it ran.
         Returns the episode directory, the outcome, and whether any data was
         saved. THE OUTCOME IS WRITTEN EVEN WHEN NO DATA IS: a rollout that faulted
         before its first tick, or whose writer failed, still happened, and an
@@ -281,6 +317,7 @@ class RolloutRecorder:
                 if interventions is not None
                 else dict(self._outcome.interventions)
             ),
+            live_checks=dict(live_checks or self._outcome.live_checks),
         )
         destination = self._plan.destination
         destination.parent.mkdir(parents=True, exist_ok=True)

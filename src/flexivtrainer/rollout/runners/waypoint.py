@@ -43,6 +43,7 @@ from flexivtrainer.rollout.executors.waypoint import (
     WaypointExecutor,
     pose_command,
 )
+from flexivtrainer.rollout.live_checks import LiveChecks
 from flexivtrainer.rollout.recorder import RolloutRecorder
 from flexivtrainer.rollout.safety import SafetyEnvelope, SafetyStop
 from flexivtrainer.rollout.takeover import Takeover, operator_action
@@ -110,8 +111,12 @@ class WaypointRunner:
         max_contact_wrench: Any = None,
         takeover: Takeover | None = None,
         action_names: list[str] | None = None,
+        live_checks: LiveChecks | None = None,
     ) -> None:
         self._safety = safety or SafetyEnvelope()
+        # Learned checks scored on each tick (rollout/live_checks.py); one
+        # marked end_on_pass ends the rollout when it passes.
+        self._live_checks = live_checks or None
         # Leader-arm takeover (rollout/takeover.py), when the robots were
         # borrowed from teleoperation; None leaves the policy in control.
         self._takeover = takeover
@@ -376,6 +381,10 @@ class WaypointRunner:
                     raise RuntimeError(
                         f"Waypoint gripper failed: {describe_exception(gripper.error)}"
                     )
+                ended = self._live_checks.ended() if self._live_checks else None
+                if ended is not None:
+                    self._stop_reason = f"check {ended} passed"
+                    break
                 loop_start = time.monotonic()
                 loop_period = (
                     loop_start - previous_loop_start
@@ -550,6 +559,9 @@ class WaypointRunner:
                     }
                 )
                 last_action = list(action_lists[0])
+                checks = self._score_live(
+                    loop_start, observation, images, snapshot, pose_format
+                )
                 if self._recorder is not None:
                     self._recorder.add_tick(
                         state=observation.get("observation.state", []),
@@ -563,6 +575,7 @@ class WaypointRunner:
                         switches=(
                             takeover.drain_events() if takeover is not None else None
                         ),
+                        checks=checks,
                     )
                 self._last_wrench_t = observations.sample_wrench(
                     self._append_wrench,
@@ -664,11 +677,17 @@ class WaypointRunner:
         self._safety.check_measured_workspace(_measured_arms(snapshot, "tcp_pose"))
         takeover = self._takeover
         switches = takeover.drain_events() if takeover is not None else []
-        if self._recorder is None:
+        if self._recorder is None and self._live_checks is None:
             return
         observation = observations.build_observation(
             snapshot, images, self._sides, self._camera_names, pose_format
         )
+        # The operator can reach the state too: that ends the skill as well.
+        checks = self._score_live(
+            time.monotonic(), observation, images, snapshot, pose_format
+        )
+        if self._recorder is None:
+            return
         # Mid-switch too: what the controller commands is what the arm does.
         action = operator_action(
             self._robots,
@@ -688,7 +707,28 @@ class WaypointRunner:
             pose_format=pose_format,
             control=control,
             switches=switches,
+            checks=checks,
         )
+
+    def _score_live(
+        self,
+        t: float,
+        observation: dict[str, Any],
+        images: dict[str, np.ndarray],
+        snapshot: dict[str, Any],
+        pose_format: str,
+    ) -> dict[str, float] | None:
+        """Hand this tick to the live checks; their newest probabilities."""
+        if self._live_checks is None:
+            return None
+        self._live_checks.submit(
+            t=t,
+            state=observation.get("observation.state", []),
+            images=images,
+            snapshot=snapshot,
+            pose_format=pose_format,
+        )
+        return self._live_checks.values()
 
     @staticmethod
     def _actions_to_lists(actions: Any) -> list[list[float]]:

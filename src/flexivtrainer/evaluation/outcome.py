@@ -116,6 +116,9 @@ class RolloutOutcome:
     #: Leader-arm takeovers, when one was possible: {count, ticks, seconds,
     #: switch_s}; switch_s holds every switch as {"to", "s"[, "error"]}.
     interventions: dict[str, Any] = field(default_factory=dict)
+    #: Learned checks scored during the rollout (rollout/live_checks.py):
+    #: {checks: {name: {passed, first_at_s, last_p}}, scored, skipped}.
+    live_checks: dict[str, Any] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
     @property
