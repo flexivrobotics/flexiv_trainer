@@ -320,7 +320,16 @@ def _make_service(tmp_path, *, policy, robot):
     )
 
 
-def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) -> None:
+class _FreeAirRobot(_FakeRobot):
+    """Measures only sensor noise: the tool touches nothing."""
+
+    def states(self):
+        states = super().states()
+        states.ext_wrench_in_world = [0.2, -0.1, 0.3, 0.01, 0.0, 0.0]
+        return states
+
+
+def _connect(tmp_path, monkeypatch, robot, **rollout):
     monkeypatch.setattr(
         "flexivtrainer.rollout.hardware._rdk_mode",
         lambda: SimpleNamespace(
@@ -328,16 +337,89 @@ def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) 
             NRT_CARTESIAN_MOTION_FORCE="cmf",
         ),
     )
-    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=_FakeRobot("F1"))
-    robot = hardware.connect_robot(
+    service = _make_service(tmp_path, policy=_FakePolicy([]), robot=robot)
+    for key, value in rollout.items():
+        setattr(service._settings.rollout, key, value)
+    connected = hardware.connect_robot(
         service._robot_factory,
         "F1",
         service._stop_event,
         prepare_motion=partial(service._prepare_motion, stiffness=None),
     )
+    return connected, service
+
+
+def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) -> None:
+    robot, _ = _connect(tmp_path, monkeypatch, _FreeAirRobot("F1"))
 
     assert robot.primitives == [("ZeroFTSensor", {})]
     assert robot.mode_history == ["prim", "cmf"]
+
+
+def test_a_tool_in_contact_keeps_its_sensor_zero(tmp_path, monkeypatch) -> None:
+    # _FakeRobot measures (21, 22, 23) N: |F| = 38.1 N, well above 1.5 N.
+    robot, service = _connect(tmp_path, monkeypatch, _FakeRobot("F1"))
+
+    assert robot.primitives == [] and robot.mode_history == ["cmf"]
+    warned = [e for e in service.status()["logs"] if "F/T sensor not zeroed" in e]
+    assert warned and "38.1 N" in warned[0] and "1.5 N" in warned[0]
+
+
+@pytest.mark.parametrize("threshold", [50.0, None])
+def test_the_contact_threshold_is_a_setting_and_unset_always_zeroes(
+    tmp_path, monkeypatch, threshold
+) -> None:
+    robot, _ = _connect(
+        tmp_path, monkeypatch, _FakeRobot("F1"), ft_zero_max_force_n=threshold
+    )
+
+    assert robot.primitives == [("ZeroFTSensor", {})]
+
+
+def test_a_force_that_cannot_be_read_does_not_block_zeroing(
+    tmp_path, monkeypatch
+) -> None:
+    class _Unreadable(_FakeRobot):
+        def states(self):
+            states = super().states()
+            states.ext_wrench_in_world = [float("nan")] * 6
+            return states
+
+    robot, _ = _connect(tmp_path, monkeypatch, _Unreadable("F1"))
+
+    assert robot.primitives == [("ZeroFTSensor", {})]
+
+
+@pytest.mark.parametrize(
+    ("robot_class", "threshold", "zeroed"),
+    [(_FreeAirRobot, 1.5, True), (_FakeRobot, 1.5, False), (_FakeRobot, 50.0, True)],
+)
+def test_a_rollout_start_zeroes_only_a_tool_in_free_air(
+    tmp_path, monkeypatch, robot_class, threshold, zeroed
+) -> None:
+    robot = robot_class("F1")
+    service = _make_service(
+        tmp_path, policy=_FakePolicy([float(i) for i in range(19)]), robot=robot
+    )
+    service._settings.rollout.ft_zero_max_force_n = threshold
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk",
+        lambda obs, pol, dev, pre, post, **kwargs: (
+            np.tile(pol.select_action(obs), (8, 1)),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim", NRT_CARTESIAN_MOTION_FORCE="cmf"
+        ),
+    )
+
+    _run_one_tick(service, robot, _checkpoint(tmp_path))
+
+    assert (("ZeroFTSensor", {}) in robot.primitives) is zeroed
+    assert robot.commands, "the rollout ran either way"
 
 
 def test_connect_robot_without_primitive_support(tmp_path, monkeypatch) -> None:

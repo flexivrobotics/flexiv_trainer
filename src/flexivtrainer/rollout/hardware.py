@@ -16,12 +16,17 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from flexivtrainer.observability import describe_exception, warn
+
+#: The default for `rollout.ft_zero_max_force_n`: above this measured force the
+#: tool is taken to be touching something, and the F/T sensor is not zeroed.
+FT_ZERO_MAX_FORCE_N = 1.5
 
 
 def _default_robot_factory(serial: str) -> Any:
@@ -70,6 +75,49 @@ def _zero_ft_sensor(
     return True
 
 
+def measured_force_n(robot: Any) -> float | None:
+    """The magnitude of the measured external force, or None if unreadable."""
+    try:
+        force = [float(v) for v in list(robot.states().ext_wrench_in_world)[:3]]
+    except Exception:
+        return None
+    if len(force) != 3 or not all(math.isfinite(v) for v in force):
+        return None
+    return math.dist(force, (0.0, 0.0, 0.0))
+
+
+def zero_ft_unless_in_contact(
+    robot: Any,
+    serial: str,
+    stop_event: threading.Event,
+    append_log: Callable[[str, str, str, str], None],
+    max_force_n: float | None = FT_ZERO_MAX_FORCE_N,
+) -> bool:
+    """Zero the F/T sensor, unless the tool already measures over `max_force_n`.
+
+    Zeroing takes whatever force is on the sensor as its new zero. Done while
+    the tool rests or presses on something, it offsets every later reading by
+    that force -- the force ceiling, a force-aware policy's input and a learned
+    check all read it -- so it is skipped, with a warning that says how much
+    was measured. A sensor that has drifted past the threshold in free air is
+    skipped too, and the same warning shows it. `max_force_n` None always
+    zeroes; a force that cannot be read does not block zeroing.
+    """
+    force = measured_force_n(robot) if max_force_n is not None else None
+    if force is not None and force > max_force_n:
+        detail = (
+            f"{serial}: |F| = {force:.1f} N, above {max_force_n:g} N; "
+            "the tool is touching something, so the sensor keeps its zero"
+        )
+        warn("F/T sensor not zeroed", detail)
+        append_log("WARN", "ROLLOUT", "F/T sensor not zeroed", detail)
+        return False
+    if _zero_ft_sensor(robot, stop_event):
+        append_log("INFO", "ROLLOUT", "F/T sensor zeroed", serial)
+        return True
+    return False
+
+
 def connect_robot(
     robot_factory: Callable[[str], Any],
     serial: str,
@@ -98,16 +146,20 @@ def prepare_robot_motion(
     stiffness: Sequence[float] | None = None,
     max_contact_wrench: Sequence[float] | None = None,
     zero_ft: bool = True,
+    zero_ft_max_force_n: float | None = FT_ZERO_MAX_FORCE_N,
 ) -> None:
     """Zero the F/T sensor, enter Cartesian motion-force mode, set the spring.
 
     The stiffness is set in the mode it applies to and before any pose is
     sent: the first target is already interpreted through it. `zero_ft=False`
     is for taking the arm back in the middle of a trial, when the tool may be
-    in contact and zeroing would offset every later force reading.
+    in contact and zeroing would offset every later force reading; at a start,
+    zeroing is skipped when the tool measures over `zero_ft_max_force_n`.
     """
-    if zero_ft and _zero_ft_sensor(robot, stop_event):
-        append_log("INFO", "ROLLOUT", "F/T sensor zeroed", serial)
+    if zero_ft:
+        zero_ft_unless_in_contact(
+            robot, serial, stop_event, append_log, zero_ft_max_force_n
+        )
     mode = _rdk_mode()
     robot.SwitchMode(mode.NRT_CARTESIAN_MOTION_FORCE)
     if stiffness is not None:

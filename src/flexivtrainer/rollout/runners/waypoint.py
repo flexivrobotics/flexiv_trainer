@@ -109,6 +109,7 @@ class WaypointRunner:
         send_twist: bool = True,
         cartesian_stiffness: Any = None,
         max_contact_wrench: Any = None,
+        zero_ft_max_force_n: float | None = hardware.FT_ZERO_MAX_FORCE_N,
         takeover: Takeover | None = None,
         action_names: list[str] | None = None,
         live_checks: LiveChecks | None = None,
@@ -192,6 +193,7 @@ class WaypointRunner:
                     append_log,
                     stiffness=cartesian_stiffness,
                     max_contact_wrench=max_contact_wrench,
+                    zero_ft_max_force_n=zero_ft_max_force_n,
                 )
         except Exception as exc:
             if gripper is not None:

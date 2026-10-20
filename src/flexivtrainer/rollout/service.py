@@ -644,6 +644,7 @@ class RolloutService:
                     send_twist=effective_twist,
                     cartesian_stiffness=stiffness.values,
                     max_contact_wrench=app_rollout.max_contact_wrench,
+                    zero_ft_max_force_n=app_rollout.ft_zero_max_force_n,
                     takeover=takeover,
                     action_names=waypoint_action_names,
                     live_checks=recording.get("live") if recording else None,
@@ -1631,6 +1632,7 @@ class RolloutService:
             self._append_log,
             stiffness=stiffness,
             max_contact_wrench=self._settings.rollout.max_contact_wrench,
+            zero_ft_max_force_n=self._settings.rollout.ft_zero_max_force_n,
         )
 
     def _release_robots(self) -> None:

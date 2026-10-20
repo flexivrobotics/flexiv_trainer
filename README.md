@@ -638,6 +638,15 @@ leader arm, the follower uses the same stiffness. Set the rollout's
 contact-wrench ceiling with `FLEXIV_TRAINER_ROLLOUT__MAX_CONTACT_WRENCH` (N and
 N·m); unset, the controller's default applies.
 
+A rollout zeroes the follower's force/torque sensor when it starts, unless the
+tool already measures more than `FLEXIV_TRAINER_ROLLOUT__FT_ZERO_MAX_FORCE_N`
+(default 1.5 N). Above that, the tool is touching something, and zeroing would
+offset every later force reading by that force. That includes the force limit,
+a force-aware policy's input and a learned check. The log then says "F/T sensor
+not zeroed" with the force it measured. If that appears with the tool in free
+air, the sensor has drifted: zero it from teleoperation, or raise the
+threshold. Unset, the sensor is always zeroed.
+
 ### Taking over with the leader arm
 
 You can take the follower from a running policy with the leader arm, the same
