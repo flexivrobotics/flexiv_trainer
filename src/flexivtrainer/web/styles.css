@@ -4498,6 +4498,25 @@ input[type="range"]:focus-visible::-moz-range-thumb {
     margin: 0;
 }
 
+.rollout-stiffness {
+    display: grid;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.rollout-stiffness:empty {
+    display: none;
+}
+
+.rollout-stiffness .rollout-verdict {
+    margin: 0;
+}
+
+.rollout-verdict.rollout-warning {
+    color: var(--warning);
+    background: var(--warning-soft);
+}
+
 .rollout-takeover-reason {
     color: var(--ink-3);
 }

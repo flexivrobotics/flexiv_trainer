@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -180,6 +180,29 @@ class TrainingDefaultsConfig(BaseModel):
     load_depth: bool = False
 
 
+# One Cartesian stiffness or wrench component: finite and not negative.
+_NonNegative = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+
+class TeleopControlConfig(BaseModel):
+    # The follower's Cartesian stiffness during teleoperation, [x, y, z] N/m
+    # then [rx, ry, rz] N*m/rad, set through the teleop controller on every
+    # start. Unset keeps the teleop controller's own default. Every recording
+    # stores the stiffness it was made under (meta/control.json), and a policy
+    # trained on it is rolled out at the same stiffness.
+    follower_cartesian_stiffness: (
+        tuple[
+            _NonNegative,
+            _NonNegative,
+            _NonNegative,
+            _NonNegative,
+            _NonNegative,
+            _NonNegative,
+        ]
+        | None
+    ) = None
+
+
 class RolloutLoopConfig(BaseModel):
     # Fallback planner-loop tick rate used only when the checkpoint has no FPS
     # metadata; otherwise the loop ticks at the checkpoint's data rate.
@@ -207,11 +230,18 @@ class RolloutLoopConfig(BaseModel):
     max_force_n: float | None = Field(default=None, gt=0)
     stale_plan_s: float | None = Field(default=None, gt=0)
     # The controller's Cartesian stiffness for rollout, [x, y, z] N/m then
-    # [rx, ry, rz] N*m/rad; unset keeps the controller's default. A pose-target
-    # policy learns targets that sit F/K beyond where the arm ends up, so K must
-    # match the stiffness the demonstrations were recorded under: the same
-    # targets at a stiffer K press proportionally harder.
+    # [rx, ry, rz] N*m/rad. A pose-target policy learns targets that sit F/K
+    # beyond where the arm ends up, so K must match the stiffness the
+    # demonstrations were recorded under: the same targets at a stiffer K
+    # press proportionally harder. Set, it wins over the stiffness the
+    # checkpoint stores (with a warning when they differ); unset, the
+    # checkpoint's stiffness applies.
     cartesian_stiffness: tuple[float, float, float, float, float, float] | None = None
+    # With neither the setting above nor a stiffness in the checkpoint, a
+    # rollout refuses to start rather than run at the controller's default,
+    # which may be several times stiffer than the demonstrations. True lets it
+    # run at that default.
+    allow_controller_default_stiffness: bool = False
     # The controller's own contact-wrench ceiling, [fx, fy, fz] N then
     # [mx, my, mz] N*m; unset keeps the controller's default. It also limits
     # the follower while an operator has taken over with the leader arm.
@@ -435,6 +465,7 @@ class AppSettings(BaseSettings):
     training: TrainingDefaultsConfig = Field(default_factory=TrainingDefaultsConfig)
     policies: PolicyConfig = Field(default_factory=PolicyConfig)
     rollout: RolloutLoopConfig = Field(default_factory=RolloutLoopConfig)
+    teleop: TeleopControlConfig = Field(default_factory=TeleopControlConfig)
 
     @property
     def follower_robot_serials(self) -> list[str]:

@@ -8034,6 +8034,45 @@ function renderRolloutTakeover() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The Cartesian stiffness the rollout applies, and where it came from.
+// ---------------------------------------------------------------------------
+
+const STIFFNESS_SOURCES = {
+    setting: "ROLLOUT__CARTESIAN_STIFFNESS",
+    checkpoint: "the checkpoint (as recorded)",
+    "controller default": "the controller default",
+};
+
+function formatStiffness(values) {
+    return Array.isArray(values)
+        ? `[${values.map((value) => Number(value).toString()).join(", ")}]`
+        : String(values || "controller default");
+}
+
+function renderRolloutStiffness() {
+    const panel = byId("rollout-stiffness");
+    if (!panel) {
+        return;
+    }
+    const stiffness = (state.rolloutStatus || {}).stiffness || null;
+    const renderKey = JSON.stringify(stiffness);
+    if (panel.dataset.renderKey === renderKey) {
+        return;
+    }
+    panel.dataset.renderKey = renderKey;
+    if (!stiffness) {
+        panel.innerHTML = "";
+        return;
+    }
+    const source = STIFFNESS_SOURCES[stiffness.source] || stiffness.source;
+    panel.innerHTML = `
+        <p class="rollout-eval-line">Stiffness: <strong>${escapeHtml(formatStiffness(stiffness.applied))}</strong> from ${escapeHtml(source)}</p>
+        <p class="rollout-eval-line">Trained at: ${escapeHtml(formatStiffness(stiffness.trained))}</p>
+        ${stiffness.warning ? `<p class="rollout-verdict rollout-warning">${escapeHtml(stiffness.warning)}</p>` : ""}
+    `;
+}
+
 function renderRollout() {
     const container = byId("rollout-content");
     if (!container) {
@@ -8101,6 +8140,7 @@ function renderRollout() {
         renderRolloutWrench();
         renderRolloutEvaluation();
         renderRolloutTakeover();
+        renderRolloutStiffness();
         return;
     }
     container.dataset.renderKey = renderKey;
@@ -8170,6 +8210,7 @@ function renderRollout() {
                         </button>
                         ${status.error ? `<p class="rollout-verdict rollout-error">${escapeHtml(status.error)}</p>` : ""}
                     </div>
+                    <div class="rollout-stiffness" id="rollout-stiffness"></div>
                     <div class="rollout-takeover" id="rollout-takeover"></div>
                 </section>
                 <section class="panel rollout-evaluation" id="rollout-evaluation"></section>
@@ -8204,6 +8245,7 @@ function renderRollout() {
     renderRolloutWrench();
     renderRolloutEvaluation();
     renderRolloutTakeover();
+    renderRolloutStiffness();
 
     const browseBtn = byId("rollout-browse");
     if (browseBtn) {

@@ -16,12 +16,15 @@ import json
 import threading
 import time
 from collections import deque
+from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from flexivtrainer.config import AppSettings, StorageConfig, TeleopRobotPair
+from flexivtrainer.data.control_settings import ControlSettings, write_control_settings
 from flexivtrainer.data.lerobot_io import active_camera_names
 from flexivtrainer.policies import act as act_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
@@ -164,6 +167,9 @@ def _settings(tmp_path) -> AppSettings:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     # Most loop tests use a minimal fake policy without a torch model.
     settings.policies.act.rollout.compile_model = False
+    # Their fake checkpoints store no stiffness; tests/test_control_settings.py
+    # covers the refusal this lifts.
+    settings.rollout.allow_controller_default_stiffness = True
     return settings
 
 
@@ -327,7 +333,7 @@ def test_zero_ft_sensor_runs_primitive_before_force_mode(tmp_path, monkeypatch) 
         service._robot_factory,
         "F1",
         service._stop_event,
-        prepare_motion=service._prepare_motion,
+        prepare_motion=partial(service._prepare_motion, stiffness=None),
     )
 
     assert robot.primitives == [("ZeroFTSensor", {})]
@@ -351,7 +357,7 @@ def test_connect_robot_without_primitive_support(tmp_path, monkeypatch) -> None:
         service._robot_factory,
         "F1",
         service._stop_event,
-        prepare_motion=service._prepare_motion,
+        prepare_motion=partial(service._prepare_motion, stiffness=None),
     )
 
     assert connected.mode_history == ["cmf"]
@@ -1001,6 +1007,48 @@ def test_bspline_rollout_decodes_before_cartesian_dispatch(
         "alignment_error",
         "handoff_warnings",
     }
+
+
+def test_bspline_rollout_applies_the_checkpoints_stiffness(
+    tmp_path, monkeypatch
+) -> None:
+    stiffness = [2600.0, 2600.0, 2900.0, 150.0, 150.0, 150.0]
+
+    class _SpringRobot(_FakeRobot):
+        def __init__(self, serial: str) -> None:
+            super().__init__(serial)
+            self.stiffness: list[list[float]] = []
+
+        def SetCartesianImpedance(self, values) -> None:  # noqa: N802
+            self.stiffness.append([float(v) for v in values])
+
+    policy = _FakeBSplinePolicy(_constant_bspline_action(), knot_rate_hz=10)
+    robot = _SpringRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    service._settings.rollout.allow_controller_default_stiffness = False
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._prepare_policy_observation",
+        lambda observation, device, preprocessor, **kwargs: observation,
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(
+            NRT_PRIMITIVE_EXECUTION="prim",
+            NRT_CARTESIAN_MOTION_FORCE="cmf",
+        ),
+    )
+    checkpoint = _checkpoint_of_type(tmp_path, "bspline_diffusion")
+    write_control_settings(
+        Path(checkpoint) / "pretrained_model",
+        ControlSettings("teleop", stiffness),
+        checkpoint=True,
+    )
+
+    _run_one_tick(service, robot, checkpoint)
+
+    assert robot.commands
+    assert robot.stiffness == [stiffness]
+    assert service.status()["stiffness"]["source"] == "checkpoint"
 
 
 def test_bspline_observations_continue_during_slow_inference(

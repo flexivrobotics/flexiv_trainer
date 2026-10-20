@@ -18,6 +18,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from flexivtrainer.data.control_settings import (
+    ControlSettings,
+    dataset_control_settings,
+    effective_control_settings,
+    write_control_settings,
+)
 from flexivtrainer.data.gripper_command import (
     GRIPPER_COMMAND_RELATIVE_PATH,
     GripperCommandMetadata,
@@ -121,6 +127,32 @@ def _validate_matching_feature_keys(
     return expected_metadata
 
 
+def _validate_matching_control(episode_roots: list[Path]) -> ControlSettings | None:
+    """The one set of follower settings all episodes were recorded under.
+
+    Refused rather than recorded per episode: a policy is rolled out at ONE
+    stiffness, so episodes recorded at another would teach it targets that
+    press with a different force at rollout. Returns None when no episode has
+    a control.json, so a merge of older episodes stays as it was.
+    """
+    settings = [effective_control_settings(root) for root in episode_roots]
+    expected = settings[0]
+    mismatches = [
+        f"{root.name} ({actual.describe()})"
+        for root, actual in zip(episode_roots[1:], settings[1:], strict=True)
+        if not actual.matches(expected)
+    ]
+    if mismatches:
+        raise ValueError(
+            "Datasets cannot be merged because they were recorded under "
+            f"different follower control settings. {episode_roots[0].name} has "
+            f"{expected.describe()}; different: " + "; ".join(mismatches)
+        )
+    if all(dataset_control_settings(root) is None for root in episode_roots):
+        return None
+    return expected
+
+
 def merge_episode_datasets(
     episode_roots: list[Path],
     output_root: Path,
@@ -143,6 +175,7 @@ def merge_episode_datasets(
         raise ValueError("At least one episode dataset is required")
 
     gripper_command = _validate_matching_feature_keys(episode_roots)
+    control = _validate_matching_control(episode_roots)
 
     target_root = output_root / output_name
     if target_root.exists():
@@ -175,6 +208,8 @@ def merge_episode_datasets(
     )
     if gripper_command is not None:
         write_gripper_command_metadata(target_root, gripper_command)
+    if control is not None:
+        write_control_settings(target_root, control)
 
     return {
         "output_name": output_name,

@@ -27,6 +27,7 @@ from flexivtrainer.config import (
     EndEffectorSideConfig,
     TeleopRobotPair,
 )
+from flexivtrainer.data.control_settings import ControlSettings, format_stiffness
 from flexivtrainer.data.gripper_command import GripperCommandMetadata
 from flexivtrainer.observability import describe_exception, info, warn
 from flexivtrainer.runtime.gripper_session import (
@@ -161,6 +162,11 @@ class TeleopService:
         # operator actuates the leader trigger: the robots were last driven by
         # a policy, which may have left a part in the jaws.
         self._hold_end_effectors = False
+        # The follower stiffness and contact-wrench limit last sent through
+        # this connection; None while the controller default applies. A
+        # takeover sends the rollout's, so they are tracked, not assumed.
+        self._sent_stiffness: list[float] | None = None
+        self._sent_max_contact_wrench: list[float] | None = None
 
     @staticmethod
     def _config_value(config: Any, name: str) -> Any:
@@ -363,6 +369,8 @@ class TeleopService:
                 self._started = False
                 self._engaged = False
                 self._error = None
+                self._sent_stiffness = None
+                self._sent_max_contact_wrench = None
                 # On a successful connection, send the enable signal to every
                 # connected robot. This is fire-and-forget: no operational/ready
                 # check and no wait, just the enabling request for all robots.
@@ -467,6 +475,21 @@ class TeleopService:
                     init_method(zero_ft_sensor=flag)
                 else:
                     init_method()
+            # After Init(), before Start(): the TDK needs an initialized
+            # controller, and the loop then starts at this stiffness.
+            stiffness = self._settings.teleop.follower_cartesian_stiffness
+            if stiffness is None and self._sent_stiffness is not None:
+                # A rollout takeover set one on this connection; recordings
+                # store it, since nothing here sets it back.
+                warn(
+                    "Follower stiffness left as a rollout takeover set it",
+                    format_stiffness(self._sent_stiffness)
+                    + "; set FLEXIV_TRAINER_TELEOP__FOLLOWER_CARTESIAN_STIFFNESS"
+                    " to choose one",
+                )
+            self._apply_follower_stiffness(
+                range(self._engageable_pair_count()), stiffness
+            )
             self._controller.Start()
             # The controller latches engagement across Stop/Init/Start, so the
             # documented disengaged default cannot be trusted; Engage() must
@@ -493,6 +516,35 @@ class TeleopService:
         except Exception as exc:  # pragma: no cover - hardware specific
             self._error = describe_exception(exc)
         return self.snapshot()
+
+    def _apply_follower_stiffness(self, pair_indices: Any, stiffness: Any) -> None:
+        """Set the followers' Cartesian stiffness through the TDK.
+
+        Must run after Init() and before Start(). None sends nothing, so the
+        controller keeps whatever it has. Raises when the TDK cannot set it:
+        teleoperating at an unknown stiffness would record the wrong one.
+        """
+        if stiffness is None:
+            return
+        values = [float(v) for v in stiffness]
+        set_stiffness = getattr(self._controller, "SetFollowerCartStiff", None)
+        if not callable(set_stiffness):
+            raise RuntimeError(
+                "The installed flexivtdk cannot set the follower stiffness "
+                "(no SetFollowerCartStiff)"
+            )
+        for idx in pair_indices:
+            set_stiffness(idx, list(values))
+        self._sent_stiffness = values
+        info("Follower Cartesian stiffness set", format_stiffness(values))
+
+    def control_settings(self) -> ControlSettings:
+        """The follower settings the teleop loop runs under, for a recording."""
+        return ControlSettings(
+            recorded_in="teleop",
+            follower_cartesian_stiffness=self._sent_stiffness,
+            follower_max_contact_wrench=self._sent_max_contact_wrench,
+        )
 
     def clear_fault(self, timeout_sec: int = 30) -> dict[str, Any]:
         # Try to clear minor/critical faults via the controller's ClearFault(),
@@ -879,12 +931,15 @@ class TeleopService:
         lease: RolloutLease,
         *,
         max_contact_wrench: list[float] | None = None,
+        cartesian_stiffness: list[float] | None = None,
     ) -> None:
         """Give the lent followers to the leader arms, mid-rollout.
 
         Init() WITHOUT zeroing the force sensors -- the tool may be in contact,
-        and zeroing then would offset every later force reading -- then
-        Start(), then Engage() each pair. The follower mimics the leader's
+        and zeroing then would offset every later force reading -- then the
+        rollout's contact-wrench limit and stiffness, so the follower feels the
+        same under the operator as under the policy, then Start(), then
+        Engage() each pair. The follower mimics the leader's
         relative motion, so no leader-to-follower matching is needed first.
         The end effectors keep their state until the leader trigger moves.
         Raises on failure, with the teleop loop stopped (the robots hold).
@@ -906,6 +961,8 @@ class TeleopService:
                     controller.SetFollowerMaxContactWrench(
                         idx, [float(v) for v in max_contact_wrench]
                     )
+                self._sent_max_contact_wrench = [float(v) for v in max_contact_wrench]
+            self._apply_follower_stiffness(lease.pairs, cartesian_stiffness)
             # From here the loop may be running, so a failure must stop it.
             self._started = True
             controller.Start()

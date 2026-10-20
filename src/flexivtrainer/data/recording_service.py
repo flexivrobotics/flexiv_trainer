@@ -29,6 +29,10 @@ from typing import Any
 import numpy as np
 
 from flexivtrainer.config import AppSettings
+from flexivtrainer.data.control_settings import (
+    ControlSettings,
+    write_control_settings,
+)
 from flexivtrainer.data.gripper_command import (
     GripperCommandMetadata,
     write_gripper_command_metadata,
@@ -131,6 +135,8 @@ class RecordingService:
         self._recording_sides: list[str] | None = None
         self._recording_cameras: list[str] | None = None
         self._gripper_command_metadata: GripperCommandMetadata | None = None
+        # The follower settings this episode is recorded under (meta/control.json).
+        self._control_settings: ControlSettings | None = None
         self._staging_path: Path | None = None
         self._dataset: Any = None
         self._capture_thread: threading.Thread | None = None
@@ -230,6 +236,7 @@ class RecordingService:
                 if records_gripper_action
                 else None
             )
+            control_settings = self._teleop.control_settings()
 
             from lerobot.configs.video import DepthEncoderConfig, RGBEncoderConfig
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -273,6 +280,7 @@ class RecordingService:
             self._recording_sides = sides
             self._recording_cameras = cameras
             self._gripper_command_metadata = gripper_command_metadata
+            self._control_settings = control_settings
             self._staging_path = staging_path
             self._dataset = dataset
             self._error = None
@@ -324,6 +332,7 @@ class RecordingService:
             job_name = self._job_name or DEFAULT_JOB_NAME
             task = self._task
             gripper_command_metadata = self._gripper_command_metadata
+            control_settings = self._control_settings
             self._save_in_progress = True
             self._save_progress = 0
             self._error = None
@@ -344,6 +353,8 @@ class RecordingService:
                     write_gripper_command_metadata(
                         staging_path, gripper_command_metadata
                     )
+                if control_settings is not None:
+                    write_control_settings(staging_path, control_settings)
             except Exception as exc:
                 with self._lock:
                     self._error = f"Failed to finalize dataset: {exc}"
@@ -352,6 +363,8 @@ class RecordingService:
             # The episode is a complete, standard LeRobot v3.0 dataset on its
             # own (meta/info.json, meta/tasks.parquet, data/, videos/). It is
             # identified and loaded via that standard metadata; no extra manifest.
+            # meta/control.json beside it says which follower stiffness it was
+            # recorded under (data/control_settings.py).
             #
             # Episodes are filed under a per-job subfolder
             # (episodes/<job_name>/<episode_name>) so every recording for the
@@ -367,6 +380,7 @@ class RecordingService:
                 self._dataset = None
                 self._staging_path = None
                 self._gripper_command_metadata = None
+                self._control_settings = None
                 self._save_progress = 100
                 self._started_at_monotonic = None
                 self._elapsed_s = 0.0
@@ -396,6 +410,7 @@ class RecordingService:
             self._dataset = None
             self._staging_path = None
             self._gripper_command_metadata = None
+            self._control_settings = None
             self._save_in_progress = False
             self._save_progress = 0
             self._started_at_monotonic = None
@@ -441,6 +456,7 @@ class RecordingService:
             self._dataset = None
             self._staging_path = None
             self._gripper_command_metadata = None
+            self._control_settings = None
             self._episode_name = None
             self._job_name = None
             self._frames_captured = 0
