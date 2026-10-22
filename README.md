@@ -331,6 +331,8 @@ and what one unit of its action means. The space is stored with the skill, in
   "step_deg": {"x": 0.5, "y": 0.5, "z": 0.5},
   "force_n": {"z": 80},
   "views": ["wrist_1", "wrist_2"],
+  "crops": {"wrist_1": [[140, 40, 160, 256], [360, 40, 160, 256]]},
+  "image_size": [128, 176],
   "last_actions": 3,
   "wrench_samples": 10,
   "sense_hz": 30
@@ -343,7 +345,14 @@ and what one unit of its action means. The space is stored with the skill, in
   order x, y, z. A move is relative to where the tool is when the step starts,
   in the tool frame. A force axis is held where it is and pressed with its
   target. An axis in none of the three is held where it is.
-- **What it sees:** the listed cameras; the tool's pose and velocity
+- **What it sees of each camera:** the frame, cut to its `crops` (strips given
+  as `[x, y, width, height]` in frame pixels, placed side by side, left to
+  right) and resized to `image_size` (height, width). Both are optional. They
+  are applied by the space, not by the model, because practice keeps every
+  image it learns from in memory: two whole camera frames are about 7 MB a
+  step. `frame_size` records the size the strips refer to. The converter fills
+  it in from the recording, and on the robot each frame is first resized to it.
+- **What else it sees:** the tool's pose and velocity
   (`observation.state`); the last `wrench_samples` force readings, taken at
   `sense_hz`, as the force the tool applies, in the tool frame
   (`observation.wrench`); and its last `last_actions` commands, re-expressed

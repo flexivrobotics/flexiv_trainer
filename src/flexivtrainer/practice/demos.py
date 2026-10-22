@@ -38,8 +38,9 @@ out, because a demonstration shows the skill done.
 
 The output is a LeRobot dataset at `rate_hz` with `next.reward` and
 `next.done`, the form LeRobot's practice loop reads demonstrations in. Depth
-streams and cameras the space does not list are left out. It carries the space
-(`meta/practice_space.json`), the source's control settings
+streams and cameras the space does not list are left out; the others are cut to
+the space's strips and size. It carries the space, with the recording's frame
+sizes filled in (`meta/practice_space.json`), the source's control settings
 (`meta/control.json`) and a report (`meta/practice_demos.json`).
 """
 
@@ -49,6 +50,7 @@ import json
 import shutil
 import tempfile
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -180,6 +182,25 @@ def convert_demos(
         raise ValueError(
             f"{source.name} has no RGB camera {missing_views}; it has {reader.cameras}"
         )
+    recorded = {
+        view: tuple(
+            int(v) for v in reader.dataset.features[IMAGE_PREFIX + view]["shape"][:2]
+        )
+        for view in space.views
+    }
+    resized = {
+        view: (want, recorded[view])
+        for view, want in space.frame_size.items()
+        if want != recorded[view]
+    }
+    if resized:
+        raise ValueError(
+            f"{source.name} records frames of another size than the space reads: "
+            + ", ".join(f"{v} {r} not {w}" for v, (w, r) in resized.items())
+        )
+    # The size the strips refer to travels with the skill, so the robot reads
+    # its frames at the same size.
+    space = replace(space, frame_size={**recorded, **space.frame_size})
     side = _arm(reader.state_names, arm)
     columns = required_columns(side)
     action_names = list(reader.dataset.features["action"].get("names") or [])
@@ -220,10 +241,10 @@ def convert_demos(
 
     features: dict[str, dict[str, Any]] = {}
     for view in space.views:
-        shape = reader.dataset.features[IMAGE_PREFIX + view]["shape"]
+        height, width = space.view_size(view, space.frame_size[view])
         features[IMAGE_PREFIX + view] = {
             "dtype": "video",
-            "shape": tuple(int(v) for v in shape),
+            "shape": (height, width, 3),
             "names": ["height", "width", "channels"],
         }
     for key, names in space.state_dims().items():

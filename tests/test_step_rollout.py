@@ -593,3 +593,18 @@ def test_a_live_check_that_passes_ends_the_skill(rdk):
     # Seven ticks: the reset and two steps of three.
     assert reasons == [("check seated passed", 2)]
     assert len(arm.commands) == 2
+
+
+def test_the_robot_reads_frames_at_the_size_the_strips_refer_to(tmp_path, rdk):
+    """The cameras give 16 x 16; the skill's frames are 8 x 8, cut to one strip
+    and resized to 4 x 2."""
+    arm = _Arm()
+    service, _ = _service(tmp_path, arm)
+    service._settings.rollout.max_steps = 1
+    space = _space(
+        frame_size={"wrist": (8, 8)}, crops={"wrist": [(0, 0, 4, 8)]}, image_size=(4, 2)
+    )
+    service.start(_skill(tmp_path, space))
+    _wait_until_done(service)
+    assert rdk[0]["observation.images.wrist"].shape == (4, 2, 3)
+    assert rdk[0]["observation.images.wrist"][0, 0].tolist() == [30, 20, 10]

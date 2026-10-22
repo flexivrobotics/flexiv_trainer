@@ -29,7 +29,9 @@ in none of the three is held where it is.
 
 What the skill sees at a step:
 
-    observation.images.<view>    each listed camera, as captured (RGB, HWC)
+    observation.images.<view>    each listed camera (RGB, HWC): the frame,
+                                 cut to its `crops` and resized to
+                                 `image_size` when they are given
     observation.state            the tool's position (m), its rotation (the first
                                  two rows of its matrix) and its velocity, as the
                                  recorder stores them
@@ -39,6 +41,16 @@ What the skill sees at a step:
     observation.last_actions     its last `last_actions` commands, newest first,
                                  each re-expressed relative to where the tool is
                                  NOW, in units of the bounds
+
+THE IMAGES ARE CUT DOWN HERE, NOT IN THE MODEL. Practice keeps every
+observation it learns from in memory, as float32: two whole wrist frames are
+about 7 MB a step. So the close-up strips a skill reads, and the size they are
+scaled to, belong to the space, as they do in LeRobot's own environments; the
+demonstrations, the robot and the learner's buffer then all hold the small
+images. Strips are (x, y, width, height) in pixels of the frame at
+`frame_size`, placed side by side, left to right; a shorter strip is first
+scaled to the tallest one's height. The converter fills `frame_size` in from
+the recording, and on the robot each frame is resized to it first.
 
 The last commands are there because a skill that cannot see what it last asked
 for reads the contact force as "how deep was my last target" instead, and
@@ -206,6 +218,37 @@ def _bounds(value: Any, name: str) -> dict[str, float]:
     return out
 
 
+def _per_view(space: Any, name: str) -> list[tuple[str, Any]]:
+    value = getattr(space, name)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must map camera names to values")
+    strangers = sorted(set(value) - set(space.views))
+    if strangers:
+        raise ValueError(f"{name} names {strangers}, which are not among the views")
+    return [(str(v), value[v]) for v in value]
+
+
+def _whole(value: Any, name: str, *, least: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < least:
+        raise ValueError(f"{name} must be a whole number >= {least}, got {value!r}")
+    return value
+
+
+def _size(value: Any, name: str) -> tuple[int, int]:
+    if isinstance(value, str) or not isinstance(value, Sequence) or len(value) != 2:
+        raise ValueError(f"{name} is (height, width), got {value!r}")
+    return (_whole(value[0], name, least=1), _whole(value[1], name, least=1))
+
+
+def _strip(value: Any, view: str) -> tuple[int, int, int, int]:
+    name = f"a strip of {view}"
+    if isinstance(value, str) or not isinstance(value, Sequence) or len(value) != 4:
+        raise ValueError(f"{name} is (x, y, width, height), got {value!r}")
+    x, y = (_whole(v, name, least=0) for v in value[:2])
+    w, h = (_whole(v, name, least=1) for v in value[2:])
+    return (x, y, w, h)
+
+
 @dataclass(frozen=True)
 class PracticeSpace:
     """How a skill steps, what it sees, and what one unit of its action means."""
@@ -218,6 +261,14 @@ class PracticeSpace:
     last_actions: int = 3
     wrench_samples: int = 10
     sense_hz: float = 30.0
+    #: view -> (height, width) its frames are read at, before any strip.
+    frame_size: Mapping[str, tuple[int, int]] = field(default_factory=dict)
+    #: view -> its close-up strips, (x, y, width, height) in frame pixels.
+    crops: Mapping[str, tuple[tuple[int, int, int, int], ...]] = field(
+        default_factory=dict
+    )
+    #: (height, width) every view is resized to after its strips; None keeps it.
+    image_size: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         for name in ("rate_hz", "sense_hz"):
@@ -247,6 +298,29 @@ class PracticeSpace:
         if len(set(views)) != len(views) or any(not v for v in views):
             raise ValueError(f"views must be distinct camera names, got {views}")
         object.__setattr__(self, "views", views)
+        object.__setattr__(
+            self,
+            "frame_size",
+            {
+                v: _size(hw, f"frame_size.{v}")
+                for v, hw in _per_view(self, "frame_size")
+            },
+        )
+        crops: dict[str, tuple[tuple[int, int, int, int], ...]] = {}
+        for view, strips in _per_view(self, "crops"):
+            crops[view] = tuple(_strip(s, view) for s in strips)
+            if not crops[view]:
+                raise ValueError(f"crops.{view} lists no strip")
+            frame = self.frame_size.get(view)
+            for x, y, w, h in crops[view] if frame else ():
+                if x + w > frame[1] or y + h > frame[0]:
+                    raise ValueError(
+                        f"strip {(x, y, w, h)} of {view} leaves its "
+                        f"{frame[1]}x{frame[0]} frame"
+                    )
+        object.__setattr__(self, "crops", crops)
+        if self.image_size is not None:
+            object.__setattr__(self, "image_size", _size(self.image_size, "image_size"))
         for name in ("last_actions", "wrench_samples"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -258,6 +332,44 @@ class PracticeSpace:
     def stride(self) -> int:
         """Samples per step."""
         return round(self.sense_hz / self.rate_hz)
+
+    def view_size(self, view: str, frame: tuple[int, int]) -> tuple[int, int]:
+        """(height, width) of what the skill sees of `view`, from a frame."""
+        strips = self.crops.get(view)
+        if strips:
+            tallest = max(h for _, _, _, h in strips)
+            size = (tallest, sum(round(w * tallest / h) for _, _, w, h in strips))
+        else:
+            size = (int(frame[0]), int(frame[1]))
+        return self.image_size or size
+
+    def prepare(self, view: str, image: np.ndarray) -> np.ndarray:
+        """What the skill sees of a frame: its strips, at `image_size`."""
+        import cv2  # noqa: PLC0415
+
+        image = np.asarray(image)
+        strips = self.crops.get(view)
+        if strips:
+            height, width = image.shape[:2]
+            for x, y, w, h in strips:
+                if x + w > width or y + h > height:
+                    raise ValueError(
+                        f"strip {(x, y, w, h)} of {view} leaves its "
+                        f"{width}x{height} frame"
+                    )
+            tallest = max(h for _, _, _, h in strips)
+            parts = []
+            for x, y, w, h in strips:
+                part = image[y : y + h, x : x + w]
+                if h != tallest:
+                    size = (round(w * tallest / h), tallest)
+                    part = cv2.resize(part, size, interpolation=cv2.INTER_AREA)
+                parts.append(part)
+            image = np.concatenate(parts, axis=1)
+        if self.image_size is not None and image.shape[:2] != self.image_size:
+            height, width = self.image_size
+            image = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+        return np.ascontiguousarray(image)
 
     @property
     def action_names(self) -> list[str]:
@@ -315,6 +427,9 @@ class PracticeSpace:
             "last_actions": self.last_actions,
             "wrench_samples": self.wrench_samples,
             "sense_hz": self.sense_hz,
+            "frame_size": {v: list(hw) for v, hw in self.frame_size.items()},
+            "crops": {v: [list(s) for s in strips] for v, strips in self.crops.items()},
+            "image_size": list(self.image_size) if self.image_size else None,
         }
 
     @classmethod
@@ -334,6 +449,9 @@ class PracticeSpace:
             "last_actions",
             "wrench_samples",
             "sense_hz",
+            "frame_size",
+            "crops",
+            "image_size",
         }
         unknown = sorted(set(values) - known)
         if unknown:
@@ -421,7 +539,8 @@ class StepTracker:
         if missing:
             raise KeyError(f"no frame from camera {missing}")
         out: dict[str, np.ndarray] = {
-            IMAGE_PREFIX + view: np.asarray(images[view]) for view in self.space.views
+            IMAGE_PREFIX + view: self.space.prepare(view, images[view])
+            for view in self.space.views
         }
         out[STATE] = np.concatenate(
             [sample.position, sample.rotation[:2].reshape(6), sample.twist]

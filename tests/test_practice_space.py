@@ -297,3 +297,69 @@ def test_a_tracker_refuses_to_work_before_it_is_reset():
         tracker.sense(_sample(np.random.default_rng(7)))
     with pytest.raises(RuntimeError, match="reset"):
         tracker.take(np.zeros(6))
+
+
+# --- what it sees of a camera ------------------------------------------------------
+
+
+def _frame():
+    """A 20 x 40 frame: each pixel's value is its column, so a cut shows."""
+    return np.tile(np.arange(40, dtype=np.uint8)[None, :, None], (20, 1, 3))
+
+
+def test_strips_are_cut_placed_side_by_side_and_scaled_to_the_tallest():
+    space = _space(crops={"wrist": [(10, 0, 6, 20), (30, 5, 4, 10)]})
+    seen = space.prepare("wrist", _frame())
+    # The second strip is half as tall: scaled up to 20 rows, 8 columns.
+    assert seen.shape == (20, 14, 3)
+    assert seen[0, :6, 0].tolist() == [10, 11, 12, 13, 14, 15]
+    assert 30 <= seen[0, 6:, 0].min() and seen[0, 6:, 0].max() <= 33
+    assert space.view_size("wrist", (20, 40)) == (20, 14)
+
+
+def test_an_image_size_resizes_after_the_strips():
+    space = _space(crops={"wrist": [(0, 0, 40, 20)]}, image_size=(10, 20))
+    assert space.prepare("wrist", _frame()).shape == (10, 20, 3)
+    assert space.view_size("wrist", (20, 40)) == (10, 20)
+    assert _space().view_size("wrist", (20, 40)) == (20, 40)
+
+
+def test_the_observation_shows_the_cut_frame():
+    tracker = StepTracker(_space(crops={"wrist": [(10, 0, 6, 20)]}))
+    tracker.reset(_sample(np.random.default_rng(8)))
+    seen = tracker.observation({"wrist": _frame()})["observation.images.wrist"]
+    assert seen.shape == (20, 6, 3) and seen[0, 0, 0] == 10
+
+
+def test_a_strip_outside_the_frame_is_refused():
+    with pytest.raises(ValueError, match="leaves its 40x20 frame"):
+        _space(frame_size={"wrist": (20, 40)}, crops={"wrist": [(30, 0, 20, 10)]})
+    with pytest.raises(ValueError, match="leaves its 40x20 frame"):
+        _space(crops={"wrist": [(30, 0, 20, 10)]}).prepare("wrist", _frame())
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"crops": {"ego": [(0, 0, 4, 4)]}}, "not among the views"),
+        ({"frame_size": {"ego": (4, 4)}}, "not among the views"),
+        ({"crops": {"wrist": []}}, "no strip"),
+        ({"crops": {"wrist": [(0, 0, 0, 4)]}}, ">= 1"),
+        ({"crops": {"wrist": [(-1, 0, 4, 4)]}}, ">= 0"),
+        ({"crops": {"wrist": [(0, 0, 4)]}}, "x, y, width, height"),
+        ({"image_size": (0, 4)}, ">= 1"),
+        ({"frame_size": {"wrist": (4,)}}, "height, width"),
+    ],
+)
+def test_wrong_strips_or_sizes_are_refused(change, message):
+    with pytest.raises(ValueError, match=message):
+        _space(**change)
+
+
+def test_strips_and_sizes_round_trip_through_the_file(tmp_path):
+    space = _space(
+        frame_size={"wrist": (480, 640)},
+        crops={"wrist": [(139, 40, 160, 256), (366, 40, 160, 256)]},
+        image_size=(128, 160),
+    )
+    assert read_space(write_space(tmp_path, space)) == space
