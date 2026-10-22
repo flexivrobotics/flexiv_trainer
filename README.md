@@ -317,6 +317,69 @@ contain at least 12 frames.
 > evaluate predicted parameters. Do not send a checkpoint trained on this
 > converted action feature through the existing Cartesian waypoint executor.
 
+## Prepare Demonstrations For A Step Skill
+
+A step skill makes one small, bounded move per step, for example 10 times a
+second, and can practise on the robot. Its **practice space** says what it sees
+and what one unit of its action means. The space is stored with the skill, in
+`practice_space.json`:
+
+```json
+{
+  "rate_hz": 10,
+  "step_m": {"x": 0.002, "y": 0.002},
+  "step_deg": {"x": 0.5, "y": 0.5, "z": 0.5},
+  "force_n": {"z": 80},
+  "views": ["wrist_1", "wrist_2"],
+  "last_actions": 3,
+  "wrench_samples": 10,
+  "sense_hz": 30
+}
+```
+
+- **The action** is a vector in [-1, 1]. Its columns are the moves (`step_m`,
+  largest move per step, in metres), then the rotations (`step_deg`, in
+  degrees), then the force targets (`force_n`, in newtons), each in tool-axis
+  order x, y, z. A move is relative to where the tool is when the step starts,
+  in the tool frame. A force axis is held where it is and pressed with its
+  target. An axis in none of the three is held where it is.
+- **What it sees:** the listed cameras; the tool's pose and velocity
+  (`observation.state`); the last `wrench_samples` force readings, taken at
+  `sense_hz`, as the force the tool applies, in the tool frame
+  (`observation.wrench`); and its last `last_actions` commands, re-expressed
+  relative to where the tool is now (`observation.last_actions`).
+
+The converter turns a teleop recording into demonstrations in that space. You
+choose nothing per column: everything is computed from the recorded pose,
+velocity, wrench and commanded pose, so the recording must include those
+entries. `sense_hz` must match the recording's rate.
+
+```bash
+flexivtrainer-practice-demos \
+  .local/datasets/my_task \
+  .local/datasets/my_task_steps \
+  --space practice_space.json
+```
+
+At each step, the action heads for the pose the operator commanded one step
+later, and the force target is the force the tool applied one step later. Both
+are clipped to the bounds. Every episode counts as a success that ends on its
+last step. With `--check NAME`, each episode instead ends at the step that
+reaches that check's first labelled frame
+([learned checks](#learned-checks)); episodes labelled `--never`, or not
+labelled, are left out.
+
+The new dataset carries the space, the source's stiffness (`control.json`) and
+a report (`meta/practice_demos.json`). Read the report's `clipped` first: for
+each action column, the share of steps on which the demonstrations outran the
+bound, and `covers_95_*`, the bound under which 95% of them fit. A bound that
+clips more than 5% of steps is too small for these demonstrations, and the
+command warns about it.
+
+The observation is built by the same code the practice environment will use on
+the robot, so a skill trained on these demonstrations sees there the numbers
+it was trained on. Running step skills on the robot is not built yet.
+
 ## Start Training
 
 Open `Policy Training` from the navigation bar, then work through the steps.
