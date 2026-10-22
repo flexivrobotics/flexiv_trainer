@@ -32,6 +32,7 @@ from flexivtrainer.data.gripper_command import (
 )
 from flexivtrainer.data.hub import ACTION_NAMES_FILENAME
 from flexivtrainer.data.lerobot_io import first_dataset_task
+from flexivtrainer.practice.space import SPACE_FILENAME, PracticeSpace, read_space
 
 _LANGUAGE_POLICY_TYPES = {"multi_task_dit", "smolvla", "pi0", "pi05"}
 _IMAGE_FEATURE_PREFIX = "observation.images."
@@ -364,6 +365,13 @@ def checkpoint_gripper_command_metadata(
 def checkpoint_control(checkpoint_path: str) -> ControlSettings | None:
     """The follower settings the training data was recorded under, if stored."""
     return checkpoint_control_settings(_checkpoint_model_dir(checkpoint_path))
+
+
+def checkpoint_space(checkpoint_path: str) -> PracticeSpace | None:
+    """A step skill's practice space, stored beside its weights; None for a
+    policy that is not a step skill."""
+    path = _checkpoint_model_dir(checkpoint_path) / SPACE_FILENAME
+    return read_space(path) if path.is_file() else None
 
 
 def _checkpoint_target_hz(checkpoint_path: str) -> float | None:

@@ -54,6 +54,7 @@ __all__ = [
     "LeaderTrigger",
     "Takeover",
     "TakeoverRefused",
+    "controller_command",
     "operator_action",
 ]
 
@@ -97,7 +98,7 @@ def _vector(source: Any, field: str) -> list[float] | None:
     return [float(v) for v in raw]
 
 
-def _commanded(robot: Any) -> dict[str, list[float]]:
+def controller_command(robot: Any) -> dict[str, list[float]]:
     """What the controller is commanding the follower: the teleop action."""
     reader = getattr(robot, "actions", None)
     if callable(reader):
@@ -140,7 +141,7 @@ def operator_action(
     )
     payload: dict[str, Any] = {}
     for index, robot in enumerate(robots):
-        entry: dict[str, Any] = {"actions": _commanded(robot)}
+        entry: dict[str, Any] = {"actions": controller_command(robot)}
         side = sides[index] if index < len(sides) else ""
         if side in gripper_targets:
             entry["gripper_command"] = {"target_width": gripper_targets[side]}
