@@ -231,6 +231,24 @@ class StepEnv:
 
     # --- the arm -------------------------------------------------------------
 
+    def read(self) -> Sample:
+        """Where the arm is now, outside any step: no tick is emitted."""
+        return self._read()[2]
+
+    def send_pose(
+        self, pose: Sequence[float], limits: tuple[float, float, float, float]
+    ) -> bool:
+        """Send a plain pose target with its own motion limits, pressing with
+        nothing: for moves between episodes. False while paused."""
+        with self._send_lock:
+            with self._lock:
+                if self._paused:
+                    return False
+            self._robot.SendCartesianMotionForce(
+                list(pose), [0.0] * 6, [0.0] * 6, *limits
+            )
+        return True
+
     def _send(self, command: Command, epoch: int) -> bool:
         wrench = [-float(f) for f in command.force] + [0.0, 0.0, 0.0]
         with self._send_lock:

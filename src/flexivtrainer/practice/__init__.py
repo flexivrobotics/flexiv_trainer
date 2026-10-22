@@ -17,4 +17,6 @@
 `space.py` says what such a skill sees and what one unit of its action means;
 `demos.py` turns teleop recordings into demonstrations in that space;
 `env.py` steps one arm in it, and `runner.py` rolls a skill out there.
+`session.py` practises a skill: episodes that start where `reset.py` puts the
+arm, are judged by a learned check, and go to a learner over `learner.py`.
 """

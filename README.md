@@ -417,6 +417,62 @@ type must be importable (see [Policy Types From Other Packages](#policy-types-fr
   operator, each step is also measured the way the converter labels a
   demonstration, and becomes one of the skill's last commands.
 
+### Practise a step skill on the robot
+
+Practice improves a step skill on the robot, with an operator who can take
+over. The trainer acts; a learner learns. The learner is LeRobot's own
+(`python -m lerobot.rl.learner`), running on a GPU machine, with the skill's
+checkpoint as its starting policy and the converted demonstrations as its
+dataset. The trainer reaches it over LeRobot's actor-learner link (gRPC), so
+the trainer holds none of the skill's own training code.
+
+Each episode:
+
+1. **Reset.** The tool backs off along its own axis, then goes slowly to a
+   start drawn at random in the plan's box. All axes are motion-controlled
+   on the way. Without a box, an episode starts where the arm is.
+2. **Act.** The skill steps as in a rollout, but samples its actions to
+   explore. Take over with the leader arm whenever it needs help: your steps
+   are measured like demonstrations and marked as interventions, and the
+   learner keeps them among its demonstrations too.
+3. **Judge.** The plan's learned check is scored on every tick. The step at
+   which it passes earns the reward and ends the episode; otherwise the
+   episode is cut short at `max_episode_steps`.
+4. **Learn.** The episode's steps go to the learner, and the newest weights
+   it has sent are loaded before the next episode.
+
+After a success, practice waits until you have done what the reset cannot,
+such as unlatching a part, and send `POST /rollout/practice/continue`.
+
+Start it with `POST /rollout/practice`:
+
+```json
+{
+  "checkpoint_path": "<the skill's checkpoint>",
+  "plan": {
+    "reward": {"seated": {"kind": "learned", "model": "checks/seated", "hold_s": 0.2}},
+    "max_episode_steps": 100,
+    "learner_host": "192.168.1.20",
+    "learner_port": 50051,
+    "episodes": 0,
+    "start": {
+      "min_m": [0.40, -0.02, 0.30],
+      "max_m": [0.44, 0.02, 0.32],
+      "yaw_deg": 6,
+      "retreat_m": 0.03,
+      "speed_m_s": 0.05
+    },
+    "wait_after_success": true,
+    "seed": 0
+  }
+}
+```
+
+`episodes` 0 practises until stopped. `GET /rollout/status` reports practice
+under `practice`: its state, the totals (episodes, successes, steps, steps
+under the operator, weights loaded) and the last episodes. Stop practice as
+you stop a rollout. There is no practice page in the UI yet.
+
 ## Start Training
 
 Open `Policy Training` from the navigation bar, then work through the steps.
