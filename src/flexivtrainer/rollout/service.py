@@ -392,7 +392,13 @@ class RolloutService:
                 "Recording B-spline rollouts is not supported yet; start it without "
                 "recording."
             )
-        image_resolutions = checkpoint_image_resolutions(checkpoint_path)
+        # A step skill's frames are read at the size its strips refer to; what
+        # it was trained on is smaller, cut from them.
+        image_resolutions = (
+            dict(space.frame_size)
+            if space is not None
+            else checkpoint_image_resolutions(checkpoint_path)
+        )
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
         if space is not None:
             # Its arm is read at the space's own rate, and its step is part of

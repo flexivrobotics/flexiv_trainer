@@ -1,6 +1,7 @@
 """The demo converter: teleop recordings into demonstrations in a practice space."""
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -309,7 +310,9 @@ def test_the_space_and_the_stiffness_travel_with_the_demonstrations(
     converted, recording
 ):
     output, _ = converted
-    assert read_space(output / "meta" / "practice_space.json") == _space()
+    # The space, with the size of the frames its strips would refer to.
+    stored = read_space(output / "meta" / "practice_space.json")
+    assert stored == replace(_space(), frame_size={"wrist": (SIZE, SIZE)})
     control = json.loads((output / "meta" / "control.json").read_text())
     assert control["follower_cartesian_stiffness"] == [2900.0] * 3 + [100.0] * 3
 
@@ -413,3 +416,23 @@ def test_the_command_line_converts_chosen_episodes(recording, tmp_path):
     summary = json.loads(result.stdout)
     assert summary["steps"] == len(_steps(EPISODES[1][0]))
     assert _read(tmp_path / "out").meta.total_episodes == 1
+
+
+def test_strips_and_a_size_cut_the_frames_down(recording, tmp_path):
+    space = _space(
+        crops={"wrist": [(0, 0, 16, 32), (16, 0, 16, 16)]}, image_size=(8, 16)
+    )
+    convert_demos(recording, tmp_path / "out", space)
+    dataset = _read(tmp_path / "out")
+    assert dataset.features["observation.images.wrist"]["shape"] == (8, 16, 3)
+    frame = dataset[0]["observation.images.wrist"]
+    assert tuple(frame.shape) == (3, 8, 16)
+    stored = read_space(tmp_path / "out" / "meta" / "practice_space.json")
+    assert stored.frame_size == {"wrist": (SIZE, SIZE)} and stored.crops == space.crops
+
+
+def test_frames_of_another_size_than_the_space_reads_are_refused(recording, tmp_path):
+    with pytest.raises(ValueError, match=r"wrist \(32, 32\) not \(64, 64\)"):
+        convert_demos(
+            recording, tmp_path / "out", _space(frame_size={"wrist": (64, 64)})
+        )
