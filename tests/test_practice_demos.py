@@ -68,6 +68,33 @@ def _rows(frame: int, speed: float):
     return position, target, target_rotation, wrench
 
 
+#: Rows per bit of a frame's index drawn into its image.
+BAND = 6
+
+
+def _frame_image(frame: int) -> np.ndarray:
+    """The frame's index in binary, one band of rows per bit, white for 1.
+
+    Video compression shifts grey levels by a few steps, and by different
+    amounts on different platforms; it does not turn a white band black.
+    """
+    image = np.zeros((SIZE, SIZE, 3), dtype=np.uint8)
+    for bit in range(SIZE // BAND):
+        if frame >> bit & 1:
+            image[BAND * bit : BAND * (bit + 1)] = 255
+    return image
+
+
+def _frame_index(image) -> int:
+    """Read `_frame_image` back from a decoded (C, H, W) frame in [0, 1]."""
+    rows = np.asarray(image).mean(axis=(0, 2))
+    return sum(
+        1 << bit
+        for bit in range(SIZE // BAND)
+        if rows[BAND * bit + 2 : BAND * bit + 4].mean() > 0.5
+    )
+
+
 def _rot6d(rotation: Rotation) -> list[float]:
     return rotation.as_matrix()[:2].reshape(6).tolist()
 
@@ -120,11 +147,11 @@ def _recording(root, *, wrench=True, episodes=EPISODES):
             if wrench:
                 state += force
             state += [0.03, 20.0]
-            grey = np.full((SIZE, SIZE, 3), 8 * frame, dtype=np.uint8)
+            image = _frame_image(frame)
             dataset.add_frame(
                 {
-                    "observation.images.wrist": grey,
-                    "observation.images.ego": 255 - grey,
+                    "observation.images.wrist": image,
+                    "observation.images.ego": 255 - image,
                     "observation.state": np.array(state, dtype=np.float32),
                     "action": np.array(
                         [*target, *_rot6d(target_rotation), *twist, 0.03],
@@ -218,9 +245,12 @@ def test_the_reward_and_the_end_are_on_each_last_step(converted):
 def test_only_the_listed_cameras_are_kept_at_the_step_starts(converted):
     dataset = _read(converted[0])
     assert dataset.meta.video_keys == ["observation.images.wrist"]
-    for row, start in enumerate(_steps(EPISODES[0][0])):
-        frame = dataset[row]["observation.images.wrist"]
-        assert float(frame.mean()) * 255 == pytest.approx(8 * start, abs=3)
+    starts = [start for length, _ in EPISODES for start in _steps(length)]
+    seen = [
+        _frame_index(dataset[row]["observation.images.wrist"])
+        for row in range(len(starts))
+    ]
+    assert seen == starts
 
 
 def test_the_features_name_every_number(converted):
