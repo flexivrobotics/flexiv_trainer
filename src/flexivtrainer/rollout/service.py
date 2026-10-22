@@ -44,6 +44,8 @@ from flexivtrainer.policies import bspline_diffusion as bspline_policy
 from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
 from flexivtrainer.policies import import_policy_plugins
+from flexivtrainer.practice.runner import StepRunner, step_action_names
+from flexivtrainer.practice.space import PracticeSpace
 from flexivtrainer.rollout import hardware
 from flexivtrainer.rollout.checkpoint import (
     _checkpoint_target_hz,
@@ -54,6 +56,7 @@ from flexivtrainer.rollout.checkpoint import (
     checkpoint_control,
     checkpoint_gripper_command_metadata,
     checkpoint_image_resolutions,
+    checkpoint_space,
     checkpoint_state_input_dim,
     resolve_checkpoint_path,
     resolve_hub_checkpoint,
@@ -138,6 +141,19 @@ def _episode_name(trial: TrialContext | None) -> str:
     return f"{stamp}_t{trial.trial:03d}" if trial is not None else f"{stamp}_rollout"
 
 
+def _describe_space(space: PracticeSpace) -> str:
+    """One line on how a step skill acts: rate, bounds, force axes, inputs."""
+    moves = [f"{a} {b * 1000:g} mm" for a, b in space.step_m.items()]
+    turns = [f"r{a} {b:g} deg" for a, b in space.step_deg.items()]
+    forces = [f"{a} {b:g} N" for a, b in space.force_n.items()]
+    return (
+        f"{space.rate_hz:g} steps/s; per step at most "
+        f"{', '.join(moves + turns) or 'no move'}; force along tool "
+        f"{', '.join(forces) or 'none'}; cameras {list(space.views)}; "
+        f"last {space.last_actions} commands"
+    )
+
+
 def _describe_rollout_overrides(rollout_cfg: Any) -> str:
     """Summarize an applied override; families expose different knobs."""
     parts: list[str] = []
@@ -207,7 +223,7 @@ class RolloutService:
         self._device = "cpu"
         self._target_hz: float | None = None
         self._sides: list[str] = []
-        self._runner: WaypointRunner | BSplineRunner | None = None
+        self._runner: WaypointRunner | BSplineRunner | StepRunner | None = None
         self._stop_event = threading.Event()
         self._logs: deque[str] = deque(maxlen=2000)
         self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
@@ -369,6 +385,8 @@ class RolloutService:
             policy, "name", ""
         )
         is_bspline = policy_type == "bspline_diffusion"
+        # A checkpoint with a practice space is a step skill, whatever its type.
+        space = None if is_bspline else checkpoint_space(checkpoint_path)
         if is_bspline and record:
             raise RuntimeError(
                 "Recording B-spline rollouts is not supported yet; start it without "
@@ -376,10 +394,15 @@ class RolloutService:
             )
         image_resolutions = checkpoint_image_resolutions(checkpoint_path)
         rollout_cfg = self._settings.policies.rollout_for(policy_type)
-        dataset_hz = self._resolve_target_hz(
-            checkpoint_path, policy, require_metadata=is_bspline
-        )
-        target_hz = self._apply_playback_speed(dataset_hz, rollout_cfg)
+        if space is not None:
+            # Its arm is read at the space's own rate, and its step is part of
+            # what it learned: no playback speed.
+            target_hz = float(space.sense_hz)
+        else:
+            dataset_hz = self._resolve_target_hz(
+                checkpoint_path, policy, require_metadata=is_bspline
+            )
+            target_hz = self._apply_playback_speed(dataset_hz, rollout_cfg)
         override_fn = _ROLLOUT_OVERRIDES.get(policy_type)
         overrides_applied = (
             override_fn(policy, rollout_cfg) if override_fn is not None else False
@@ -426,6 +449,20 @@ class RolloutService:
                         "B-spline checkpoint predicts gripper.target_width but "
                         "has no gripper_command.json"
                     )
+        elif space is not None:
+            if len(sides) != 1 or len(followers) != 1:
+                raise RuntimeError(
+                    f"A step skill drives one arm, but {len(followers)} are "
+                    "configured; set single-arm mode"
+                )
+            missing = [v for v in space.views if v not in camera_names]
+            if missing:
+                raise RuntimeError(
+                    f"The step skill sees camera {missing}, which is not "
+                    f"configured; the rig has {camera_names}"
+                )
+            # What its recording stores as the action: the commanded pose.
+            waypoint_action_names = step_action_names(sides[0])
         else:
             (
                 waypoint_layout,
@@ -552,7 +589,7 @@ class RolloutService:
         if recording is not None:
             recording["takeover"] = takeover
         on_finished = partial(self._on_runner_finished, recording=recording)
-        runner: WaypointRunner | BSplineRunner
+        runner: WaypointRunner | BSplineRunner | StepRunner
         try:
             if bspline_layout is not None:
                 runner = BSplineRunner(
@@ -590,6 +627,48 @@ class RolloutService:
                     gripper_command_parameters=gripper_command_parameters,
                     camera_names=camera_names,
                 )
+            elif space is not None:
+                if recording is not None:
+                    recording["live"] = self._start_live_checks(
+                        trial, sides, camera_names
+                    )
+                runner = StepRunner(
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    robots=robots,
+                    sides=sides,
+                    followers=followers,
+                    cameras=self._cameras,
+                    camera_names=camera_names,
+                    space=space,
+                    device=device,
+                    task=task,
+                    motion_limits=motion_limits,
+                    max_steps=app_rollout.max_steps,
+                    stop_event=self._stop_event,
+                    append_log=self._append_log,
+                    append_metric=self._metrics.append,
+                    on_error=self._on_runner_error,
+                    on_cleanup_error=self._on_runner_cleanup_error,
+                    on_finished=on_finished,
+                    release_robots=self._make_release_robots(robots, lease),
+                    stop_robots=hardware.stop_robots,
+                    image_resolutions=image_resolutions,
+                    append_wrench=self._wrench.append,
+                    safety=safety,
+                    recorder=recording["recorder"] if recording is not None else None,
+                    cartesian_stiffness=stiffness.values,
+                    max_contact_wrench=app_rollout.max_contact_wrench,
+                    zero_ft_max_force_n=app_rollout.ft_zero_max_force_n,
+                    force_axis_max_speed_m_s=app_rollout.force_axis_max_speed_m_s,
+                    takeover=takeover,
+                    live_checks=recording.get("live") if recording else None,
+                )
+                if recording is not None:
+                    recording["runner"] = runner
+                if takeover is not None:
+                    takeover.bind(runner)
             else:
                 assert waypoint_layout is not None
                 assert waypoint_action_dim is not None
@@ -665,7 +744,9 @@ class RolloutService:
             raise
 
         with self._lock:
-            self._send_twist = effective_twist if bspline_layout is None else None
+            self._send_twist = (
+                effective_twist if bspline_layout is None and space is None else None
+            )
             self._safety = safety if bspline_layout is None else None
             self._stiffness = stiffness
             self._trial = trial
@@ -699,7 +780,13 @@ class RolloutService:
                     f"device={device} sides={'+'.join(sides)}",
                 )
             )
-            if bspline_layout is None:
+            if space is not None:
+                self._logs.append(
+                    _encode_ui_log(
+                        "INFO", "ROLLOUT", "Safety envelope", safety.describe()
+                    )
+                )
+            elif bspline_layout is None:
                 self._logs.append(
                     _encode_ui_log(
                         "INFO",
@@ -735,7 +822,13 @@ class RolloutService:
                         f"{recording['episode']} -- {where}",
                     )
                 )
-            if waypoint_layout_inferred:
+            if space is not None:
+                self._logs.append(
+                    _encode_ui_log(
+                        "OK", "ROLLOUT", "Step skill loaded", _describe_space(space)
+                    )
+                )
+            elif waypoint_layout_inferred:
                 confirmation = layout_confirmation(waypoint_action_dim, len(sides))
                 # OK, not WARNING: the width matched, so this confirms the
                 # inference rather than cautioning about it.

@@ -27,6 +27,8 @@ from flexivtrainer.observability import describe_exception, warn
 #: The default for `rollout.ft_zero_max_force_n`: above this measured force the
 #: tool is taken to be touching something, and the F/T sensor is not zeroed.
 FT_ZERO_MAX_FORCE_N = 1.5
+#: The default for `rollout.force_axis_max_speed_m_s`.
+FORCE_AXIS_MAX_SPEED_M_S = 0.02
 
 
 def _default_robot_factory(serial: str) -> Any:
@@ -39,6 +41,37 @@ def _rdk_mode() -> Any:
     import flexivrdk  # noqa: PLC0415
 
     return flexivrdk.Mode
+
+
+def _rdk_coord_type() -> Any:
+    import flexivrdk  # noqa: PLC0415
+
+    return flexivrdk.CoordType
+
+
+#: The force-control frame placed exactly on the TCP: [x, y, z, qw, qx, qy, qz].
+_TCP_ITSELF = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+
+
+def set_force_axes(
+    robot: Any, axes: Sequence[bool], max_speed_m_s: float = FORCE_AXIS_MAX_SPEED_M_S
+) -> None:
+    """Control force along `axes` ([x, y, z, rx, ry, rz]) of the tool's own frame.
+
+    The frame moves with the tool, so "z" stays the tool's z as it turns. The
+    other axes stay motion-controlled. `max_speed_m_s` caps the speed along a
+    linear force axis when contact is lost; the controller enforces it only
+    under active force control, which is its default. Both calls block, and
+    both need the Cartesian motion-force mode.
+    """
+    robot.SetForceControlFrame(_rdk_coord_type().TCP, list(_TCP_ITSELF))
+    robot.SetForceControlAxis([bool(a) for a in axes], [float(max_speed_m_s)] * 3)
+
+
+def clear_force_axes(robot: Any) -> None:
+    """Every axis motion-controlled again, as a mode switch alone may not leave
+    it: a later rollout that sets no force axes must not inherit these."""
+    robot.SetForceControlAxis([False] * 6, [FORCE_AXIS_MAX_SPEED_M_S] * 3)
 
 
 def _zero_ft_sensor(
@@ -147,6 +180,8 @@ def prepare_robot_motion(
     max_contact_wrench: Sequence[float] | None = None,
     zero_ft: bool = True,
     zero_ft_max_force_n: float | None = FT_ZERO_MAX_FORCE_N,
+    force_axes: Sequence[bool] | None = None,
+    force_axis_max_speed_m_s: float = FORCE_AXIS_MAX_SPEED_M_S,
 ) -> None:
     """Zero the F/T sensor, enter Cartesian motion-force mode, set the spring.
 
@@ -155,6 +190,8 @@ def prepare_robot_motion(
     is for taking the arm back in the middle of a trial, when the tool may be
     in contact and zeroing would offset every later force reading; at a start,
     zeroing is skipped when the tool measures over `zero_ft_max_force_n`.
+    `force_axes` puts those axes of the tool frame under force control
+    (`set_force_axes`); None leaves the controller's setting alone.
     """
     if zero_ft:
         zero_ft_unless_in_contact(
@@ -174,6 +211,17 @@ def prepare_robot_motion(
             "ROLLOUT",
             "Contact wrench limit set",
             f"{serial} {list(max_contact_wrench)}",
+        )
+    if force_axes is not None:
+        set_force_axes(robot, force_axes, force_axis_max_speed_m_s)
+        axis_names = ("x", "y", "z", "rx", "ry", "rz")
+        named = [n for n, on in zip(axis_names, force_axes, strict=True) if on]
+        append_log(
+            "INFO",
+            "ROLLOUT",
+            "Force control set",
+            f"{serial} tool axes {named or 'none'}, "
+            f"at most {force_axis_max_speed_m_s} m/s without contact",
         )
 
 

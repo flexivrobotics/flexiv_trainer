@@ -371,6 +371,10 @@ class StepTracker:
     turns its action into the command to send. Demonstrations and takeovers go
     through `action_toward` first, which finds the action that heads for a
     target they commanded, and then through `take` like any other action.
+
+    Both measure from the newest sample unless given `start`, the sample the
+    step started on: a step an operator drove is only known at its end, after
+    the samples of the step were sensed.
     """
 
     def __init__(self, space: PracticeSpace) -> None:
@@ -431,20 +435,33 @@ class StepTracker:
             ).astype(np.float32)
         return out
 
-    def action_toward(self, target: Command) -> tuple[np.ndarray, np.ndarray]:
+    def action_toward(
+        self, target: Command, start: Sample | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """(action, unclipped): the step that heads for `target`, from here.
 
         Each axis is in units of its bound and the action is clipped to
         [-1, 1]; the unclipped value says by how much a demonstration
         outran the bounds.
         """
-        units = self._units(target)
+        units = self._units(target, start)
         return np.clip(units, -1.0, 1.0).astype(np.float32), units
 
-    def take(self, action: Sequence[float]) -> Command:
+    def take(self, action: Sequence[float], start: Sample | None = None) -> Command:
         """The command for this step's action; it becomes the newest of the
         last commands. Refuses an action outside [-1, 1]: a skill that
         produces one is broken, and a clamped one is a different command."""
+        command = self.command(action, start)
+        self.remember(command)
+        return command
+
+    def remember(self, command: Command) -> None:
+        """`command` was sent: it becomes the newest of the last commands."""
+        if self.space.last_actions:
+            self._commands.append(command)
+
+    def command(self, action: Sequence[float], start: Sample | None = None) -> Command:
+        """The command for an action, remembering nothing (`take` does both)."""
         action = np.asarray(action, dtype=np.float64).reshape(-1)
         if action.shape != (self.space.action_dim,):
             raise ValueError(
@@ -456,7 +473,7 @@ class StepTracker:
         if np.any(np.abs(action) > 1.0 + _ACTION_TOLERANCE):
             raise ValueError(f"the action leaves [-1, 1]: {action.tolist()}")
         action = np.clip(action, -1.0, 1.0)
-        sample = self.sample
+        sample = start if start is not None else self.sample
         n_move, n_turn = len(self._move), len(self._turn)
         move = np.zeros(3)
         move[self._move] = action[:n_move] * self._move_bound
@@ -464,19 +481,17 @@ class StepTracker:
         turn[self._turn] = action[n_move : n_move + n_turn] * self._turn_bound
         force = np.zeros(3)
         force[self._force] = action[n_move + n_turn :] * self._force_bound
-        command = Command(
+        return Command(
             position=sample.position + sample.rotation @ move,
             rotation=sample.rotation
             @ Rotation.from_rotvec(turn, degrees=True).as_matrix(),
             force=force,
         )
-        if self.space.last_actions:
-            self._commands.append(command)
-        return command
 
-    def _units(self, command: Command) -> np.ndarray:
-        """`command` relative to where the tool is now, in units of the bounds."""
-        sample = self.sample
+    def _units(self, command: Command, start: Sample | None = None) -> np.ndarray:
+        """`command` relative to where the tool is now (or was at `start`), in
+        units of the bounds."""
+        sample = start if start is not None else self.sample
         to_tool = sample.rotation.T
         move = to_tool @ (command.position - sample.position)
         turn = Rotation.from_matrix(to_tool @ command.rotation).as_rotvec(degrees=True)

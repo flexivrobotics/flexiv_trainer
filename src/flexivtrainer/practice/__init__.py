@@ -15,5 +15,6 @@
 """Skills that act one small, bounded step at a time, and practise on the robot.
 
 `space.py` says what such a skill sees and what one unit of its action means;
-`demos.py` turns teleop recordings into demonstrations in that space.
+`demos.py` turns teleop recordings into demonstrations in that space;
+`env.py` steps one arm in it, and `runner.py` rolls a skill out there.
 """

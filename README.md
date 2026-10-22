@@ -376,9 +376,37 @@ bound, and `covers_95_*`, the bound under which 95% of them fit. A bound that
 clips more than 5% of steps is too small for these demonstrations, and the
 command warns about it.
 
-The observation is built by the same code the practice environment will use on
-the robot, so a skill trained on these demonstrations sees there the numbers
-it was trained on. Running step skills on the robot is not built yet.
+The observation is built by the same code that steps the skill on the robot,
+so a skill trained on these demonstrations sees there the numbers it was
+trained on.
+
+### Roll a step skill out
+
+A checkpoint with a `practice_space.json` beside its weights is a step skill,
+and Policy Rollout runs it as one; nothing else needs choosing. Its policy
+type must be importable (see [Policy Types From Other Packages](#policy-types-from-other-packages)).
+
+- **One arm**, in single-arm mode, with every camera the space lists. The
+  skill does not command the gripper.
+- **One command per step.** At each step the skill sees the arm and the
+  cameras and sends one bounded move. Between steps the arm is read at
+  `sense_hz`, which also feeds the force window. `rollout.max_steps` counts
+  the skill's steps.
+- **Force axes.** The space's force axes are put under force control in the
+  tool's own frame before the first step, and released when the rollout ends
+  or an operator takes over. A force target is sent as the force the sensor
+  should read, which is the negative of the force the tool applies.
+  `rollout.force_axis_max_speed_m_s` (default 0.02) caps the speed along a
+  force axis when contact is lost.
+- **Everything else works as for any policy**: the stiffness the checkpoint
+  stores, the safety envelope (each step's target is checked before it is
+  sent), taking over with the leader arm, learned checks scored on every tick
+  (one with `end_on_pass` ends the skill), and recording.
+- **A recorded step rollout is a teleop recording.** Each tick stores the
+  teleop state and, as its action, the pose the controller was given: the
+  step's target, or the leader's while an operator drives. Under the
+  operator, each step is also measured the way the converter labels a
+  demonstration, and becomes one of the skill's last commands.
 
 ## Start Training
 

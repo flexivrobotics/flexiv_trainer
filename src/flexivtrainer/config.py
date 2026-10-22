@@ -251,6 +251,11 @@ class RolloutLoopConfig(BaseModel):
     # something, and zeroing would offset every later reading. Unset always
     # zeroes.
     ft_zero_max_force_n: float | None = Field(default=1.5, gt=0)
+    # A step skill (practice/space.py) that controls force along some axes:
+    # how fast the controller may move the tool along them when it loses
+    # contact (m/s; the controller accepts 0.005 to 2.0). Without contact a
+    # force target is reached by moving, and nothing else stops it.
+    force_axis_max_speed_m_s: float = Field(default=0.02, ge=0.005, le=2.0)
     # Leader-arm takeover (rollout/takeover.py): an optional leader digital
     # input that toggles control between the policy and the operator, besides
     # the page's button. It must not be a channel a gripper trigger uses.
