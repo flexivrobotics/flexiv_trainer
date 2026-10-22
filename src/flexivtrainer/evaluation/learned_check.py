@@ -453,24 +453,34 @@ class DatasetReader:
         if absent:
             raise ValueError(f"{self.root.name} has no state column {absent}")
 
+    @property
+    def episodes(self) -> list[int]:
+        return sorted(self._rows)
+
     def _record(self, episode: int) -> dict[str, Any]:
         if episode not in self._rows:
             raise IndexError(f"episode {episode} is not in {self.root}")
         return dict(self.dataset.meta.episodes[self._rows[episode]])
 
-    def timestamps_and_state(
-        self, episode: int, columns: Sequence[str]
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Every frame's timestamp, and the named state columns."""
+    def columns(self, episode: int, keys: Sequence[str]) -> dict[str, np.ndarray]:
+        """Whole columns of one episode, such as `timestamp` or `action`."""
         record = self._record(episode)
         rows = self.dataset.hf_dataset.select(
             range(int(record["dataset_from_index"]), int(record["dataset_to_index"]))
         ).with_format("numpy")
-        times = np.asarray(rows["timestamp"], dtype=np.float64).reshape(-1)
+        return {key: np.asarray(rows[key]) for key in keys}
+
+    def timestamps_and_state(
+        self, episode: int, columns: Sequence[str]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Every frame's timestamp, and the named state columns."""
+        keys = ["timestamp", STATE_KEY] if columns else ["timestamp"]
+        rows = self.columns(episode, keys)
+        times = rows["timestamp"].astype(np.float64).reshape(-1)
         if not columns:
             return times, np.zeros((len(times), 0), dtype=np.float32)
         index = [self.state_names.index(c) for c in columns]
-        state = np.asarray(rows[STATE_KEY], dtype=np.float32)[:, index]
+        state = rows[STATE_KEY].astype(np.float32)[:, index]
         return times, state
 
     def frames(
