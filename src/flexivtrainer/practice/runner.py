@@ -210,6 +210,14 @@ class StepRunner:
         )
         self._force_set = any(self._space.force_axes)
 
+    def _set_force(self) -> None:
+        """The skill's force axes again, after a move that needed none."""
+        if any(self._space.force_axes):
+            hardware.set_force_axes(
+                self._robot, self._space.force_axes, self._force_speed
+            )
+            self._force_set = True
+
     def _clear_force(self) -> None:
         if self._force_set:
             hardware.clear_force_axes(self._robot)
@@ -302,14 +310,7 @@ class StepRunner:
                         self._reset_pending = False
                         policy.reset()
                     epoch = env.epoch
-                    action = _predict(
-                        observation,
-                        policy,
-                        self._device,
-                        self._preprocessor,
-                        self._postprocessor,
-                        self._task,
-                    )
+                    action = self._act(observation)
                     self._infer_ms = (time.monotonic() - started) * 1000.0
                     result = env.step(action, epoch=epoch)
                     self._ready |= result.sent
@@ -364,6 +365,16 @@ class StepRunner:
             self._policy = self._preprocessor = self._postprocessor = None
             self._release_robots()
             self._on_finished(self._stop_reason, env.steps if env is not None else 0)
+
+    def _act(self, observation: dict[str, Any]) -> np.ndarray:
+        return _predict(
+            observation,
+            self._policy,
+            self._device,
+            self._preprocessor,
+            self._postprocessor,
+            self._task,
+        )
 
     # --- each tick --------------------------------------------------------------
 

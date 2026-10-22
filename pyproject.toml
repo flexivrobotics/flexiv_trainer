@@ -18,7 +18,8 @@ dependencies = [
   "scipy>=1.15",
   "flexivrdk==1.9.2",
   "flexivtdk==1.6.2",
-  "lerobot[training,multi-task-dit,diffusion,smolvla,pi]==0.6.0",
+  # grpcio-dep: the link to LeRobot's learner, for practice on the robot.
+  "lerobot[training,multi-task-dit,diffusion,smolvla,pi,grpcio-dep]==0.6.0",
   "pyrealsense2",
   # NOTE: Orbbec camera support is the `orbbec` extra below, not a hard
   # dependency -- see the comment there for why it cannot be resolved normally.

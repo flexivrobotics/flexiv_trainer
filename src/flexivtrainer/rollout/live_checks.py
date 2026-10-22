@@ -84,6 +84,8 @@ class LiveChecks:
         self._held = {name: _Held() for name in self._checks}
         self._lock = threading.Condition()
         self._pending: dict[str, Any] | None = None
+        # Bumped by reset(): a tick handed over before it is not scored after.
+        self._generation = 0
         self._stopping = False
         self._thread: threading.Thread | None = None
         self.scored = 0
@@ -111,6 +113,14 @@ class LiveChecks:
         if self._thread is not None:
             self._thread.join(timeout=10.0)
 
+    def reset(self) -> None:
+        """Start again, as for a new episode: no check has passed, and a tick
+        from before is not scored. The models stay loaded."""
+        with self._lock:
+            self._generation += 1
+            self._pending = None
+            self._held = {name: _Held() for name in self._checks}
+
     # --- the planner's side ----------------------------------------------------
 
     def submit(
@@ -131,6 +141,7 @@ class LiveChecks:
             "pose_format": pose_format,
         }
         with self._lock:
+            item["generation"] = self._generation
             if self._pending is not None:
                 self.skipped += 1
             self._pending = item
@@ -215,6 +226,8 @@ class LiveChecks:
             results[name] = float(model.probabilities(images, state)[0])
         t = item["t"]
         with self._lock:
+            if item.get("generation", self._generation) != self._generation:
+                return  # handed over before a reset
             self.scored += 1
             for name, p in results.items():
                 check, held = self._checks[name], self._held[name]

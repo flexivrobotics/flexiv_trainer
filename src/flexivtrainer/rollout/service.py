@@ -45,6 +45,7 @@ from flexivtrainer.policies import diffusion as diffusion_policy
 from flexivtrainer.policies import dit as dit_policy
 from flexivtrainer.policies import import_policy_plugins
 from flexivtrainer.practice.runner import StepRunner, step_action_names
+from flexivtrainer.practice.session import PracticePlan, PracticeRunner
 from flexivtrainer.practice.space import PracticeSpace
 from flexivtrainer.rollout import hardware
 from flexivtrainer.rollout.checkpoint import (
@@ -224,6 +225,7 @@ class RolloutService:
         self._target_hz: float | None = None
         self._sides: list[str] = []
         self._runner: WaypointRunner | BSplineRunner | StepRunner | None = None
+        self._practice_live: LiveChecks | None = None
         self._stop_event = threading.Event()
         self._logs: deque[str] = deque(maxlen=2000)
         self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
@@ -284,7 +286,26 @@ class RolloutService:
                 "wrench": list(self._wrench),
                 "sides": list(self._sides),
                 "target_hz": self._target_hz,
+                "practice": (
+                    self._runner.practice_status()
+                    if isinstance(self._runner, PracticeRunner)
+                    else None
+                ),
             }
+
+    def practice_continue(self) -> dict[str, Any]:
+        """The operator has done what a practice reset cannot: go on."""
+        runner = self._runner
+        if not isinstance(runner, PracticeRunner) or not runner.is_alive():
+            raise RuntimeError("No practice is running")
+        runner.go_on()
+        return self.status()
+
+    def _on_practice_finished(self, stop_reason: str | None, steps: int) -> None:
+        live, self._practice_live = self._practice_live, None
+        if live is not None:
+            live.stop()
+        self._on_runner_finished(stop_reason, steps)
 
     def _append_log(
         self, level: str, source: str, message: str, detail: str = ""
@@ -303,9 +324,18 @@ class RolloutService:
         record: bool = False,
         send_twist: bool | None = None,
         trial: TrialContext | None = None,
+        practice: PracticePlan | None = None,
     ) -> dict[str, Any]:
+        """Roll a policy out; with `practice`, practise a step skill instead
+        (practice/session.py): episodes judged by its reward check, their steps
+        sent to a learner."""
         task = task.strip() if isinstance(task, str) else None
         task = task or None
+        if practice is not None and (record or trial is not None):
+            raise ValueError(
+                "Practice keeps its steps with the learner: start it without "
+                "recording and outside an evaluation session"
+            )
         record = record or trial is not None
         with self._lock:
             if self._awaiting is not None:
@@ -387,6 +417,11 @@ class RolloutService:
         is_bspline = policy_type == "bspline_diffusion"
         # A checkpoint with a practice space is a step skill, whatever its type.
         space = None if is_bspline else checkpoint_space(checkpoint_path)
+        if practice is not None and space is None:
+            raise RuntimeError(
+                "Practice needs a step skill: a checkpoint with a "
+                "practice_space.json beside its weights"
+            )
         if is_bspline and record:
             raise RuntimeError(
                 "Recording B-spline rollouts is not supported yet; start it without "
@@ -629,7 +664,9 @@ class RolloutService:
                         self._prepare_motion, stiffness=stiffness.values
                     ),
                     gripper_default_width_m=gripper_default_width_m,
-                    gripper_initialization_registry=(self._gripper_initialization_registry),
+                    gripper_initialization_registry=(
+                        self._gripper_initialization_registry
+                    ),
                     gripper_command_parameters=gripper_command_parameters,
                     camera_names=camera_names,
                 )
@@ -638,7 +675,27 @@ class RolloutService:
                     recording["live"] = self._start_live_checks(
                         trial, sides, camera_names
                     )
-                runner = StepRunner(
+                live = recording.get("live") if recording else None
+                runner_class: type[StepRunner] = StepRunner
+                extra: dict[str, Any] = {}
+                if practice is not None:
+                    from flexivtrainer.practice.learner import (  # noqa: PLC0415
+                        LearnerLink,
+                    )
+
+                    live = self._practice_live = self._live_checks(
+                        {practice.check_name: practice.check}, sides, camera_names
+                    )
+                    runner_class = PracticeRunner
+                    extra = {
+                        "plan": practice,
+                        "link": LearnerLink(
+                            practice.learner_host, practice.learner_port
+                        ),
+                    }
+                    on_finished = self._on_practice_finished
+                runner = runner_class(
+                    **extra,
                     policy=policy,
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
@@ -669,7 +726,7 @@ class RolloutService:
                     zero_ft_max_force_n=app_rollout.ft_zero_max_force_n,
                     force_axis_max_speed_m_s=app_rollout.force_axis_max_speed_m_s,
                     takeover=takeover,
-                    live_checks=recording.get("live") if recording else None,
+                    live_checks=live,
                 )
                 if recording is not None:
                     recording["runner"] = runner
@@ -721,7 +778,9 @@ class RolloutService:
                     ),
                     uses_cuda_graphs=uses_cuda_graphs,
                     gripper_default_width_m=gripper_default_width_m,
-                    gripper_initialization_registry=(self._gripper_initialization_registry),
+                    gripper_initialization_registry=(
+                        self._gripper_initialization_registry
+                    ),
                     gripper_command_parameters=gripper_command_parameters,
                     camera_names=camera_names,
                     safety=safety,
@@ -741,6 +800,9 @@ class RolloutService:
 
         except BaseException:
             # A runner that never started leaves no trial behind.
+            if self._practice_live is not None:
+                self._practice_live.stop()
+                self._practice_live = None
             if recording is not None:
                 if recording.get("live") is not None:
                     recording["live"].stop()
@@ -1030,6 +1092,15 @@ class RolloutService:
         }
         if not checks:
             return None
+        return self._live_checks(checks, sides, camera_names)
+
+    def _live_checks(
+        self,
+        checks: dict[str, LearnedCheck],
+        sides: list[str],
+        camera_names: list[str],
+    ) -> LiveChecks:
+        """Load `checks` and start scoring them, or refuse the start."""
         live = LiveChecks(
             checks,
             self._settings.storage.root,

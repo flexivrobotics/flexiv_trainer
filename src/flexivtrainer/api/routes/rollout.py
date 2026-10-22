@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
@@ -50,6 +50,16 @@ class StartRolloutRequest(BaseModel):
         elif not self.checkpoint_path:
             raise ValueError("checkpoint_path is required for source='local'")
         return self
+
+
+class StartPracticeRequest(BaseModel):
+    """Practise a step skill on the robot (practice/session.py)."""
+
+    checkpoint_path: str
+    task: str = ""
+    # The practice plan: reward, max_episode_steps, learner_host, learner_port,
+    # episodes, start, wait_after_success, seed.
+    plan: dict[str, Any]
 
 
 class RolloutDeviceRequest(BaseModel):
@@ -123,6 +133,39 @@ def start_rollout(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     ok("Rollout started")
     return result
+
+
+@router.post("/practice")
+def start_practice(
+    request: StartPracticeRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    from flexivtrainer.practice.session import PracticePlan  # noqa: PLC0415
+
+    try:
+        plan = PracticePlan.from_dict(request.plan)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    info("Practice requested", f"checkpoint={request.checkpoint_path}")
+    try:
+        result = runtime.rollout.start(
+            request.checkpoint_path, task=request.task, practice=plan
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Practice started")
+    return result
+
+
+@router.post("/practice/continue")
+def continue_practice(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    """The operator has done what the reset cannot (a part latched home)."""
+    try:
+        return runtime.rollout.practice_continue()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/checkpoint-info")
