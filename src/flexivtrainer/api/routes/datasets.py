@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -192,11 +193,35 @@ def _dataset_root(runtime: RuntimeManager, path: str) -> Path:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _inputs(root: Path) -> tuple[list[str], list[str]]:
+    """The cameras and state columns a check trained on `root` could look at."""
+    try:
+        info = json.loads((root / "meta" / "info.json").read_text(encoding="utf-8"))
+        features = info.get("features") or {}
+    except (OSError, ValueError):
+        return [], []
+    # The check reads video cameras only, and state columns by their listed
+    # names; nothing else is offered, as training would refuse it.
+    cameras = [
+        key.removeprefix("observation.images.")
+        for key, feature in features.items()
+        if key.startswith("observation.images.")
+        and feature.get("dtype") == "video"
+        and not (feature.get("info") or {}).get("is_depth_map")
+    ]
+    names = (features.get("observation.state") or {}).get("names")
+    state = [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+    return cameras, state
+
+
 def _labels_view(root: Path) -> dict:
     """A dataset's episodes and every check's labels, for the labelling page."""
     lengths = episode_lengths(root)
+    cameras, state = _inputs(root)
     return {
         "path": str(root),
+        "cameras": cameras,
+        "state": state,
         "episodes": [
             {"index": episode, "num_frames": length}
             for episode, length in sorted(lengths.items())

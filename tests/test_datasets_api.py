@@ -192,6 +192,8 @@ def test_labels_are_set_listed_and_removed_per_episode(tmp_path: Path) -> None:
     assert empty.status_code == 200
     assert empty.json() == {
         "path": str(root),
+        "cameras": [],
+        "state": [],
         "episodes": [
             {"index": 0, "num_frames": 30},
             {"index": 1, "num_frames": 40},
@@ -263,3 +265,21 @@ def test_labels_outside_the_storage_root_are_refused(tmp_path: Path) -> None:
     )
     assert gone.status_code == 404
     assert not (outside / "meta" / "check_labels.json").exists()
+
+
+def test_the_label_view_offers_what_a_check_can_read(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    root = _recording(tmp_path / "datasets" / "demos", [10])
+    features = {
+        "observation.images.wrist": {"dtype": "video"},
+        "observation.images.still": {"dtype": "image"},
+        "observation.images.wrist_depth": {
+            "dtype": "video",
+            "info": {"is_depth_map": True},
+        },
+        "observation.state": {"dtype": "float32", "names": {"motors": ["a", "b"]}},
+    }
+    (root / "meta" / "info.json").write_text(json.dumps({"features": features}))
+    view = client.get("/datasets/check-labels", params={"path": str(root)}).json()
+    # Video cameras only, no depth; state names only when they are a list.
+    assert view["cameras"] == ["wrist"] and view["state"] == []
