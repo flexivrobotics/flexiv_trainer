@@ -62,6 +62,18 @@ class StartPracticeRequest(BaseModel):
     plan: dict[str, Any]
 
 
+class StartChainRequest(BaseModel):
+    """Run a task as a chain of skills and primitives (rollout/chain.py)."""
+
+    # The chain plan: steps, checks, stiffness, check_s, about.
+    plan: dict[str, Any]
+
+
+class ContinueChainRequest(BaseModel):
+    # "retry" runs the step again from its start check; "skip" counts it done.
+    action: Literal["retry", "skip"] = "retry"
+
+
 class RolloutDeviceRequest(BaseModel):
     device: str = "auto"
 
@@ -164,6 +176,38 @@ def continue_practice(runtime: RuntimeManager = Depends(get_runtime_manager)) ->
     """The operator has done what the reset cannot (a part latched home)."""
     try:
         return runtime.rollout.practice_continue()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/chain")
+def start_chain(
+    request: StartChainRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    from flexivtrainer.rollout.chain import ChainPlan  # noqa: PLC0415
+
+    try:
+        plan = ChainPlan.from_dict(request.plan)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    info("Chain requested", " -> ".join(step.name for step in plan.steps))
+    try:
+        result = runtime.rollout.start_chain(plan)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Chain started")
+    return result
+
+
+@router.post("/chain/continue")
+def continue_chain(
+    request: ContinueChainRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    """The operator has done what the chain could not: go on."""
+    try:
+        return runtime.rollout.chain_continue(request.action)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

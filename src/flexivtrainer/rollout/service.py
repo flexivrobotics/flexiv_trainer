@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -28,7 +29,7 @@ from typing import Any
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.data.control_settings import ControlSettings
 from flexivtrainer.data.lerobot_io import active_camera_names
-from flexivtrainer.evaluation.checks import LearnedCheck, read_ticks, run_checks
+from flexivtrainer.evaluation.checks import Check, read_ticks, run_checks
 from flexivtrainer.evaluation.outcome import (
     DEFAULT_FAILURE_MODES,
     RolloutOutcome,
@@ -48,6 +49,13 @@ from flexivtrainer.practice.runner import StepRunner, step_action_names
 from flexivtrainer.practice.session import PracticePlan, PracticeRunner
 from flexivtrainer.practice.space import PracticeSpace
 from flexivtrainer.rollout import hardware
+from flexivtrainer.rollout.chain import (
+    CHAINS_DIR,
+    ChainPlan,
+    ChainRunner,
+    ChainStep,
+    Outcome,
+)
 from flexivtrainer.rollout.checkpoint import (
     _checkpoint_target_hz,
     _default_policy_loader,
@@ -74,6 +82,7 @@ from flexivtrainer.rollout.executors.waypoint import (
 )
 from flexivtrainer.rollout.hardware import _default_robot_factory
 from flexivtrainer.rollout.live_checks import LiveChecks
+from flexivtrainer.rollout.primitives import Primitive, PrimitiveRunner
 from flexivtrainer.rollout.recorder import (
     RecordingPlan,
     RolloutRecorder,
@@ -82,7 +91,11 @@ from flexivtrainer.rollout.recorder import (
 from flexivtrainer.rollout.runners.bspline import BSplineRunner
 from flexivtrainer.rollout.runners.waypoint import WaypointRunner
 from flexivtrainer.rollout.safety import SafetyEnvelope
-from flexivtrainer.rollout.stiffness import StiffnessChoice, choose_rollout_stiffness
+from flexivtrainer.rollout.stiffness import (
+    NOT_RECORDED,
+    StiffnessChoice,
+    choose_rollout_stiffness,
+)
 from flexivtrainer.rollout.takeover import LeaderTrigger, Takeover, TakeoverRefused
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
@@ -224,8 +237,12 @@ class RolloutService:
         self._device = "cpu"
         self._target_hz: float | None = None
         self._sides: list[str] = []
-        self._runner: WaypointRunner | BSplineRunner | StepRunner | None = None
+        self._runner: (
+            WaypointRunner | BSplineRunner | StepRunner | PrimitiveRunner | None
+        ) = None
         self._practice_live: LiveChecks | None = None
+        # The current or last chain of skills and primitives.
+        self._chain: ChainRunner | None = None
         self._stop_event = threading.Event()
         self._logs: deque[str] = deque(maxlen=2000)
         self._metrics: deque[dict[str, Any]] = deque(maxlen=300)
@@ -246,10 +263,12 @@ class RolloutService:
         self._takeover_reason: str | None = None
 
     def status(self) -> dict[str, Any]:
+        chain = self._chain
+        chain_alive = chain is not None and chain.is_alive()
         with self._lock:
-            if self._stopping:
+            if self._stopping or (chain_alive and chain.stop_event.is_set()):
                 status = "stopping"
-            elif self._running:
+            elif self._running or chain_alive:
                 status = "running"
             elif self._error:
                 status = "failed"
@@ -291,6 +310,7 @@ class RolloutService:
                     if isinstance(self._runner, PracticeRunner)
                     else None
                 ),
+                "chain": chain.status() if chain is not None else None,
             }
 
     def practice_continue(self) -> dict[str, Any]:
@@ -329,6 +349,39 @@ class RolloutService:
         """Roll a policy out; with `practice`, practise a step skill instead
         (practice/session.py): episodes judged by its reward check, their steps
         sent to a learner."""
+        self._refuse_during_chain()
+        return self._start(
+            checkpoint_path,
+            task,
+            source=source,
+            repo_id=repo_id,
+            revision=revision,
+            action_names=action_names,
+            record=record,
+            send_twist=send_twist,
+            trial=trial,
+            practice=practice,
+        )
+
+    def _start(
+        self,
+        checkpoint_path: str | None = None,
+        task: str | None = None,
+        *,
+        source: str = "local",
+        repo_id: str | None = None,
+        revision: str | None = None,
+        action_names: list[str] | None = None,
+        record: bool = False,
+        send_twist: bool | None = None,
+        trial: TrialContext | None = None,
+        practice: PracticePlan | None = None,
+        live_checks: LiveChecks | None = None,
+        keep_logs: bool = False,
+    ) -> dict[str, Any]:
+        """`start`, and for a chain's step (rollout/chain.py): `live_checks`
+        scored on every tick, one of which ends the rollout, and the logs of
+        the steps before kept."""
         task = task.strip() if isinstance(task, str) else None
         task = task or None
         if practice is not None and (record or trial is not None):
@@ -426,6 +479,11 @@ class RolloutService:
             raise RuntimeError(
                 "Recording B-spline rollouts is not supported yet; start it without "
                 "recording."
+            )
+        if is_bspline and live_checks is not None:
+            raise RuntimeError(
+                "A B-spline policy cannot be ended by a check yet, so it cannot "
+                "be a step of a chain"
             )
         # A step skill's frames are read at the size its strips refer to; what
         # it was trained on is smaller, cut from them.
@@ -562,36 +620,7 @@ class RolloutService:
         # Per run: a zombie planner keeps the old event, which stays set, so
         # clearing a shared one can no longer un-stop it.
         self._stop_event = threading.Event()
-        robots: list[Any] = []
-        lease: Any = None
-        try:
-            robot_factory = self._robot_factory
-            if lend:
-                # The teleop connection already holds these robots; a second
-                # RDK connection cannot. Borrow its handles instead.
-                lease = self._teleop.lend_to_rollout(followers)
-                robot_factory = _borrowed_factory(followers, lease.followers)
-                self._append_log(
-                    "INFO",
-                    "ROLLOUT",
-                    "Borrowed the robots from teleoperation",
-                    "teleoperation stopped; it stays connected",
-                )
-            for serial in followers:
-                robots.append(
-                    hardware.connect_robot(
-                        robot_factory,
-                        serial,
-                        self._stop_event,
-                    )
-                )
-        except Exception as exc:
-            hardware.stop_robots(robots)
-            if lease is not None:
-                self._teleop.release_lease(lease)
-            raise RuntimeError(
-                f"Failed to connect to robot: {describe_exception(exc)}"
-            ) from exc
+        robots, lease = self._connect_robots(followers, lend)
 
         takeover: Takeover | None = None
         if lease is not None and bspline_layout is None:
@@ -675,7 +704,7 @@ class RolloutService:
                     recording["live"] = self._start_live_checks(
                         trial, sides, camera_names
                     )
-                live = recording.get("live") if recording else None
+                live = (recording.get("live") if recording else None) or live_checks
                 runner_class: type[StepRunner] = StepRunner
                 extra: dict[str, Any] = {}
                 if practice is not None:
@@ -791,7 +820,9 @@ class RolloutService:
                     zero_ft_max_force_n=app_rollout.ft_zero_max_force_n,
                     takeover=takeover,
                     action_names=waypoint_action_names,
-                    live_checks=recording.get("live") if recording else None,
+                    live_checks=(
+                        (recording.get("live") if recording else None) or live_checks
+                    ),
                 )
                 if recording is not None:
                     recording["runner"] = runner
@@ -837,7 +868,8 @@ class RolloutService:
             clear_leases = getattr(self._cameras, "clear_depth_alignment_leases", None)
             if callable(clear_leases):
                 clear_leases()
-            self._logs.clear()
+            if not keep_logs:
+                self._logs.clear()
             self._metrics.clear()
             self._wrench.clear()
             self._logs.append(
@@ -949,6 +981,312 @@ class RolloutService:
         if takeover is not None:
             takeover.start_trigger()
         return self.status()
+
+    # --- chains of skills and primitives (rollout/chain.py) -------------------
+
+    def _refuse_during_chain(self) -> None:
+        chain = self._chain
+        if chain is not None and chain.is_alive():
+            raise RuntimeError("A chain is running; stop it first")
+
+    def start_chain(self, plan: ChainPlan) -> dict[str, Any]:
+        """Run `plan`'s steps in order, each as a rollout of its own."""
+        self._refuse_during_chain()
+        with self._lock:
+            if self._awaiting is not None:
+                raise RuntimeError(
+                    "The last recorded rollout is waiting for its verdict; give it "
+                    "one (or mark it unknown) before starting a chain."
+                )
+            if self._running or self._stopping:
+                raise RuntimeError("Rollout is already running")
+        if len(self._follower_serials()) != 1:
+            raise RuntimeError("A chain drives one arm; set single-arm mode")
+        # Every skill is found now, so a wrong path stops the chain before
+        # anything moves.
+        root = self._settings.storage.root
+        skills: dict[str, str] = {}
+        for step in plan.steps:
+            if step.skill is None:
+                continue
+            path = Path(step.skill).expanduser()
+            try:
+                skills[step.name] = str(
+                    resolve_checkpoint_path(
+                        str(path if path.is_absolute() else root / path), root
+                    )
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"Step {step.name!r}: checkpoint not found: {step.skill}"
+                ) from exc
+            except ValueError as exc:
+                raise RuntimeError(f"Step {step.name!r}: {exc}") from exc
+        for step in plan.steps:
+            # Refused here, not mid-chain, when nothing says how stiff to be.
+            self._chain_stiffness(plan, skills.get(step.name))
+        directory = self._settings.storage.rollouts_root / CHAINS_DIR
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        record = directory / f"{stamp}.json"
+        suffix = 1
+        while record.exists():
+            suffix += 1
+            record = directory / f"{stamp}_{suffix}.json"
+        chain = ChainRunner(
+            plan,
+            run_skill=partial(self._chain_skill, skills),
+            run_primitive=partial(self._chain_primitive, plan, skills),
+            record_path=record,
+            append_log=self._append_log,
+        )
+        with self._lock:
+            self._logs.clear()
+            self._error = None
+            self._stop_reason = None
+        self._append_log(
+            "INFO",
+            "CHAIN",
+            "Chain started",
+            " -> ".join(step.name for step in plan.steps),
+        )
+        self._chain = chain
+        chain.start()
+        return self.status()
+
+    def chain_continue(self, action: str) -> dict[str, Any]:
+        """The operator has done what the chain could not: `retry` the step,
+        or `skip` it as done."""
+        chain = self._chain
+        if chain is None or not chain.is_alive():
+            raise RuntimeError("No chain is running")
+        chain.go_on(action)
+        return self.status()
+
+    def _chain_skill(
+        self, skills: dict[str, str], step: ChainStep, checks: dict[str, Check]
+    ) -> Outcome:
+        """One try of a skill step: roll it out until its end check passes or
+        its time is up."""
+        started = time.monotonic()
+        try:
+            live = self._live_checks(
+                checks, self._get_active_sides(), self._get_active_cameras()
+            )
+        except Exception as exc:
+            return Outcome(False, "not started", error=describe_exception(exc))
+        try:
+            try:
+                self._start(
+                    skills[step.name], step.task, live_checks=live, keep_logs=True
+                )
+            except Exception as exc:
+                return Outcome(False, "not started", error=describe_exception(exc))
+            # Timed from when it runs: loading the policy is not the skill's.
+            timed_out = self._await_runner(time.monotonic() + step.max_s)
+            ended = live.ended()
+        finally:
+            live.stop()
+        return self._outcome(
+            started,
+            passed=ended is not None,
+            reason="time limit" if timed_out and ended is None else None,
+        )
+
+    def _chain_primitive(
+        self,
+        plan: ChainPlan,
+        skills: dict[str, str],
+        primitive: Primitive | None,
+        checks: dict[str, Check],
+        watch_s: float,
+        step: ChainStep,
+    ) -> Outcome:
+        """A primitive for `step`, then `checks` watched for `watch_s`."""
+        started = time.monotonic()
+        live: LiveChecks | None = None
+        try:
+            if checks:
+                live = self._live_checks(
+                    checks, self._get_active_sides(), self._get_active_cameras()
+                )
+            skill = skills.get(step.name)
+            self._start_primitive(
+                primitive or Primitive(),
+                stiffness=self._chain_stiffness(plan, skill),
+                live_checks=live,
+                check_s=watch_s,
+                image_resolutions=self._skill_resolutions(skill),
+            )
+        except Exception as exc:
+            if live is not None:
+                live.stop()
+            return Outcome(False, "not started", error=describe_exception(exc))
+        try:
+            self._await_runner(None)
+        finally:
+            if live is not None:
+                live.stop()
+        with self._lock:
+            reason = self._stop_reason
+        return self._outcome(started, passed=reason in ("done", "checks passed"))
+
+    def _await_runner(self, deadline: float | None) -> bool:
+        """Wait for the current rollout to end; stop it at `deadline`, or when
+        the chain is stopped. Whether the deadline stopped it."""
+        runner, chain = self._runner, self._chain
+        timed_out = False
+        while runner is not None and runner.is_alive():
+            if chain is not None and chain.stop_event.is_set():
+                self._stop_event.set()
+            elif deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                self._stop_event.set()
+            time.sleep(0.02)
+        return timed_out
+
+    def _outcome(
+        self, started: float, *, passed: bool, reason: str | None = None
+    ) -> Outcome:
+        """How the rollout that has just ended went."""
+        runner, takeover = self._runner, self._takeover
+        summary = takeover.summary() if takeover is not None else {}
+        with self._lock:
+            error, stop_reason = self._error, self._stop_reason
+        return Outcome(
+            passed=passed and error is None,
+            reason=reason or stop_reason or "stopped",
+            seconds=time.monotonic() - started,
+            error=error,
+            safety_stop=getattr(runner, "safety_stop", None),
+            blocked=getattr(runner, "blocked", None),
+            takeovers=int(summary.get("count", 0)),
+            operator_s=float(summary.get("seconds", 0.0)),
+        )
+
+    def _chain_stiffness(self, plan: ChainPlan, skill: str | None) -> StiffnessChoice:
+        """A back-off or check moves at its skill's stiffness, a primitive step
+        at the plan's; the rollout setting wins over both, as for a skill."""
+        setting = self._settings.rollout.cartesian_stiffness
+        allow = self._settings.rollout.allow_controller_default_stiffness
+        if skill is not None:
+            return choose_rollout_stiffness(
+                setting, checkpoint_control(skill), allow_controller_default=allow
+            )
+        if setting is None and plan.stiffness is not None:
+            return StiffnessChoice(list(plan.stiffness), "chain plan", NOT_RECORDED)
+        return choose_rollout_stiffness(setting, None, allow_controller_default=allow)
+
+    @staticmethod
+    def _skill_resolutions(skill: str | None) -> dict[str, tuple[int, int]] | None:
+        """The frame sizes a step's skill reads, so a learned check scored
+        around it sees what it sees during the skill."""
+        if skill is None:
+            return None
+        space = checkpoint_space(skill)
+        if space is not None:
+            return dict(space.frame_size)
+        return checkpoint_image_resolutions(skill)
+
+    def _start_primitive(
+        self,
+        primitive: Primitive,
+        *,
+        stiffness: StiffnessChoice,
+        live_checks: LiveChecks | None,
+        check_s: float,
+        image_resolutions: dict[str, tuple[int, int]] | None,
+    ) -> None:
+        """Run `primitive` on the arm as a rollout of its own."""
+        with self._lock:
+            runner = self._runner
+            if self._running or (runner is not None and runner.is_alive()):
+                raise RuntimeError("Rollout is already running")
+        followers = self._follower_serials()
+        lend, _ = self._preflight_teleop(followers)
+        sides = self._get_active_sides()
+        camera_names = self._get_active_cameras()
+        safety = SafetyEnvelope.from_settings(self._settings.rollout)
+        self._stop_event = threading.Event()
+        robots, lease = self._connect_robots(followers, lend)
+        try:
+            runner = PrimitiveRunner(
+                primitive=primitive,
+                robots=robots,
+                sides=sides,
+                followers=followers,
+                cameras=self._cameras,
+                camera_names=camera_names,
+                stop_event=self._stop_event,
+                append_log=self._append_log,
+                on_error=self._on_runner_error,
+                on_cleanup_error=self._on_runner_cleanup_error,
+                on_finished=self._on_runner_finished,
+                release_robots=self._make_release_robots(robots, lease),
+                stop_robots=hardware.stop_robots,
+                safety=safety,
+                cartesian_stiffness=stiffness.values,
+                max_contact_wrench=self._settings.rollout.max_contact_wrench,
+                live_checks=live_checks,
+                check_s=check_s,
+                image_resolutions=image_resolutions,
+            )
+        except BaseException:
+            if lease is not None:
+                self._teleop.release_lease(lease)
+            raise
+        with self._lock:
+            self._safety = safety
+            self._stiffness = stiffness
+            self._trial = None
+            self._recording = None
+            self._takeover = None
+            self._takeover_reason = "A primitive cannot be taken over"
+            self._error = None
+            self._stop_reason = None
+            self._stopping = False
+            self._robots = robots
+            self._sides = list(sides)
+            self._running = True
+            self._metrics.clear()
+        self._runner = runner
+        runner.start()
+
+    def _connect_robots(
+        self, followers: list[str], lend: bool
+    ) -> tuple[list[Any], Any]:
+        """Connect to the followers -- borrowed from teleoperation when it can
+        lend them -- and the lease to give back, if any."""
+        robots: list[Any] = []
+        lease: Any = None
+        try:
+            robot_factory = self._robot_factory
+            if lend:
+                # The teleop connection already holds these robots; a second
+                # RDK connection cannot. Borrow its handles instead.
+                lease = self._teleop.lend_to_rollout(followers)
+                robot_factory = _borrowed_factory(followers, lease.followers)
+                self._append_log(
+                    "INFO",
+                    "ROLLOUT",
+                    "Borrowed the robots from teleoperation",
+                    "teleoperation stopped; it stays connected",
+                )
+            for serial in followers:
+                robots.append(
+                    hardware.connect_robot(
+                        robot_factory,
+                        serial,
+                        self._stop_event,
+                    )
+                )
+        except Exception as exc:
+            hardware.stop_robots(robots)
+            if lease is not None:
+                self._teleop.release_lease(lease)
+            raise RuntimeError(
+                f"Failed to connect to robot: {describe_exception(exc)}"
+            ) from exc
+        return robots, lease
 
     # --- recording, verdicts and evaluation sessions -----------------------
 
@@ -1077,7 +1415,7 @@ class RolloutService:
     def _start_live_checks(
         self, trial: TrialContext | None, sides: list[str], camera_names: list[str]
     ) -> LiveChecks | None:
-        """The trial's learned checks marked `live` or `end_on_pass`, loaded.
+        """The trial's checks marked `live` or `end_on_pass`, loaded.
 
         Refuses the start when one cannot be loaded: a trial meant to end when
         its check passes would otherwise run until someone stops it.
@@ -1086,9 +1424,7 @@ class RolloutService:
             return None
         plan = SessionStore(self._settings.storage.rollouts_root).plan(trial.session)
         checks = {
-            name: check
-            for name, check in plan.checks.items()
-            if isinstance(check, LearnedCheck) and check.scored_live
+            name: check for name, check in plan.checks.items() if check.scored_live
         }
         if not checks:
             return None
@@ -1096,7 +1432,7 @@ class RolloutService:
 
     def _live_checks(
         self,
-        checks: dict[str, LearnedCheck],
+        checks: dict[str, Check],
         sides: list[str],
         camera_names: list[str],
     ) -> LiveChecks:
@@ -1442,6 +1778,9 @@ class RolloutService:
                 )
 
     def stop(self) -> dict[str, Any]:
+        chain = self._chain
+        if chain is not None:
+            chain.stop()
         self._stop_event.set()
         cleanup_errors: list[str] = []
         runner = self._runner

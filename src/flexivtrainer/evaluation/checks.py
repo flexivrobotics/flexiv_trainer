@@ -83,6 +83,10 @@ class SettledInBox:
     the tick log, in the order the rollout lists them. The speed is the
     robot's reported tool velocity when the tick carries it, else the change
     in position between ticks.
+
+    `live` also scores it on every tick while the trial runs
+    (rollout/live_checks.py), and `end_on_pass` ends the trial when it passes,
+    as a learned check's does; `when` applies only to the score of the tick log.
     """
 
     box_min_m: tuple[float, float, float]
@@ -91,6 +95,8 @@ class SettledInBox:
     max_speed_m_s: float = 0.005
     when: str = "any"
     arm: int = 0
+    live: bool = False
+    end_on_pass: bool = False
 
     kind = "settled_in_box"
 
@@ -119,6 +125,8 @@ class SettledInBox:
             "max_speed_m_s",
             "when",
             "arm",
+            "live",
+            "end_on_pass",
         }
         unknown = sorted(set(data) - known)
         if unknown:
@@ -132,6 +140,23 @@ class SettledInBox:
             max_speed_m_s=float(data.get("max_speed_m_s", cls.max_speed_m_s)),
             when=str(data.get("when", cls.when)),
             arm=int(data.get("arm", cls.arm)),
+            live=_flag(data, "live"),
+            end_on_pass=_flag(data, "end_on_pass"),
+        )
+
+    @property
+    def scored_live(self) -> bool:
+        return self.live or self.end_on_pass
+
+    def holds(self, position: list[float], speed: float | None) -> bool:
+        """Whether one sample is inside the box and nearly still."""
+        return (
+            speed is not None
+            and speed <= self.max_speed_m_s
+            and all(
+                lo <= p <= hi
+                for p, lo, hi in zip(position, self.box_min_m, self.box_max_m)
+            )
         )
 
     def evaluate(self, ticks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -139,13 +164,7 @@ class SettledInBox:
         samples = [self._sample(tick) for tick in ticks]
         speeds = self._speeds(samples)
         inside = [
-            sample is not None
-            and speed is not None
-            and speed <= self.max_speed_m_s
-            and all(
-                lo <= p <= hi
-                for p, lo, hi in zip(sample[1], self.box_min_m, self.box_max_m)
-            )
+            sample is not None and self.holds(sample[1], speed)
             for sample, speed in zip(samples, speeds)
         ]
         times = [sample[0] if sample is not None else None for sample in samples]
