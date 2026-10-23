@@ -4950,3 +4950,80 @@ input[type="range"]:focus-visible::-moz-range-thumb {
     border-bottom: 1px solid var(--separator);
     text-align: left;
 }
+
+/* Chains & Practice: a plan from disk, then the chain or practice running. */
+.rollout-plans {
+    display: grid;
+    gap: 8px;
+}
+
+.rollout-plan-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.rollout-plan-actions:empty {
+    display: none;
+}
+
+.rollout-plan-run {
+    display: grid;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--separator);
+}
+
+.rollout-plan-call {
+    display: grid;
+    gap: 6px;
+}
+
+.rollout-plan-call p {
+    margin: 0;
+}
+
+.rollout-chain-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.rollout-chain-step {
+    padding: 2px 10px;
+    border-radius: var(--r-pill);
+    background: var(--fill-3);
+    color: var(--ink-2);
+    font-size: 12px;
+}
+
+.rollout-chain-step--done {
+    background: var(--success-soft);
+    color: var(--success);
+}
+
+.rollout-chain-step--current {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.rollout-chain-events {
+    display: grid;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    color: var(--ink-2);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    list-style: none;
+    overflow-wrap: anywhere;
+}
+
+.rollout-chain-event--failed {
+    color: var(--warning);
+}

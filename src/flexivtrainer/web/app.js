@@ -66,6 +66,13 @@ const state = {
     rolloutVerdictBusy: false,
     // A Take over / Hand back request is on its way.
     rolloutTakeoverBusy: false,
+    // Chain and practice plans on disk (/rollout/plans), the one chosen, a
+    // request on its way, and the last practice seen: a stop clears it from
+    // the status, and its totals are still worth reading.
+    rolloutPlans: [],
+    rolloutPlanName: "",
+    rolloutPlanBusy: false,
+    rolloutLastPractice: null,
     teleopBootstrapped: false,
     rolloutBootstrapped: false,
     trainingBootstrapped: false,
@@ -8101,6 +8108,7 @@ async function bootstrapRollout() {
     // Warm the device list (reuses the training device probe on the backend).
     refreshRolloutDevices({ silent: true }).catch((error) => showToast(error.message, true));
     refreshRolloutEvaluations().catch(() => { });
+    refreshRolloutPlans().catch(() => { });
     startRolloutPolling();
 }
 
@@ -8544,6 +8552,223 @@ function renderRolloutEvaluation() {
 }
 
 // ---------------------------------------------------------------------------
+// Chains and practice: plans kept on disk and started by name, then the chain
+// or practice running and the operator's answers to it.
+// ---------------------------------------------------------------------------
+
+const CHAIN_RESULTS = { done: "Done", stopped: "Stopped", failed: "Failed" };
+
+async function refreshRolloutPlans() {
+    const listing = await api("/rollout/plans");
+    state.rolloutPlans = (listing && listing.plans) || [];
+    const usable = state.rolloutPlans.filter((plan) => plan.kind);
+    if (!usable.some((plan) => plan.name === state.rolloutPlanName)) {
+        state.rolloutPlanName = usable.length === 1 ? usable[0].name : "";
+    }
+    renderRolloutPlans();
+}
+
+async function rolloutPlanRequest(path, body) {
+    state.rolloutPlanBusy = true;
+    renderRolloutPlans();
+    try {
+        state.rolloutStatus = await api(path, {
+            method: "POST",
+            ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.rolloutPlanBusy = false;
+    }
+    renderRollout();
+}
+
+function startRolloutPlan() {
+    const name = state.rolloutPlanName;
+    if (!name || state.rolloutPlanBusy) return Promise.resolve();
+    state.rolloutLastPractice = null;
+    return rolloutPlanRequest(`/rollout/plans/${encodeURIComponent(name)}/start`);
+}
+
+function formatChainEvent(event) {
+    let what = event.event;
+    if (event.attempt) what += ` ${event.attempt}`;
+    const outcome = event.outcome;
+    if (outcome) what += `: ${outcome.reason} (${Number(outcome.seconds || 0).toFixed(1)} s)`;
+    const extra = event.why || event.action || event.error;
+    if (extra) what += `: ${extra}`;
+    return `${Number(event.t || 0).toFixed(1)} s · ${event.step ? `${event.step} · ` : ""}${what}`;
+}
+
+function chainStateText(chain) {
+    if (chain.result) return CHAIN_RESULTS[chain.result] || chain.result;
+    if (chain.waiting_for_operator) return "Waiting for you";
+    if (chain.state === "running") {
+        return `${chain.step}: try ${chain.try}${chain.tries ? ` of ${chain.tries}` : ""}`;
+    }
+    if (chain.state === "checking") return `${chain.step}: checking its start`;
+    if (chain.state === "backing off") return `${chain.step}: backing off`;
+    return chain.state;
+}
+
+function _chainMarkup(chain) {
+    const steps = (chain.steps || []).map((name, index) => {
+        const tone = index < chain.step_index
+            ? " rollout-chain-step--done"
+            : !chain.result && index === chain.step_index ? " rollout-chain-step--current" : "";
+        return `<li class="rollout-chain-step${tone}">${escapeHtml(name)}</li>`;
+    }).join("");
+    const events = (chain.recent || []).slice(-6).reverse().map((event) => {
+        const failed = (event.outcome && !event.outcome.passed) || event.error;
+        return `<li${failed ? ` class="rollout-chain-event--failed"` : ""}>${escapeHtml(formatChainEvent(event))}</li>`;
+    }).join("");
+    const record = String(chain.record || "").split(/[\\/]/).pop();
+    return `
+        <div class="rollout-plan-run">
+            <p class="rollout-eval-line"><strong>Chain</strong> · ${escapeHtml(chainStateText(chain))}</p>
+            <ol class="rollout-chain-steps">${steps}</ol>
+            ${chain.waiting_for_operator ? `
+                <div class="callout callout--warning rollout-plan-call">
+                    <p><strong>You are needed</strong> at ${escapeHtml(chain.waiting_for_operator)}.</p>
+                    <p>Do what the chain could not, with the leader arm or by hand. Then run the step again from its start check, or count it as done.</p>
+                    <div class="rollout-plan-actions">
+                        <button type="button" class="secondary-button" id="rollout-chain-skip" ${state.rolloutPlanBusy ? "disabled" : ""}>Skip step</button>
+                        <button type="button" class="start-button" id="rollout-chain-retry" ${state.rolloutPlanBusy ? "disabled" : ""}>Retry step</button>
+                    </div>
+                </div>` : ""}
+            ${events ? `<ul class="rollout-chain-events">${events}</ul>` : ""}
+            ${record ? `<p class="rollout-eval-line">Record: <code>${escapeHtml(record)}</code></p>` : ""}
+        </div>`;
+}
+
+function _practiceMarkup(practice, live) {
+    const percent = (part, whole) => (whole ? `${Math.round((100 * part) / whole)}%` : "—");
+    const count = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+    const waiting = live && practice.state === "waiting for the operator";
+    const recent = (practice.recent || []).slice(-5).reverse().map((episode) => `
+        <tr><td>${episode.episode}</td><td>${episode.success ? "Success" : "Cut short"}</td><td>${episode.steps}</td><td>${
+            episode.interventions}</td><td>${Number(episode.seconds || 0).toFixed(1)} s</td></tr>`).join("");
+    return `
+        <div class="rollout-plan-run">
+            <p class="rollout-eval-line"><strong>Practice</strong> · ${escapeHtml(live ? practice.state : "ended")} · reward <strong>${
+                escapeHtml(practice.reward)}</strong> · learner ${escapeHtml(practice.learner)}</p>
+            <p class="rollout-eval-line">${count(practice.episodes, "episode")}, ${count(practice.successes, "success", "successes")} (${
+                percent(practice.successes, practice.episodes)}) · ${count(practice.steps, "step")}, ${
+                percent(practice.intervention_steps, practice.steps)} under the operator · new weights ${count(practice.weights_loaded, "time")}</p>
+            ${waiting ? `
+                <div class="callout callout--warning rollout-plan-call">
+                    <p><strong>Practice waits for you.</strong> Do what the reset cannot, such as unlatching the part, then go on.</p>
+                    <div class="rollout-plan-actions">
+                        <button type="button" class="start-button" id="rollout-practice-continue" ${state.rolloutPlanBusy ? "disabled" : ""}>Continue</button>
+                    </div>
+                </div>` : ""}
+            ${recent ? `
+                <table class="rollout-eval-summary">
+                    <thead><tr><th>Episode</th><th>Result</th><th>Steps</th><th>Your steps</th><th>Time</th></tr></thead>
+                    <tbody>${recent}</tbody>
+                </table>` : ""}
+        </div>`;
+}
+
+function renderRolloutPlans() {
+    const panel = byId("rollout-plans");
+    if (!panel) {
+        return;
+    }
+    const status = state.rolloutStatus || {};
+    const isRunning = status.status === "running" || status.status === "stopping";
+    // Kept while it practises, for after a stop: a finished one's status can
+    // still ride on the reply that starts the next chain, and is not kept.
+    const practicing = !!status.practice && status.practice.state !== "finished";
+    if (practicing) {
+        state.rolloutLastPractice = status.practice;
+    }
+    const practice = status.practice || state.rolloutLastPractice;
+    const practiceLive = practicing && isRunning;
+    const chain = status.chain || null;
+    const chainLive = !!chain && !chain.result;
+    const plans = state.rolloutPlans || [];
+    // Like the other panels: rebuild only when something shown changed.
+    const renderKey = JSON.stringify([
+        status.status, plans, state.rolloutPlanName, state.rolloutPlanBusy,
+        chain, practice, practiceLive,
+    ]);
+    if (panel.dataset.renderKey === renderKey) {
+        return;
+    }
+    panel.dataset.renderKey = renderKey;
+
+    const usable = plans.filter((plan) => plan.kind);
+    const unusable = plans.filter((plan) => !plan.kind);
+    const chosen = usable.find((plan) => plan.name === state.rolloutPlanName) || null;
+    const group = (kind, label) => {
+        const entries = usable.filter((plan) => plan.kind === kind);
+        return entries.length ? `<optgroup label="${label}">${entries.map((plan) => `<option value="${
+            escapeHtml(plan.name)}"${plan.name === state.rolloutPlanName ? " selected" : ""}>${escapeHtml(plan.name)}</option>`).join("")}</optgroup>` : "";
+    };
+    let detail = "";
+    if (chosen && chosen.kind === "chain") {
+        detail = `<p class="rollout-eval-line">Steps: ${escapeHtml(chosen.steps.join(" → "))}</p>${
+            chosen.about ? `<p class="rollout-eval-line">${escapeHtml(chosen.about)}</p>` : ""}`;
+    } else if (chosen) {
+        detail = `<p class="rollout-eval-line">Practises <code>${escapeHtml(chosen.checkpoint)}</code> · reward <strong>${
+            escapeHtml(chosen.reward)}</strong> · ${chosen.episodes ? `${chosen.episodes} episodes` : "until stopped"} · learner ${
+            escapeHtml(chosen.learner)}</p>`;
+    }
+    const canStart = !!chosen && !isRunning && !state.rolloutPlanBusy;
+    const startLabel = chosen && chosen.kind === "practice" ? "Start practice" : "Start chain";
+    // While a chain or practice runs, the panel is about it, not the plans.
+    const live = isRunning && (chainLive || practiceLive);
+    const picker = plans.length ? `
+        <label class="field-label" for="rollout-plan">Plan</label>
+        <select id="rollout-plan" ${isRunning ? "disabled" : ""}>
+            <option value="">Choose a plan</option>
+            ${group("chain", "Chains")}
+            ${group("practice", "Practice")}
+        </select>
+        ${detail}` : `
+        <p class="rollout-eval-line">No plans yet. Write a chain or practice plan at <code>rollouts/plans/&lt;name&gt;.json</code> in the storage folder, then read the plans again.</p>`;
+
+    panel.innerHTML = `
+        <div class="panel-header">
+            <h3>Chains &amp; Practice</h3>
+            <button class="secondary-button icon-button" id="rollout-plans-reload" type="button" aria-label="Read the plans again" title="Read the plans again">${RESET_ICON_SVG}</button>
+        </div>
+        ${live ? "" : picker}
+        ${live ? "" : unusable.map((plan) => `<p class="rollout-verdict rollout-error">${escapeHtml(plan.name)}: ${escapeHtml(plan.error)}</p>`).join("")}
+        <div class="rollout-plan-actions">
+            ${live ? `<button type="button" class="stop-button" id="rollout-plan-stop" ${
+                state.rolloutPlanBusy || status.status === "stopping" ? "disabled" : ""}>Stop</button>` : ""}
+            ${!live && plans.length ? `<button type="button" class="start-button" id="rollout-plan-start" ${canStart ? "" : "disabled"}>${startLabel}</button>` : ""}
+        </div>
+        ${chain ? _chainMarkup(chain) : ""}
+        ${practice ? _practiceMarkup(practice, practiceLive) : ""}
+    `;
+
+    byId("rollout-plans-reload").onclick = () => {
+        refreshRolloutPlans().catch((error) => showToast(error.message, true));
+    };
+    const select = byId("rollout-plan");
+    if (select) {
+        select.onchange = () => {
+            state.rolloutPlanName = select.value;
+            renderRolloutPlans();
+        };
+    }
+    const start = byId("rollout-plan-start");
+    if (start) start.onclick = () => startRolloutPlan();
+    const stop = byId("rollout-plan-stop");
+    if (stop) stop.onclick = () => rolloutPlanRequest("/rollout/stop");
+    const retry = byId("rollout-chain-retry");
+    if (retry) retry.onclick = () => rolloutPlanRequest("/rollout/chain/continue", { action: "retry" });
+    const skip = byId("rollout-chain-skip");
+    if (skip) skip.onclick = () => rolloutPlanRequest("/rollout/chain/continue", { action: "skip" });
+    const goOn = byId("rollout-practice-continue");
+    if (goOn) goOn.onclick = () => rolloutPlanRequest("/rollout/practice/continue");
+}
+
+// ---------------------------------------------------------------------------
 // Leader-arm takeover: who drives the follower, and the switch between.
 // ---------------------------------------------------------------------------
 
@@ -8727,6 +8952,7 @@ function renderRollout() {
         renderRolloutMetrics();
         renderRolloutWrench();
         renderRolloutEvaluation();
+        renderRolloutPlans();
         renderRolloutTakeover();
         renderRolloutStiffness();
         return;
@@ -8801,6 +9027,7 @@ function renderRollout() {
                     <div class="rollout-stiffness" id="rollout-stiffness"></div>
                     <div class="rollout-takeover" id="rollout-takeover"></div>
                 </section>
+                <section class="panel rollout-plans" id="rollout-plans"></section>
                 <section class="panel rollout-evaluation" id="rollout-evaluation"></section>
             </div>
             <div class="rollout-main">
@@ -8832,6 +9059,7 @@ function renderRollout() {
     renderRolloutMetrics();
     renderRolloutWrench();
     renderRolloutEvaluation();
+    renderRolloutPlans();
     renderRolloutTakeover();
     renderRolloutStiffness();
 

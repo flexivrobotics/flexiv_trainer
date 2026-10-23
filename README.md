@@ -442,9 +442,13 @@ Each episode:
    it has sent are loaded before the next episode.
 
 After a success, practice waits until you have done what the reset cannot,
-such as unlatching a part, and send `POST /rollout/practice/continue`.
+such as unlatching a part, and press **Continue** on the rollout page (or send
+`POST /rollout/practice/continue`).
 
-Start it with `POST /rollout/practice`:
+Write the practice plan at `.local/rollouts/plans/<name>.json`, choose it in
+the rollout page's **Chains & Practice** panel and press **Start practice**.
+The file is the body that `POST /rollout/practice` takes, which also starts
+it. A relative `checkpoint_path` is taken from the storage root:
 
 ```json
 {
@@ -468,10 +472,10 @@ Start it with `POST /rollout/practice`:
 }
 ```
 
-`episodes` 0 practises until stopped. `GET /rollout/status` reports practice
-under `practice`: its state, the totals (episodes, successes, steps, steps
-under the operator, weights loaded) and the last episodes. Stop practice as
-you stop a rollout. There is no practice page in the UI yet.
+`episodes` 0 practises until stopped. The panel shows the practice's state,
+its totals (episodes, successes, steps, the share under the operator, new
+weights loaded) and its last episodes. `GET /rollout/status` reports the same
+under `practice`. Stop practice in the panel, or as you stop a rollout.
 
 ## Start Training
 
@@ -882,7 +886,11 @@ cannot be taken over yet.
 ## Run A Task As A Chain Of Steps
 
 A longer task can be split into short steps, each a skill or a generic
-primitive, joined by checks. Each step may have a start check, which must pass
+primitive, joined by checks. Write the plan at
+`.local/rollouts/plans/<name>.json`, choose it in the rollout page's
+**Chains & Practice** panel and press **Start chain**. The panel lists every
+plan in that folder. For a plan with a mistake in it, the panel says why it
+cannot run. Each step may have a start check, which must pass
 before it runs, and an end check, which ends it when it passes; either may be a
 list of checks, which must all pass. The checks are declared as in an
 evaluation session: `settled_in_box`, `gripper_width` or `learned`.
@@ -956,20 +964,23 @@ when a back-off meets more force than its `max_force_n` (a half-latched part
 needs a person, not more force), when a start check does not pass, when the
 safety envelope stopped a try, and when an end check could not be scored (a
 jaw check under a skill that does not read the jaws). Do what the chain could not, with the leader
-arm through teleoperation or by hand, then send
-`POST /rollout/chain/continue` with `{"action": "retry"}` to run the step again
-from its start check, or `{"action": "skip"}` to count it as done.
+arm through teleoperation or by hand. Then press **Retry step** in the panel to
+run the step again from its start check, or **Skip step** to count it as done.
+The same answers can be sent as `POST /rollout/chain/continue` with
+`{"action": "retry"}` or `{"action": "skip"}`.
 
-Start a chain with `POST /rollout/chain` and `{"plan": {...}}`; stop it as you
-stop a rollout. Each step runs as a rollout of its own, so the leader arm can
+A chain can also be started with `POST /rollout/chain` and `{"plan": {...}}`,
+or by its file's name with `POST /rollout/plans/<name>/start`. Stop it in the
+panel, or as you stop a rollout. Each step runs as a rollout of its own, so the leader arm can
 take over a skill as in any rollout; primitives cannot be taken over. A
 back-off and a start check move at their skill's stiffness. A primitive step
 moves at the plan's `stiffness`, or `ROLLOUT__CARTESIAN_STIFFNESS`, which wins
-over both as it does for a skill. `GET /rollout/status` reports the chain under
-`chain`: its state, the step and try, and why it waits for you. Every run is
+over both as it does for a skill. The panel shows each step,
+the step and try under way, why the chain waits for you, and its last events.
+`GET /rollout/status` reports the same under `chain`. Every run is
 written as it goes to `<storage>/rollouts/chains/<time>.json`: each try, how it
 ended and in what time, its back-offs, your takeovers and your calls. A chain
-drives one arm. There is no chain page in the UI yet.
+drives one arm.
 
 ## Typical End-To-End Session
 
