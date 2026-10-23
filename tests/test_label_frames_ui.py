@@ -43,6 +43,8 @@ def test_the_processing_page_offers_labelling_and_uses_the_label_api() -> None:
     assert 'if (state.processingMode === "labels") {' in source
     assert "/datasets/check-labels?path=" in source
     assert 'method: "PUT"' in source and 'method: "DELETE"' in source
+    assert 'id="label-train"' in source
+    assert 'api("/checks/train", {' in source and '"/checks/train/stop"' in source
     assert ".label-badge--never" in (WEB_ROOT / "styles.css").read_text(
         encoding="utf-8"
     )

@@ -28,6 +28,7 @@ function harness() {
         HTMLInputElement: class {},
         console: { warn() {} },
         document: { getElementById: element, createElement: () => makeElement() },
+        window: { setInterval: () => 7, clearInterval: () => {} },
     });
     const run = (code) => vm.runInContext(code, context);
     run(source.replace(startup, ''));
@@ -45,8 +46,9 @@ function harness() {
         globalThis.calls = [];
         globalThis.views = {
             '/s/episodes/job/e1': {path: '/s/episodes/job/e1', episodes: [{index: 0, num_frames: 30}],
+                cameras: ['wrist_1', 'wrist_2'], state: ['single_arm.tcp_wrench.fz'],
                 checks: {seated: {episodes: {'0': 12}, summary: {episodes: 1, reached: 1, never: 0}}}},
-            '/s/merged/demos': {path: '/s/merged/demos',
+            '/s/merged/demos': {path: '/s/merged/demos', cameras: ['wrist_1', 'ego'],
                 episodes: [{index: 0, num_frames: 50}, {index: 1, num_frames: 60}], checks: {}},
         };
         api = async (path, request) => {
@@ -59,6 +61,7 @@ function harness() {
                 return {path: 'p', num_frames: 60, episode_index: Number(path.split('episode_index=')[1])};
             }
             if (path.startsWith('/datasets/series?')) return {series: {}};
+            if (path === '/checks/train' && method === 'GET') return globalThis.job || {state: 'idle'};
             return globalThis.reply;
         };
     `);
@@ -74,6 +77,8 @@ test('the label step reads every loaded dataset and names a check already used',
         assert.deepEqual(calls.map(c => c[1]), [
             '/datasets/check-labels?path=%2Fs%2Fepisodes%2Fjob%2Fe1',
             '/datasets/check-labels?path=%2Fs%2Fmerged%2Fdemos',
+            // The last training job, read once, so a reload finds it.
+            '/checks/train',
         ]);
         assert.equal(state.labelCheck, 'seated');
     `);
@@ -172,4 +177,81 @@ test('a slow preview of an episode no longer picked is dropped', async () => {
         assert.equal(state.labelPreview.episode_index, 1);
         assert.deepEqual(state.labelTarget, {path: '/s/merged/demos', episode: 1});
     `);
+});
+
+test('the check trains from the loaded datasets on what was chosen', async () => {
+    const { run, element } = harness();
+    run(`
+        state.labelViews = {...views, '/s/merged/demos': {...views['/s/merged/demos'], checks: {seated: {
+            episodes: {'1': null}, summary: {episodes: 1, reached: 0, never: 1}}}}};
+        state.labelCheck = 'seated'; renderProcessing();
+    `);
+    const panel = () => element('label-train').innerHTML;
+    // Every dataset's cameras, once each; the state columns.
+    assert.match(panel(), /data-train-camera="wrist_1"[\s\S]*data-train-camera="wrist_2"[\s\S]*data-train-camera="ego"/);
+    assert.equal((panel().match(/data-train-camera="wrist_1"/g) || []).length, 1);
+    assert.match(panel(), /data-train-state="single_arm.tcp_wrench.fz"/);
+    assert.match(panel(), /Learns <code>seated<\/code> from 2 labelled episodes \(1 reach it, 1 never\)/);
+    assert.match(panel(), /id="label-train-start" disabled/, 'nothing chosen yet');
+    run(`state.labelTrain.cameras = ['ego']; _renderLabelTrain();`);
+    assert.doesNotMatch(panel(), /id="label-train-start" disabled/, 'a camera is enough');
+    run(`
+        state.labelTrain.cameras = ['wrist_1'];
+        state.labelTrain.crops = {wrist_1: '0.15, 0.1, 0.85, 0.7'};
+        state.labelTrain.state = ['single_arm.tcp_wrench.fz'];
+        state.labelTrain.name = 'seated_v2';
+        globalThis.reply = {state: 'running', model: 'checks/seated_v2', seconds: 0, log: []};
+    `);
+    await run('startLabelTrain()');
+    run(`
+        const post = calls.at(-1);
+        assert.equal(post[0], 'POST');
+        assert.equal(post[1], '/checks/train');
+        assert.deepEqual(post[2], {name: 'seated_v2', check: 'seated', data: ['/s/episodes/job/e1', '/s/merged/demos'],
+            cameras: ['wrist_1'], crops: {wrist_1: [0.15, 0.1, 0.85, 0.7]}, state: ['single_arm.tcp_wrench.fz']});
+    `);
+    assert.match(element('label-train-status').innerHTML, /Training <code>checks\/seated_v2<\/code>/);
+    assert.match(panel(), /id="label-train-start" disabled/, 'not while it trains');
+});
+
+test('a bad crop is refused before anything is sent', async () => {
+    const { run } = harness();
+    run(`
+        state.labelViews = {...views}; state.labelCheck = 'seated'; renderProcessing();
+        globalThis.toasts = []; showToast = (message) => toasts.push(message);
+        state.labelTrain.cameras = ['wrist_1'];
+        state.labelTrain.crops = {wrist_1: '0.9, 0, 0.1, 1'};
+    `);
+    await run('startLabelTrain()');
+    run(`
+        assert.ok(!calls.some(c => c[1] === '/checks/train' && c[0] === 'POST'));
+        assert.match(toasts[0], /x0,y0,x1,y1/);
+    `);
+});
+
+test('the job reads as it runs, as its held-out report, or as why it failed', () => {
+    const { run, element } = harness();
+    run(`state.labelViews = {...views}; state.labelCheck = 'seated'; renderProcessing();`);
+    run(`
+        state.labelTrainJob = {state: 'running', model: 'checks/seated', seconds: 42.3,
+            log: ['encoded 8/8 training episodes', 'epoch 12/30: loss 0.21']};
+        _renderLabelTrainStatus();
+    `);
+    assert.match(element('label-train-status').innerHTML, /42 s · epoch 12\/30: loss 0.21/);
+    run(`
+        state.labelTrainJob = {state: 'done', model: 'checks/seated', seconds: 90, log: [], result: {held_out: {
+            episodes_reached: 2, episodes_never: 1, false_passes: 1, misses: 0,
+            episodes: [{dataset: '/s/merged/demos', episode: 7, reached: false, result: 'false pass'},
+                       {dataset: '/s/merged/demos', episode: 8, reached: true, result: 'passed'}]}}};
+        _renderLabelTrainStatus();
+    `);
+    const done = element('label-train-status').innerHTML;
+    assert.match(done, /On 3 held-out episodes \(2 reach it, 1 never\): <strong>1 false pass<\/strong>, 0 misses/);
+    assert.match(done, /<tr class="label-train__bad">\s*<td>demos<\/td><td>7<\/td>/);
+    run(`
+        state.labelTrainJob = {state: 'failed', model: 'checks/seated', log: ['error: no episode has a label'],
+            error: 'no episode has a label'};
+        _renderLabelTrainStatus();
+    `);
+    assert.match(element('label-train-status').innerHTML, /failed: no episode has a label/);
 });

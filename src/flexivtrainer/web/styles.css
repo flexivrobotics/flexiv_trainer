@@ -3997,6 +3997,72 @@ input[type="range"]:focus-visible::-moz-range-thumb {
     line-height: 1.4;
 }
 
+/* Train this check: what it looks at, then the job and its held-out report. */
+.label-train {
+    display: grid;
+    gap: 12px;
+}
+
+.label-train > .panel-header {
+    margin-bottom: 0;
+}
+
+.label-train__group {
+    display: grid;
+    gap: 6px;
+}
+
+.label-train__camera {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+}
+
+.label-train__crop {
+    max-width: 260px;
+}
+
+.label-train__columns {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 4px 12px;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.label-train__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.label-train__name {
+    max-width: 220px;
+}
+
+.label-train__live {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--ink-2);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.label-train__verdict {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.label-train__bad td {
+    color: var(--warning);
+}
+
 .label-badge {
     flex: 0 0 auto;
     padding: 2px 8px;

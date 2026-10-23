@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from flexivtrainer import __version__
-from flexivtrainer.api.routes import datasets, rollout, system, teleop, training
+from flexivtrainer.api.routes import checks, datasets, rollout, system, teleop, training
 from flexivtrainer.config import get_settings
 from flexivtrainer.observability import (
     banner,
@@ -102,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(datasets.router)
     app.include_router(training.router)
     app.include_router(rollout.router)
+    app.include_router(checks.router)
     return app
 
 

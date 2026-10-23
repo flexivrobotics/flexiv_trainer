@@ -192,6 +192,8 @@ def test_labels_are_set_listed_and_removed_per_episode(tmp_path: Path) -> None:
     assert empty.status_code == 200
     assert empty.json() == {
         "path": str(root),
+        "cameras": [],
+        "state": [],
         "episodes": [
             {"index": 0, "num_frames": 30},
             {"index": 1, "num_frames": 40},

@@ -107,6 +107,11 @@ const state = {
     labelFrame: 0,
     labelPlaying: false,
     labelBusy: false,
+    // Training the labelled check (/checks/train): the form's choices, a
+    // request on its way, and the job's last status.
+    labelTrain: { cameras: [], crops: {}, state: [], name: "" },
+    labelTrainBusy: false,
+    labelTrainJob: null,
     // Training page state
     mergedDatasetPath: "",
     // "local" uses mergedDatasetPath; "hub" uses the repo id below. Kept on
@@ -171,6 +176,7 @@ const state = {
         training: null,
         rollout: null,
         recordingSave: null,
+        labelTrain: null,
         // View-independent robot-fault watcher (1s); the floating fault widget
         // must surface a fault no matter which page the user is on.
         fault: null,
@@ -5609,6 +5615,7 @@ function renderLabelStep(container) {
                         <div class="label-bar__status" id="label-status"></div>
                         <p class="label-bar__hint">Pause where the state first holds (a part seated, a latch closed) and press <strong>Holds from here</strong>. Mark near misses <strong>Never holds</strong>: they teach the check the most.</p>
                     </section>
+                    <section class="panel label-train" id="label-train"></section>
                     <section class="panel dataset-preview-panel">
                         <div id="label-preview-block"></div>
                     </section>
@@ -5624,6 +5631,7 @@ function renderLabelStep(container) {
         state.labelCheck = input.value;
         _renderLabelPicker();
         _renderLabelStatus();
+        _renderLabelTrain();
     };
     byId("label-prev").onclick = () => {
         state.labelPlaying = false;
@@ -5636,6 +5644,10 @@ function renderLabelStep(container) {
     restorePickerScroll();
     _renderLabelStatus();
     _renderLabelPreview();
+    _renderLabelTrain();
+    if (!state.labelTrainJob) {
+        refreshLabelTrainJob().catch(() => { });
+    }
 }
 
 function _renderLabelPicker() {
@@ -5804,7 +5816,220 @@ async function saveLabel(firstFrame) {
         state.labelBusy = false;
         _renderLabelPicker();
         _renderLabelStatus();
+        _renderLabelTrain();
     }
+}
+
+// --- Training the check -------------------------------------------------------
+
+const LABEL_TRAIN_LIVE = new Set(["running", "stopping"]);
+
+function _union(key) {
+    const names = [];
+    Object.values(state.labelViews).forEach((view) => {
+        (view[key] || []).forEach((name) => {
+            if (!names.includes(name)) names.push(name);
+        });
+    });
+    return names;
+}
+
+async function refreshLabelTrainJob() {
+    state.labelTrainJob = await api("/checks/train");
+    _renderLabelTrainStatus();
+    _pollLabelTrain();
+}
+
+// Poll the job while it runs, and only then.
+function _pollLabelTrain() {
+    const live = LABEL_TRAIN_LIVE.has(state.labelTrainJob?.state);
+    if (live && !state.intervals.labelTrain) {
+        state.intervals.labelTrain = window.setInterval(() => {
+            refreshLabelTrainJob().catch(() => { });
+        }, 1000);
+    } else if (!live && state.intervals.labelTrain) {
+        window.clearInterval(state.intervals.labelTrain);
+        state.intervals.labelTrain = null;
+        _renderLabelTrain();
+    }
+}
+
+function _cropFrom(text) {
+    const values = String(text || "").split(",").map((v) => v.trim()).filter((v) => v !== "").map(Number);
+    if (!values.length) return null;
+    const [x0, y0, x1, y1] = values;
+    const ok = values.length === 4 && values.every(Number.isFinite)
+        && x0 >= 0 && x0 < x1 && x1 <= 1 && y0 >= 0 && y0 < y1 && y1 <= 1;
+    if (!ok) throw new Error(`A crop is x0,y0,x1,y1: fractions of the frame, each low below its high (${text}).`);
+    return values;
+}
+
+async function startLabelTrain() {
+    const form = state.labelTrain;
+    const check = state.labelCheck.trim();
+    const name = (form.name || check).trim();
+    let crops = {};
+    try {
+        form.cameras.forEach((camera) => {
+            const box = _cropFrom(form.crops[camera]);
+            if (box) crops[camera] = box;
+        });
+    } catch (error) {
+        showToast(error.message, true);
+        return;
+    }
+    state.labelTrainBusy = true;
+    _renderLabelTrain();
+    try {
+        state.labelTrainJob = await api("/checks/train", {
+            method: "POST",
+            body: JSON.stringify({
+                name,
+                check,
+                data: state.episodes.map((item) => item.path),
+                cameras: form.cameras,
+                crops,
+                state: form.state,
+            }),
+        });
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.labelTrainBusy = false;
+    }
+    _renderLabelTrain();
+    _pollLabelTrain();
+}
+
+async function stopLabelTrain() {
+    try {
+        state.labelTrainJob = await api("/checks/train/stop", { method: "POST" });
+    } catch (error) {
+        showToast(error.message, true);
+    }
+    _renderLabelTrainStatus();
+}
+
+function _labelTrainResultMarkup(job) {
+    const count = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+    const held = job.result && job.result.held_out;
+    if (!held) {
+        return `<p class="label-bar__hint">Saved as <code>${escapeHtml(job.model)}</code>. No episode was held out, so there is no report: label more episodes.</p>`;
+    }
+    const total = held.episodes_reached + held.episodes_never;
+    const rows = (held.episodes || []).map((episode) => `
+        <tr class="${episode.result === "false pass" || episode.result === "missed" ? "label-train__bad" : ""}">
+            <td>${escapeHtml(String(episode.dataset).split(/[\\/]/).pop())}</td><td>${episode.episode}</td>
+            <td>${episode.reached ? "reaches it" : "never"}</td><td>${escapeHtml(episode.result)}</td>
+        </tr>`).join("");
+    return `
+        <p class="label-train__verdict">Saved as <code>${escapeHtml(job.model)}</code>. On ${count(total, "held-out episode")} (${
+            held.episodes_reached} reach it, ${held.episodes_never} never): <strong>${count(held.false_passes, "false pass", "false passes")}</strong>, ${
+            count(held.misses, "miss", "misses")}.</p>
+        <p class="label-bar__hint">A false pass is a pass before the state holds: whatever runs next starts from a failure. Read it first. Name the check in a plan as <code>${escapeHtml(job.model)}</code>.</p>
+        ${rows ? `<table class="rollout-eval-summary"><thead><tr><th>Dataset</th><th>Episode</th><th>Label</th><th>Check</th></tr></thead><tbody>${rows}</tbody></table>` : ""}`;
+}
+
+function _renderLabelTrainStatus() {
+    const box = byId("label-train-status");
+    if (!box) return;
+    const job = state.labelTrainJob;
+    if (!job || job.state === "idle") {
+        box.innerHTML = "";
+        return;
+    }
+    const last = (job.log || []).slice(-1)[0] || "starting";
+    if (LABEL_TRAIN_LIVE.has(job.state)) {
+        box.innerHTML = `
+            <div class="label-train__live">
+                <span>Training <code>${escapeHtml(job.model)}</code> · ${Math.round(job.seconds || 0)} s · ${escapeHtml(last)}</span>
+                <button type="button" class="stop-button" id="label-train-stop" ${job.state === "stopping" ? "disabled" : ""}>Stop</button>
+            </div>`;
+        byId("label-train-stop").onclick = () => stopLabelTrain();
+        return;
+    }
+    if (job.state === "done") {
+        box.innerHTML = _labelTrainResultMarkup(job);
+    } else if (job.state === "failed") {
+        box.innerHTML = `<p class="rollout-verdict rollout-error">Training <code>${escapeHtml(job.model)}</code> failed: ${escapeHtml(job.error || last)}</p>`;
+    } else {
+        box.innerHTML = `<p class="label-bar__hint">Training <code>${escapeHtml(job.model)}</code> was stopped.</p>`;
+    }
+}
+
+function _renderLabelTrain() {
+    const panel = byId("label-train");
+    if (!panel) return;
+    const form = state.labelTrain;
+    const check = state.labelCheck.trim();
+    const valid = LABEL_CHECK_NAME.test(check);
+    const summary = _labelSummary();
+    const cameras = _union("cameras");
+    const columns = _union("state");
+    form.cameras = form.cameras.filter((camera) => cameras.includes(camera));
+    form.state = form.state.filter((column) => columns.includes(column));
+    const name = form.name || check;
+    const live = LABEL_TRAIN_LIVE.has(state.labelTrainJob?.state);
+    const ready = valid && summary.reached > 0 && summary.never + summary.reached > 1
+        && (form.cameras.length || form.state.length) && LABEL_CHECK_NAME.test(name)
+        && !live && !state.labelTrainBusy;
+    const disabled = live || state.labelTrainBusy ? "disabled" : "";
+    panel.innerHTML = `
+        <div class="panel-header"><h3>Train this check</h3></div>
+        <p class="label-bar__hint">${valid
+            ? `Learns <code>${escapeHtml(check)}</code> from ${summary.episodes} labelled episode${summary.episodes === 1 ? "" : "s"} (${summary.reached} reach it, ${summary.never} never), and holds some out to report on.`
+            : "Name the check you are labelling first."}
+            Tight crops on the part help; a force column alone tends to pass early.</p>
+        <div class="label-train__group">
+            <span class="field-label">Cameras</span>
+            ${cameras.map((camera) => `
+                <div class="label-train__camera">
+                    <label class="rollout-eval-check"><input type="checkbox" data-train-camera="${escapeHtml(camera)}" ${
+                        form.cameras.includes(camera) ? "checked" : ""} ${disabled}> ${escapeHtml(camera)}</label>
+                    ${form.cameras.includes(camera) ? `<input class="text-input label-train__crop" data-train-crop="${escapeHtml(camera)}"
+                        placeholder="whole frame, or x0,y0,x1,y1" value="${escapeHtml(form.crops[camera] || "")}" spellcheck="false" autocomplete="off" ${disabled}>` : ""}
+                </div>`).join("") || `<span class="label-bar__hint">The datasets have no cameras.</span>`}
+        </div>
+        <div class="label-train__group">
+            <span class="field-label">State columns</span>
+            <div class="label-train__columns">
+                ${columns.map((column) => `<label class="rollout-eval-check"><input type="checkbox" data-train-state="${escapeHtml(column)}" ${
+                    form.state.includes(column) ? "checked" : ""} ${disabled}> ${escapeHtml(column)}</label>`).join("")}
+            </div>
+        </div>
+        <div class="label-train__actions">
+            <label class="field-label" for="label-train-name">Save as checks/</label>
+            <input class="text-input label-train__name" id="label-train-name" value="${escapeHtml(name)}" spellcheck="false" autocomplete="off" ${disabled}>
+            <button type="button" class="start-button" id="label-train-start" ${ready ? "" : "disabled"}>Train</button>
+        </div>
+        <div id="label-train-status"></div>
+    `;
+    panel.querySelectorAll("[data-train-camera]").forEach((box) => {
+        box.onchange = () => {
+            const camera = box.dataset.trainCamera;
+            form.cameras = box.checked ? [...form.cameras, camera] : form.cameras.filter((c) => c !== camera);
+            _renderLabelTrain();
+        };
+    });
+    panel.querySelectorAll("[data-train-crop]").forEach((field) => {
+        field.oninput = () => { form.crops[field.dataset.trainCrop] = field.value; };
+    });
+    panel.querySelectorAll("[data-train-state]").forEach((box) => {
+        box.onchange = () => {
+            const column = box.dataset.trainState;
+            form.state = box.checked ? [...form.state, column] : form.state.filter((c) => c !== column);
+            _renderLabelTrain();
+        };
+    });
+    const nameField = byId("label-train-name");
+    nameField.oninput = () => {
+        form.name = nameField.value.trim();
+        const start = byId("label-train-start");
+        if (start) start.disabled = !LABEL_CHECK_NAME.test(form.name || check) || !(form.cameras.length || form.state.length)
+            || !valid || live || summary.reached === 0;
+    };
+    byId("label-train-start").onclick = () => startLabelTrain();
+    _renderLabelTrainStatus();
 }
 
 function renderTrainingModePicker(container) {

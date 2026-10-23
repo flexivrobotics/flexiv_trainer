@@ -699,6 +699,16 @@ box given as fractions of the frame (`x0,y0,x1,y1`), and `observation.state`
 columns such as a force axis. Each frame goes through a frozen, pretrained
 image network; only a small head is trained, which takes minutes.
 
+In the web UI, the Labelling Frames page has **Train this check** under the
+label bar. Pick the cameras (with an optional crop each) and state columns,
+name the folder, and press **Train**. It trains on the labels of every loaded
+dataset, in its own process, and shows its progress. When it is done, it shows
+the held-out report: read `false passes` first. The check is saved to
+`<storage>/checks/<name>`, which a plan names as `checks/<name>`.
+`GET /checks` lists the trained checks with their reports.
+
+From the command line:
+
 ```bash
 python -m flexivtrainer.evaluation.learned_check train --check closed \
     --data <dataset> --data <another dataset> --out <storage>/checks/closed \
