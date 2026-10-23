@@ -94,6 +94,8 @@ SKIP = "skip"
 
 #: Tries to replace the record file before leaving it to the next event.
 _WRITE_TRIES = 5
+#: The last events the status carries, for the rollout page.
+_RECENT_EVENTS = 12
 
 
 @dataclass(frozen=True)
@@ -383,6 +385,7 @@ class ChainRunner:
                 "waiting_for_operator": self._waiting,
                 "record": str(self._record_path),
                 "result": self._record["result"],
+                "recent": self._record["events"][-_RECENT_EVENTS:],
             }
 
     # --- the chain ----------------------------------------------------------
