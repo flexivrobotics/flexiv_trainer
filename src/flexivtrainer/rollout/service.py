@@ -29,7 +29,12 @@ from typing import Any
 from flexivtrainer.config import AppSettings, TeleopRobotPair
 from flexivtrainer.data.control_settings import ControlSettings
 from flexivtrainer.data.lerobot_io import active_camera_names
-from flexivtrainer.evaluation.checks import Check, read_ticks, run_checks
+from flexivtrainer.evaluation.checks import (
+    Check,
+    GripperWidth,
+    read_ticks,
+    run_checks,
+)
 from flexivtrainer.evaluation.outcome import (
     DEFAULT_FAILURE_MODES,
     RolloutOutcome,
@@ -74,6 +79,7 @@ from flexivtrainer.rollout.executors.bspline import (
     BSplineActionLayout,
     parse_bspline_action_layout,
 )
+from flexivtrainer.rollout.executors.gripper import initialize_gripper_executor
 from flexivtrainer.rollout.executors.waypoint import (
     build_action_layout,
     canonical_action_names,
@@ -1025,6 +1031,8 @@ class RolloutService:
         for step in plan.steps:
             # Refused here, not mid-chain, when nothing says how stiff to be.
             self._chain_stiffness(plan, skills.get(step.name))
+            if self._chain_reads_jaws(plan, step):
+                self._gripper_configs()
         directory = self._settings.storage.rollouts_root / CHAINS_DIR
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         record = directory / f"{stamp}.json"
@@ -1070,7 +1078,10 @@ class RolloutService:
         started = time.monotonic()
         try:
             live = self._live_checks(
-                checks, self._get_active_sides(), self._get_active_cameras()
+                checks,
+                self._get_active_sides(),
+                self._get_active_cameras(),
+                end_when_all=True,
             )
         except Exception as exc:
             return Outcome(False, "not started", error=describe_exception(exc))
@@ -1090,6 +1101,7 @@ class RolloutService:
             started,
             passed=ended is not None,
             reason="time limit" if timed_out and ended is None else None,
+            live=live,
         )
 
     def _chain_primitive(
@@ -1128,7 +1140,9 @@ class RolloutService:
                 live.stop()
         with self._lock:
             reason = self._stop_reason
-        return self._outcome(started, passed=reason in ("done", "checks passed"))
+        return self._outcome(
+            started, passed=reason in ("done", "checks passed"), live=live
+        )
 
     def _await_runner(self, deadline: float | None) -> bool:
         """Wait for the current rollout to end; stop it at `deadline`, or when
@@ -1145,13 +1159,26 @@ class RolloutService:
         return timed_out
 
     def _outcome(
-        self, started: float, *, passed: bool, reason: str | None = None
+        self,
+        started: float,
+        *,
+        passed: bool,
+        reason: str | None = None,
+        live: LiveChecks | None = None,
     ) -> Outcome:
-        """How the rollout that has just ended went."""
+        """How the rollout that has just ended went. A check that could not be
+        scored makes a failed try an error: trying again would not help."""
         runner, takeover = self._runner, self._takeover
         summary = takeover.summary() if takeover is not None else {}
         with self._lock:
             error, stop_reason = self._error, self._stop_reason
+        if not passed and error is None and live is not None:
+            unscored = [
+                f"check {name!r}: {result['error']}"
+                for name, result in live.summary()["checks"].items()
+                if "error" in result and not result["passed"]
+            ]
+            error = "; ".join(unscored) or None
         return Outcome(
             passed=passed and error is None,
             reason=reason or stop_reason or "stopped",
@@ -1162,6 +1189,32 @@ class RolloutService:
             takeovers=int(summary.get("count", 0)),
             operator_s=float(summary.get("seconds", 0.0)),
         )
+
+    @staticmethod
+    def _chain_reads_jaws(plan: ChainPlan, step: ChainStep) -> bool:
+        """Whether a primitive of `step` moves the jaws, or one of its checks
+        reads them."""
+        primitives = [p for p in (step.primitive, step.back_off) if p is not None]
+        return any(p.moves_jaws for p in primitives) or any(
+            isinstance(plan.checks[name], GripperWidth)
+            for name in (*step.start, *step.end)
+        )
+
+    def _gripper_configs(self) -> dict[str, Any]:
+        """The end effectors, when the one arm has a follower gripper."""
+        configs = dict(self._get_end_effector_config() or {})
+        side = self._get_active_sides()[0]
+        config = configs.get(side)
+        if (
+            config is None
+            or self._config_value(config, "follower") != "gripper"
+            or not self._config_value(config, "gripper_model")
+        ):
+            raise RuntimeError(
+                f"The chain moves or reads the jaws, but no follower gripper is "
+                f"configured for {side}"
+            )
+        return configs
 
     def _chain_stiffness(self, plan: ChainPlan, skill: str | None) -> StiffnessChoice:
         """A back-off or check moves at its skill's stiffness, a primitive step
@@ -1206,6 +1259,10 @@ class RolloutService:
         sides = self._get_active_sides()
         camera_names = self._get_active_cameras()
         safety = SafetyEnvelope.from_settings(self._settings.rollout)
+        jaws = primitive.moves_jaws or (
+            live_checks is not None and live_checks.reads_jaws
+        )
+        configs = self._gripper_configs() if jaws else {}
         self._stop_event = threading.Event()
         robots, lease = self._connect_robots(followers, lend)
         try:
@@ -1229,6 +1286,21 @@ class RolloutService:
                 live_checks=live_checks,
                 check_s=check_s,
                 image_resolutions=image_resolutions,
+                open_gripper=(
+                    partial(
+                        initialize_gripper_executor,
+                        robots,
+                        sides,
+                        configs,
+                        (sides[0],),
+                        failure_event=self._stop_event,
+                        followers=followers,
+                        initialization_registry=(self._gripper_initialization_registry),
+                        append_log=self._append_log,
+                    )
+                    if jaws
+                    else None
+                ),
             )
         except BaseException:
             if lease is not None:
@@ -1435,6 +1507,8 @@ class RolloutService:
         checks: dict[str, Check],
         sides: list[str],
         camera_names: list[str],
+        *,
+        end_when_all: bool = False,
     ) -> LiveChecks:
         """Load `checks` and start scoring them, or refuse the start."""
         live = LiveChecks(
@@ -1445,6 +1519,7 @@ class RolloutService:
                     snapshot, images, sides, camera_names, pose_format, width
                 )
             ),
+            end_when_all=end_when_all,
         )
         try:
             live.start()

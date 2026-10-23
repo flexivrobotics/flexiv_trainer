@@ -21,13 +21,15 @@ control loop does not have, so the planner hands each tick's frames and state
 over and moves on; a worker thread scores the NEWEST tick it was given,
 skipping any that arrived while it was busy.
 
-A box check (`settled_in_box`) needs only the measured pose and velocity, so
-it is scored on the planner's thread, on every tick.
+A box check (`settled_in_box`) needs only the measured pose and velocity, and
+a gripper width check (`gripper_width`) only the jaws' measured width, so these
+are scored on the planner's thread, on every tick.
 
 Each check keeps the offline rule: it passes once it has held for `hold_s`,
 timed by the ticks it scored -- a learned check's probability at or above its
-threshold, a box check's tool inside the box and nearly still. A check with
-`end_on_pass` ends the rollout when it passes, as the end of a skill.
+threshold, a box check's tool inside the box and nearly still, a width check's
+jaws inside their band. A check with `end_on_pass` ends the rollout when it
+passes, as the end of a skill; with `end_when_all`, once every such check has.
 
 The probabilities are written into each tick of the recording -- the newest
 one scored, so about a tick behind the frame it is written beside. The verdict
@@ -44,7 +46,12 @@ from typing import Any
 
 import numpy as np
 
-from flexivtrainer.evaluation.checks import Check, LearnedCheck, SettledInBox
+from flexivtrainer.evaluation.checks import (
+    Check,
+    GripperWidth,
+    LearnedCheck,
+    SettledInBox,
+)
 from flexivtrainer.observability import describe_exception, warn
 
 __all__ = ["LiveChecks"]
@@ -71,10 +78,13 @@ class LiveChecks:
         *,
         state_names: Any,
         loader: Any = None,
+        end_when_all: bool = False,
     ) -> None:
         """`state_names(snapshot, images, pose_format, width)` names the columns
         of the state vector the planner hands over, as the recording names them.
-        `loader` loads a check's model (the default reads its folder)."""
+        `loader` loads a check's model (the default reads its folder).
+        `end_when_all` ends the rollout only once every `end_on_pass` check has
+        passed, rather than the first."""
         if loader is None:
             from flexivtrainer.evaluation.learned_check import (  # noqa: PLC0415
                 load_model as loader,
@@ -90,6 +100,12 @@ class LiveChecks:
             for name, check in self._checks.items()
             if isinstance(check, SettledInBox)
         }
+        self._jaws = {
+            name: check
+            for name, check in self._checks.items()
+            if isinstance(check, GripperWidth)
+        }
+        self._end_when_all = end_when_all
         # Each box check's last sample, for a speed when the tick carries none.
         self._previous: dict[str, tuple[float, list[float]]] = {}
         self._storage_root = storage_root
@@ -112,9 +128,14 @@ class LiveChecks:
 
     @property
     def needs_frames(self) -> bool:
-        """Whether a check reads camera frames and the state vector; box
-        checks read only the measured pose."""
+        """Whether a check reads camera frames and the state vector; box and
+        width checks read only the arm's and the jaws' measurements."""
         return bool(self._learned)
+
+    @property
+    def reads_jaws(self) -> bool:
+        """Whether a check reads the jaws' width."""
+        return bool(self._jaws)
 
     # --- the service's side ----------------------------------------------------
 
@@ -158,8 +179,8 @@ class LiveChecks:
         pose_format: str,
     ) -> None:
         """Hand over one tick. Never blocks; replaces a tick not yet scored."""
-        if self._boxes:
-            self._score_boxes(float(t), snapshot)
+        if self._boxes or self._jaws:
+            self._score_measured(float(t), snapshot)
         if not self._learned:
             return
         item = {
@@ -186,12 +207,14 @@ class LiveChecks:
             }
 
     def ended(self) -> str | None:
-        """The first check marked `end_on_pass` that has passed, if any."""
+        """The first check marked `end_on_pass` that has passed, if any; with
+        `end_when_all`, all of them, once all have."""
         with self._lock:
-            for name, check in self._checks.items():
-                if check.end_on_pass and self._held[name].first_at is not None:
-                    return name
-        return None
+            ends = [n for n, check in self._checks.items() if check.end_on_pass]
+            passed = [n for n in ends if self._held[n].first_at is not None]
+        if self._end_when_all:
+            return ", ".join(ends) if ends and passed == ends else None
+        return passed[0] if passed else None
 
     def all_passed(self) -> bool:
         """Whether every check has passed."""
@@ -215,10 +238,19 @@ class LiveChecks:
             }
             return {"checks": checks, "scored": self.scored, "skipped": self.skipped}
 
-    def _score_boxes(self, t: float, snapshot: dict[str, Any]) -> None:
+    def _score_measured(self, t: float, snapshot: dict[str, Any]) -> None:
         robots = snapshot.get("robots") if isinstance(snapshot, dict) else None
         arms = list((robots or {}).values())
         with self._lock:
+            for name, jaws in self._jaws.items():
+                held = self._held[name]
+                width = jaws.width(arms[jaws.arm]) if jaws.arm < len(arms) else None
+                if width is None:
+                    held.error = "the jaws are not read in this rollout"
+                    continue
+                inside = jaws.holds(width)
+                held.p, held.t, held.error = float(inside), t, None
+                _hold(held, jaws, t, inside)
             for name, check in self._boxes.items():
                 states = (
                     arms[check.arm].get("states") if check.arm < len(arms) else None
