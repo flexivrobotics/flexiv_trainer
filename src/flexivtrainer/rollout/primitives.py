@@ -15,7 +15,7 @@
 """Generic moves of the tool, the primitives a chain is built from.
 
 A primitive knows nothing of the task. It moves the tool in straight lines,
-each one of:
+and the jaws, each move one of:
 
     {"tool_m": [0, 0, -0.02]}       by an offset in the tool's own frame
     {"base_m": [0, 0, 0.03]}        by an offset in the arm's base frame
@@ -23,10 +23,18 @@ each one of:
                                     into a box in the base frame, to the point
                                     of it nearest the tool (a point, when the
                                     corners are equal)
+    {"gripper_m": 0.08}             the jaws to a width (0: closed as far as
+                                    they go)
 
-A move may also turn the tool to an orientation (`rotation`, [qw, qx, qy, qz])
-and set its own speed. Each is sent once, slowly, with every axis
+A tool move may also turn the tool to an orientation (`rotation`, [qw, qx, qy,
+qz]) and set its own speed. Each is sent once, slowly, with every axis
 motion-controlled, and the arm is read until it is there.
+
+A jaw move may set its speed (`gripper_speed_m_s`) and the force it grips with
+(`gripper_force_n`); the defaults are the gripper's, as in a rollout. It is
+sent once, and the jaws are read until they stop: at the width, or closed on
+something, which a `gripper_width` check then tells apart. The arm holds still
+meanwhile.
 
 A FORCE LIMIT STOPS A PRIMITIVE. One that meets more force than its
 `max_force_n` -- a part half latched, a jam -- holds where it is and gives up
@@ -62,11 +70,17 @@ __all__ = [
     "MoveInterrupted",
     "Primitive",
     "PrimitiveRunner",
+    "move_jaws",
     "move_tool",
 ]
 
 #: How often a primitive reads the arm while it waits (Hz).
 _READ_HZ = 50.0
+#: The jaws are at their width within this (m) ...
+_JAW_TOLERANCE_M = 0.0005
+#: ... or have stopped, once they move less than this (m) for this long (s).
+_JAW_STILL_M = 0.0002
+_JAW_SETTLE_S = 0.3
 
 
 class MoveInterrupted(RuntimeError):
@@ -102,8 +116,8 @@ def _positive(value: Any, name: str) -> float:
 
 @dataclass(frozen=True)
 class Move:
-    """One straight move of the tool: exactly one of `tool_m`, `base_m`, or
-    the box `box_min_m`..`box_max_m` (see the module's docstring)."""
+    """One move: exactly one of `tool_m`, `base_m`, the box
+    `box_min_m`..`box_max_m`, or `gripper_m` (see the module's docstring)."""
 
     tool_m: tuple[float, float, float] | None = None
     base_m: tuple[float, float, float] | None = None
@@ -112,6 +126,10 @@ class Move:
     #: The tool's orientation at the end, [qw, qx, qy, qz]; None keeps it.
     rotation: tuple[float, float, float, float] | None = None
     speed_m_s: float = 0.02
+    #: The jaws' width (m), and how they get there; None: the gripper's own.
+    gripper_m: float | None = None
+    gripper_speed_m_s: float | None = None
+    gripper_force_n: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("tool_m", "base_m", "box_min_m", "box_max_m"):
@@ -124,9 +142,23 @@ class Move:
             self.tool_m is not None,
             self.base_m is not None,
             self.box_min_m is not None,
+            self.gripper_m is not None,
         ]
         if sum(given) != 1:
-            raise ValueError("a move is one of tool_m, base_m or a box")
+            raise ValueError("a move is one of tool_m, base_m, a box or gripper_m")
+        if self.gripper_m is not None:
+            width = float(self.gripper_m)
+            if not (math.isfinite(width) and width >= 0):
+                raise ValueError(f"gripper_m must be 0 or more, got {self.gripper_m!r}")
+            object.__setattr__(self, "gripper_m", width)
+            if self.rotation is not None:
+                raise ValueError("a jaw move does not turn the tool")
+        for name in ("gripper_speed_m_s", "gripper_force_n"):
+            value = getattr(self, name)
+            if value is not None:
+                if self.gripper_m is None:
+                    raise ValueError(f"{name} belongs to a jaw move (gripper_m)")
+                object.__setattr__(self, name, _positive(value, name))
         if self.box_min_m is not None and any(
             a > b for a, b in zip(self.box_min_m, self.box_max_m, strict=True)
         ):
@@ -161,7 +193,13 @@ class Move:
         w, x, y, z = self.rotation
         return position, Rotation.from_quat([x, y, z, w]).as_matrix()
 
+    @property
+    def moves_jaws(self) -> bool:
+        return self.gripper_m is not None
+
     def describe(self) -> str:
+        if self.gripper_m is not None:
+            return f"moved the jaws to {self.gripper_m * 1000:g} mm"
         if self.tool_m is not None:
             return f"moved {_mm(self.tool_m)} in the tool frame"
         if self.base_m is not None:
@@ -193,6 +231,10 @@ class Primitive:
             _positive(self.max_force_n, "max_force_n")
         for name in ("tolerance_m", "tolerance_deg", "timeout_s"):
             _positive(getattr(self, name), name)
+
+    @property
+    def moves_jaws(self) -> bool:
+        return any(move.moves_jaws for move in self.moves)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Primitive:
@@ -258,6 +300,53 @@ def move_tool(
         stop.wait(1.0 / _READ_HZ)
 
 
+def move_jaws(
+    gripper: Any,
+    side: str,
+    move: Move,
+    *,
+    stop: threading.Event,
+    timeout_s: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> float:
+    """Send the jaws toward `move`'s width once, through the gripper executor
+    (`executors/gripper.py`), and read them until they stop: at the width, or
+    closed on something. Returns the width they stopped at."""
+    assert move.gripper_m is not None
+    target, _, _ = gripper.move_now(
+        side,
+        move.gripper_m,
+        velocity=move.gripper_speed_m_s,
+        force=move.gripper_force_n,
+    )
+    started = clock()
+    last: float | None = None
+    still_since: float | None = None
+    while not stop.is_set():
+        now = clock()
+        width = float(gripper.read_states()[side]["width"])
+        if abs(width - target) <= _JAW_TOLERANCE_M:
+            return width
+        if last is not None and abs(width - last) < _JAW_STILL_M:
+            still_since = now if still_since is None else still_since
+        else:
+            still_since = None
+        last = width
+        if (
+            still_since is not None
+            and now - still_since >= _JAW_SETTLE_S
+            and gripper.moving(side) is not True
+        ):
+            return width
+        if now - started > timeout_s:
+            raise RuntimeError(
+                f"the jaws did not stop within {timeout_s:g} s: at "
+                f"{width * 1000:.1f} mm, heading for {target * 1000:.1f} mm"
+            )
+        stop.wait(1.0 / _READ_HZ)
+    return last if last is not None else target
+
+
 class PrimitiveRunner:
     """Own the thread that runs one primitive on one arm.
 
@@ -289,7 +378,10 @@ class PrimitiveRunner:
         live_checks: LiveChecks | None = None,
         check_s: float = 1.0,
         image_resolutions: dict[str, tuple[int, int]] | None = None,
+        open_gripper: Callable[[], Any] | None = None,
     ) -> None:
+        """`open_gripper` prepares the arm's gripper executor, while the arm
+        is idle; given when the primitive moves the jaws or a check reads them."""
         if len(robots) != 1 or len(sides) != 1 or len(followers) != 1:
             raise ValueError(
                 f"a primitive moves one arm; {len(robots)} are configured "
@@ -313,6 +405,10 @@ class PrimitiveRunner:
         self._live_checks = live_checks or None
         self._check_s = check_s
         self._image_resolutions = image_resolutions
+        if primitive.moves_jaws and open_gripper is None:
+            raise ValueError("the primitive moves the jaws, but has no gripper")
+        self._side = sides[0]
+        self._gripper: Any = None
         #: Set when a move met more than the force limit: {"force_n", "limit_n"}.
         self.blocked: dict[str, float] | None = None
         #: Set when the envelope stopped it: {"code", "detail"}.
@@ -320,6 +416,9 @@ class PrimitiveRunner:
         self._stop_reason: str | None = None
         self._thread: threading.Thread | None = None
         try:
+            if open_gripper is not None:
+                # Before the mode switch: a gripper is prepared while idle.
+                self._gripper = open_gripper()
             # Every axis motion-controlled, and the force sensor left as it
             # is: a back-off starts in contact, where zeroing would offset it.
             hardware.prepare_robot_motion(
@@ -333,6 +432,8 @@ class PrimitiveRunner:
                 force_axes=(False,) * 6,
             )
         except Exception as exc:
+            if self._gripper is not None:
+                self._gripper.stop()
             stop_robots(robots)
             raise RuntimeError(
                 f"Failed to prepare the arm for a primitive: {describe_exception(exc)}"
@@ -367,6 +468,16 @@ class PrimitiveRunner:
             for move in primitive.moves:
                 if self._stop_event.is_set():
                     break
+                if move.moves_jaws:
+                    move_jaws(
+                        self._gripper,
+                        self._side,
+                        move,
+                        stop=self._stop_event,
+                        timeout_s=primitive.timeout_s,
+                    )
+                    done += 1
+                    continue
                 position, rotation = move.target(self._read())
                 move_tool(
                     position,
@@ -406,6 +517,8 @@ class PrimitiveRunner:
         finally:
             self._stop_event.set()
             try:
+                if self._gripper is not None:
+                    self._gripper.stop()
                 self._release_robots()
             except Exception as exc:  # pragma: no cover - defensive
                 self._on_cleanup_error(describe_exception(exc))
@@ -458,7 +571,11 @@ class PrimitiveRunner:
     def _snapshot(self) -> dict[str, Any]:
         if self._robot.fault():
             raise RuntimeError("Fault occurred on the follower robot")
-        snapshot = observations.read_robot_snapshot([self._robot])
+        snapshot = observations.read_robot_snapshot(
+            [self._robot],
+            self._gripper.read_states() if self._gripper is not None else None,
+            self._sides,
+        )
         states = snapshot["robots"]["robot_0"]["states"]
         self._safety.check_force([states["ext_wrench_in_world"]])
         return snapshot

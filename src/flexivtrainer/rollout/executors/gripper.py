@@ -333,6 +333,49 @@ class GripperExecutor:
                 )
             return {side: dict(self._measured[side]) for side in self._controlled_sides}
 
+    def read_states(self) -> dict[str, dict[str, float]]:
+        """Read every gripper now; its measured width and force, by side."""
+        self._refresh_states()
+        return self.measured_states()
+
+    def move_now(
+        self,
+        side: str,
+        width: float,
+        *,
+        velocity: float | None = None,
+        force: float | None = None,
+    ) -> tuple[float, float, float]:
+        """Move one gripper now, outside the stream of policy targets: for a
+        primitive. Each value is held to the gripper's own range (the width's
+        "fully closed" is its smallest), and the defaults are the stream's.
+        Returns the width, velocity and force sent."""
+        params = self._params[side]
+        default_velocity, default_force = self._move_parameters(side)
+        width = _clamp(float(width), float(params.min_width), float(params.max_width))
+        velocity = _clamp(
+            default_velocity if velocity is None else float(velocity),
+            float(params.min_vel),
+            float(params.max_vel),
+        )
+        force = _clamp(
+            default_force if force is None else float(force),
+            float(params.min_force),
+            float(params.max_force),
+        )
+        with self._io_locks[side]:
+            self._grippers[side].Move(width, velocity, force)
+        self._last_sent[side] = width
+        return width, velocity, force
+
+    def moving(self, side: str) -> bool | None:
+        """Whether the gripper reports its fingers moving; None if it does not
+        say."""
+        with self._io_locks[side]:
+            state = self._grippers[side].states()
+        moving = getattr(state, "is_moving", None)
+        return None if moving is None else bool(moving)
+
     def submit(self, targets: Mapping[str, float]) -> None:
         """Replace pending policy targets without waiting for hardware I/O."""
         updates: dict[str, float] = {}

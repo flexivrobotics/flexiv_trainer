@@ -36,8 +36,9 @@ runs, and an end check, which ends it when it passes:
     }
 
 `checks` are declared as in an evaluation session (evaluation/checks.py). A
+step's `start` or `end` may also name several checks, which must all pass. A
 skill step needs an end check: nothing else says it is done. A primitive step
-is done when its moves are, and its end check, if any, has then passed.
+is done when its moves are, and its end checks, if any, have then passed.
 
 THE RETRY RULE. A step fails when its end check has not passed within `max_s`
 (or its primitive did not finish). Then:
@@ -104,9 +105,10 @@ class ChainStep:
     skill: str | None = None
     task: str | None = None
     primitive: Primitive | None = None
-    #: Checks, by name in the plan's `checks`.
-    start: str | None = None
-    end: str | None = None
+    #: Checks, by name in the plan's `checks`: one name or several, which must
+    #: all pass.
+    start: tuple[str, ...] = ()
+    end: tuple[str, ...] = ()
     #: How long one try may run (s).
     max_s: float = 60.0
     #: Tries before the operator is called.
@@ -121,7 +123,9 @@ class ChainStep:
             )
         if (self.skill is None) == (self.primitive is None):
             raise ValueError(f"step {self.name!r} is one skill or one primitive")
-        if self.skill is not None and self.end is None:
+        for role in ("start", "end"):
+            object.__setattr__(self, role, _names(getattr(self, role), role))
+        if self.skill is not None and not self.end:
             raise ValueError(
                 f"step {self.name!r} runs a skill, so it needs an end check: "
                 "nothing else says it is done"
@@ -175,12 +179,12 @@ class ChainPlan:
             raise ValueError(f"step names repeat: {names}")
         for step in self.steps:
             for role in ("start", "end"):
-                name = getattr(step, role)
-                if name is not None and name not in self.checks:
-                    raise ValueError(
-                        f"step {step.name!r}: its {role} check {name!r} is not "
-                        f"one of the plan's checks {sorted(self.checks)}"
-                    )
+                for name in getattr(step, role):
+                    if name not in self.checks:
+                        raise ValueError(
+                            f"step {step.name!r}: its {role} check {name!r} is not "
+                            f"one of the plan's checks {sorted(self.checks)}"
+                        )
         if self.stiffness is not None:
             values = tuple(float(v) for v in self.stiffness)
             if len(values) != 6 or not all(math.isfinite(v) for v in values):
@@ -208,13 +212,34 @@ class ChainPlan:
             about=str(data.get("about", "")),
         )
 
-    def live(self, name: str) -> dict[str, Check]:
-        """Check `name`, scored on every tick and ending its rollout on a pass."""
-        return {name: replace(self.checks[name], live=True, end_on_pass=True)}
+    def live(self, names: tuple[str, ...]) -> dict[str, Check]:
+        """Checks `names`, scored on every tick; their rollout ends once all
+        have passed."""
+        return {
+            name: replace(self.checks[name], live=True, end_on_pass=True)
+            for name in names
+        }
 
-    def watch_s(self, name: str) -> float:
-        """How long to watch check `name` for it to pass."""
-        return self.check_s + float(self.checks[name].hold_s)
+    def watch_s(self, names: tuple[str, ...]) -> float:
+        """How long to watch checks `names` for all of them to pass."""
+        return self.check_s + max(float(self.checks[n].hold_s) for n in names)
+
+
+def _names(value: Any, role: str) -> tuple[str, ...]:
+    """A step's checks, given as a name, a list of names, or none."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple) and all(isinstance(v, str) for v in value):
+        if len(set(value)) != len(value):
+            raise ValueError(f"{role} names a check twice: {list(value)}")
+        return tuple(value)
+    raise ValueError(f"{role} is a check's name, or a list of them")
+
+
+def _quoted(names: tuple[str, ...]) -> str:
+    return ", ".join(repr(name) for name in names)
 
 
 @dataclass(frozen=True)
@@ -260,7 +285,7 @@ class Outcome:
         return self.reason
 
 
-#: Runs one try of a skill step: (step, its end check) -> how it ended.
+#: Runs one try of a skill step: (step, its end checks) -> how it ended.
 RunSkill = Callable[[ChainStep, dict[str, Check]], Outcome]
 #: Runs a primitive on behalf of a step, then watches `checks` for `watch_s`:
 #: (primitive or None for checks only, checks, watch_s, step) -> how it ended.
@@ -398,12 +423,15 @@ class ChainRunner:
         """Run `step` under the retry rule; None when it passed, else why the
         operator is needed."""
         self._check_stop()
-        if step.start is not None:
+        if step.start:
             self._set(step, "checking", 0)
             outcome = self._checks_only(step, step.start)
             self._event(step, "start check", outcome=outcome)
             if not outcome.passed:
-                return f"its start check {step.start!r} did not pass: {outcome.why()}"
+                return (
+                    f"its start check {_quoted(step.start)} did not pass: "
+                    f"{outcome.why()}"
+                )
         for k in range(1, step.tries + 1):
             self._set(step, "running", k)
             outcome = self._try_step(step)
@@ -428,33 +456,35 @@ class ChainRunner:
 
     def _try_step(self, step: ChainStep) -> Outcome:
         if step.skill is not None:
-            assert step.end is not None
             return self._run_skill(step, self._plan.live(step.end))
-        checks = self._plan.live(step.end) if step.end is not None else {}
-        watch = self._plan.watch_s(step.end) if step.end is not None else 0.0
+        checks = self._plan.live(step.end) if step.end else {}
+        watch = self._plan.watch_s(step.end) if step.end else 0.0
         return self._run_primitive(step.primitive, checks, watch, step)
 
     def _back_off(self, step: ChainStep) -> str | None:
         """Back to where `step` starts; None when it got there."""
-        if step.back_off is None and step.start is None:
+        if step.back_off is None and not step.start:
             return None
         self._set(step, "backing off", self._try)
-        checks = self._plan.live(step.start) if step.start is not None else {}
-        watch = self._plan.watch_s(step.start) if step.start is not None else 0.0
+        checks = self._plan.live(step.start) if step.start else {}
+        watch = self._plan.watch_s(step.start) if step.start else 0.0
         outcome = self._run_primitive(step.back_off, checks, watch, step)
         self._event(step, "back-off", outcome=outcome)
         self._check_stop()
         if outcome.blocked is not None:
             return outcome.why()
         if not outcome.passed:
-            if step.start is not None and outcome.reason == "check failed":
-                return f"after the back-off its start check {step.start!r} did not pass"
+            if step.start and outcome.reason == "check failed":
+                return (
+                    f"after the back-off its start check {_quoted(step.start)} "
+                    "did not pass"
+                )
             return f"the back-off did not finish: {outcome.why()}"
         return None
 
-    def _checks_only(self, step: ChainStep, name: str) -> Outcome:
+    def _checks_only(self, step: ChainStep, names: tuple[str, ...]) -> Outcome:
         return self._run_primitive(
-            None, self._plan.live(name), self._plan.watch_s(name), step
+            None, self._plan.live(names), self._plan.watch_s(names), step
         )
 
     def _wait_for_operator(self, step: ChainStep, why: str) -> str:

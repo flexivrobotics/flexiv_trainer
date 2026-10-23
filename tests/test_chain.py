@@ -21,17 +21,25 @@ from test_step_rollout import (
 from waits import WAIT_S
 
 from flexivtrainer.api.app import create_app
-from flexivtrainer.evaluation.checks import SettledInBox, parse_checks
+from flexivtrainer.evaluation.checks import (
+    GripperWidth,
+    SettledInBox,
+    parse_checks,
+    run_checks,
+)
 from flexivtrainer.practice.space import Sample
 from flexivtrainer.rollout.chain import ChainPlan, ChainRunner, Outcome
+from flexivtrainer.rollout.executors.gripper import GripperExecutor
 from flexivtrainer.rollout.live_checks import LiveChecks
 from flexivtrainer.rollout.primitives import (
     Move,
     MoveBlocked,
     MoveInterrupted,
     Primitive,
+    move_jaws,
     move_tool,
 )
+from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 from flexivtrainer.runtime.manager import get_runtime_manager
 
 # --- the plan -------------------------------------------------------------------
@@ -69,10 +77,11 @@ def test_a_plan_names_its_steps_and_their_checks():
         moves=(Move(tool_m=(0.0, 0.0, -0.02)),), max_force_n=25
     )
     assert lift.primitive.moves[0].base_m == (0.0, 0.0, 0.05)
+    assert insert.start == ("ready",) and insert.end == ("home",)
     # An end check is scored on every tick, and ends its rollout.
-    (check,) = plan.live("home").values()
+    (check,) = plan.live(("home",)).values()
     assert check.live and check.end_on_pass
-    assert plan.watch_s("ready") == pytest.approx(1.0 + 0.5)
+    assert plan.watch_s(("ready",)) == pytest.approx(1.0 + 0.5)
 
 
 @pytest.mark.parametrize(
@@ -95,12 +104,34 @@ def test_a_plan_names_its_steps_and_their_checks():
                     },
                 }
             ],
-            "one of tool_m, base_m or a box",
+            "one of tool_m, base_m, a box or gripper_m",
         ),
         (
             [{"name": "a", "primitive": {"moves": [{"box_min_m": [0, 0, 0]}]}}],
             "both box_min_m and box_max_m",
         ),
+        (
+            [
+                {
+                    "name": "a",
+                    "primitive": {"moves": [{"gripper_m": 0, "rotation": DOWN}]},
+                }
+            ],
+            "does not turn the tool",
+        ),
+        (
+            [
+                {
+                    "name": "a",
+                    "primitive": {
+                        "moves": [{"base_m": [0, 0, 1], "gripper_force_n": 5}]
+                    },
+                }
+            ],
+            "belongs to a jaw move",
+        ),
+        ([{"name": "a", "primitive": {}, "end": ["ready", "ready"]}], "twice"),
+        ([{"name": "a", "primitive": {}, "end": 3}], "a check's name, or a list"),
         ([{"name": "a", "primitive": {}}, {"name": "a", "primitive": {}}], "repeat"),
         ([], "at least one step"),
     ],
@@ -241,6 +272,185 @@ def test_a_session_check_of_either_kind_can_be_scored_live():
     assert checks["ready"].scored_live
     with pytest.raises(ValueError, match="end_on_pass must be true or false"):
         parse_checks({"ready": {**BOX, "end_on_pass": "yes"}})
+
+
+def _live(checks, **options):
+    live = LiveChecks(checks, None, state_names=None, loader=lambda p: None, **options)
+    live.start()
+    return live
+
+
+def _jaw_snapshot(width):
+    snapshot = _snapshot(START[:3])
+    if width is not None:
+        snapshot["robots"]["robot_0"]["gripper"] = {"width": width, "force": 0.0}
+    return snapshot
+
+
+def test_a_gripper_width_check_passes_once_the_jaws_stay_in_their_band():
+    holding = GripperWidth(min_m=0.010, max_m=0.014, hold_s=0.1, end_on_pass=True)
+    ticks = [
+        {"t": t, "measured": [{"gripper": {"width": w}}]}
+        for t, w in [(0.0, 0.05), (0.1, 0.012), (0.2, 0.0121), (0.3, 0.011)]
+    ]
+    result = run_checks({"holding": holding}, ticks)["holding"]
+    assert result["passed"] and result["first_at_s"] == 0.1
+    # Where the jaws were not read, it cannot be scored.
+    unread = [{"t": 0.0, "measured": [{}]}]
+    assert run_checks({"holding": holding}, unread)["holding"] == {
+        "kind": "gripper_width",
+        "error": "the jaws were not read",
+    }
+    live = _live({"holding": holding})
+    assert not live.needs_frames and live.reads_jaws
+    for t, width in [(0.0, 0.05), (0.1, 0.012), (0.25, 0.012)]:
+        live.submit(
+            t=t, state=[], images={}, snapshot=_jaw_snapshot(width), pose_format="r"
+        )
+    assert live.ended() == "holding"
+    live.reset()
+    live.submit(
+        t=0.0, state=[], images={}, snapshot=_jaw_snapshot(None), pose_format="r"
+    )
+    assert live.summary()["checks"]["holding"]["error"] == (
+        "the jaws are not read in this rollout"
+    )
+    live.stop()
+
+
+def test_a_step_with_several_end_checks_ends_once_all_have_passed():
+    near = SettledInBox(
+        box_min_m=(0.3, -1, 0), box_max_m=(0.5, 1, 1), hold_s=0.01, end_on_pass=True
+    )
+    open_ = GripperWidth(min_m=0.07, max_m=0.1, hold_s=0.0, end_on_pass=True)
+    live = _live({"near": near, "open": open_}, end_when_all=True)
+    live.submit(
+        t=0.0, state=[], images={}, snapshot=_jaw_snapshot(0.01), pose_format="r"
+    )
+    assert live.ended() is None
+    live.submit(
+        t=0.1, state=[], images={}, snapshot=_jaw_snapshot(0.08), pose_format="r"
+    )
+    assert live.ended() == "near, open"
+    live.stop()
+
+
+# --- the jaws ---------------------------------------------------------------------
+
+
+class _Jaws:
+    """A gripper whose jaws reach their target at once, unless a part between
+    them stops them closing; `creep` keeps them moving."""
+
+    def __init__(self, *, part_m=None, creep=False):
+        self.width = 0.05
+        self.part_m = part_m
+        self.creep = creep
+        self.moves = []
+        self.inits = 0
+
+    def Enable(self, model):  # noqa: N802 - RDK API names
+        self.model = model
+
+    def Init(self):  # noqa: N802
+        self.inits += 1
+
+    def params(self):
+        return SimpleNamespace(
+            min_width=0.0,
+            max_width=0.1,
+            min_vel=0.01,
+            max_vel=0.2,
+            min_force=5.0,
+            max_force=80.0,
+        )
+
+    def Move(self, width, velocity, force):  # noqa: N802
+        self.moves.append((width, velocity, force))
+        stop = self.part_m if self.part_m is not None and width < self.part_m else width
+        self.width = stop
+
+    def states(self):
+        if self.creep:
+            self.width -= 0.001
+        return SimpleNamespace(width=self.width, force=0.0, is_moving=self.creep)
+
+
+class _Tool:
+    def Switch(self, model):  # noqa: N802
+        pass
+
+
+class _IdleArm(_Arm):
+    """The fake follower, with the mode a gripper is prepared in."""
+
+    def __init__(self):
+        super().__init__()
+        self.current_mode = "IDLE"
+
+    def mode(self):
+        return self.current_mode
+
+    def SwitchMode(self, mode):  # noqa: N802
+        super().SwitchMode(mode)
+        self.current_mode = mode
+
+    def Stop(self):  # noqa: N802
+        self.current_mode = "IDLE"
+
+
+GRIPPER = {"single_arm": {"follower": "gripper", "gripper_model": "Flexiv-GN01"}}
+
+
+def _executor(jaws):
+    executor = GripperExecutor(
+        [_IdleArm()],
+        ["single_arm"],
+        GRIPPER,
+        ["single_arm"],
+        gripper_factory=lambda robot: jaws,
+        tool_factory=lambda robot: _Tool(),
+        idle_mode="IDLE",
+    )
+    executor.initialize()
+    return executor
+
+
+def test_the_jaws_move_once_and_are_read_until_they_stop():
+    jaws = _Jaws(part_m=0.012)
+    executor = _executor(jaws)
+    stop = threading.Event()
+    # Open: at the width at once, with the gripper's own speed and a quarter
+    # of its force.
+    assert move_jaws(
+        executor, "single_arm", Move(gripper_m=0.08), stop=stop, timeout_s=5
+    ) == pytest.approx(0.08)
+    assert jaws.moves == [(0.08, 0.2, 20.0)]
+    # Close on a part: they stop at its width, still, and are taken as done.
+    started = time.monotonic()
+    width = move_jaws(
+        executor,
+        "single_arm",
+        Move(gripper_m=0.0, gripper_speed_m_s=0.05, gripper_force_n=200),
+        stop=stop,
+        timeout_s=5,
+    )
+    assert width == pytest.approx(0.012)
+    assert time.monotonic() - started >= 0.3
+    # The force is held to the gripper's range.
+    assert jaws.moves[-1] == (0.0, 0.05, 80.0)
+
+
+def test_jaws_that_never_stop_fail_their_move():
+    executor = _executor(_Jaws(creep=True))
+    with pytest.raises(RuntimeError, match="the jaws did not stop within 0.1 s"):
+        move_jaws(
+            executor,
+            "single_arm",
+            Move(gripper_m=0.0),
+            stop=threading.Event(),
+            timeout_s=0.1,
+        )
 
 
 # --- the retry rule, with stand-in rollouts -------------------------------------------
@@ -530,6 +740,113 @@ def test_a_skill_out_of_time_backs_off_and_a_jam_calls_the_operator(tmp_path, rd
     chain.join(WAIT_S)
     assert service.status()["chain"]["state"] == "stopped"
     assert service.status()["status"] == "idle"
+
+
+def test_a_chain_picks_and_releases_with_the_jaws(tmp_path, rdk, monkeypatch):  # noqa: F811
+    jaws = _Jaws(part_m=0.012)
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.executors.gripper.flexivrdk",
+        SimpleNamespace(
+            Gripper=lambda robot: jaws,
+            Tool=lambda robot: _Tool(),
+            Mode=SimpleNamespace(IDLE="IDLE"),
+        ),
+    )
+    monkeypatch.setattr(GripperExecutor, "INIT_SETTLE_S", 0.01)
+    arm = _IdleArm()
+    service, _ = _service(tmp_path, arm)
+    service._get_end_effector_config = lambda: GRIPPER
+    service._gripper_initialization_registry = GripperInitializationRegistry()
+    jaw_check = {"kind": "gripper_width", "hold_s": 0.02}
+    chain = _run_chain(
+        service,
+        {
+            "steps": [
+                {
+                    "name": "pick",
+                    "primitive": {
+                        "moves": [
+                            {"gripper_m": 0.08},
+                            {"base_m": [0, 0, -0.02]},
+                            {"gripper_m": 0, "gripper_force_n": 30},
+                            {"base_m": [0, 0, 0.02]},
+                        ]
+                    },
+                    "end": "holding",
+                },
+                {
+                    "name": "release",
+                    "primitive": {
+                        "moves": [{"gripper_m": 0.08}, {"base_m": [0, 0, 0.03]}]
+                    },
+                    "end": ["open", "clear"],
+                },
+            ],
+            "checks": {
+                "holding": {**jaw_check, "min_m": 0.010, "max_m": 0.014},
+                "open": {**jaw_check, "min_m": 0.07, "max_m": 0.1},
+                "clear": {**_ready(), "box_min_m": [0.3, -0.1, 0.325]},
+            },
+        },
+    )
+    chain.join(WAIT_S)
+    status = service.status()
+    assert status["chain"]["state"] == "done", status["logs"][-5:]
+    assert [m[0] for m in jaws.moves] == [0.08, 0.0, 0.08]
+    assert jaws.moves[1][2] == 30.0
+    # Initialised once in the session, though each step prepared the gripper.
+    assert jaws.inits == 1
+    assert arm.pose[2] == pytest.approx(0.33)
+    record = json.loads(Path(status["chain"]["record"]).read_text())
+    assert [e["outcome"]["reason"] for e in record["events"]] == ["checks passed"] * 2
+
+
+def test_an_end_check_the_skill_cannot_score_calls_the_operator_at_once(
+    tmp_path,
+    rdk,  # noqa: F811
+):
+    # A step skill does not read the jaws, so their check cannot pass.
+    service, _ = _service(tmp_path, _Arm())
+    service._get_end_effector_config = lambda: GRIPPER
+    chain = _run_chain(
+        service,
+        {
+            "steps": [
+                {
+                    "name": "grip",
+                    "skill": _skill(tmp_path),
+                    "end": "holding",
+                    "max_s": 0.2,
+                    "tries": 3,
+                }
+            ],
+            "checks": {
+                "holding": {"kind": "gripper_width", "min_m": 0.01, "max_m": 0.014}
+            },
+        },
+    )
+    _until(
+        lambda: service.status()["chain"]["waiting_for_operator"],
+        "the operator is called",
+    )
+    assert service.status()["chain"]["waiting_for_operator"] == (
+        "grip: try 1 stopped: check 'holding': the jaws are not read in this rollout"
+    )
+    service.stop()
+    chain.join(WAIT_S)
+
+
+def test_a_chain_that_needs_the_jaws_needs_a_gripper(tmp_path, rdk):  # noqa: F811
+    service, _ = _service(tmp_path, _Arm())
+    with pytest.raises(RuntimeError, match="no follower gripper is configured"):
+        _run_chain(
+            service,
+            {
+                "steps": [
+                    {"name": "open", "primitive": {"moves": [{"gripper_m": 0.08}]}}
+                ]
+            },
+        )
 
 
 def test_a_chain_refuses_a_skill_that_is_not_there(tmp_path, rdk):  # noqa: F811

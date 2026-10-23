@@ -636,6 +636,17 @@ is the first. A box check can also act while a trial runs, with `live` and
 `end_on_pass` as a learned check does (next section); it is then scored from
 the measured pose on every tick.
 
+`gripper_width` asks whether the jaws hold something of a given size, or stand
+open: their measured width stays between `min_m` and `max_m` for `hold_s`
+(default 0.2 s). It takes `when`, `arm`, `live` and `end_on_pass` as a box
+check does. The width is known only where the rollout reads the jaws: a policy
+that drives the gripper, or a chain's primitive that moves them (below).
+Elsewhere the check is left unscored and says why.
+
+```json
+"holding": {"kind": "gripper_width", "min_m": 0.010, "max_m": 0.014}
+```
+
 Your verdict stays the measurement. The panel shows how often each check
 agrees with the verdicts, how many failures it passed and how many successes
 it failed. It never shows a check's answer for the trial you are judging,
@@ -853,8 +864,9 @@ cannot be taken over yet.
 
 A longer task can be split into short steps, each a skill or a generic
 primitive, joined by checks. Each step may have a start check, which must pass
-before it runs, and an end check, which ends it when it passes. The checks are
-declared as in an evaluation session: `settled_in_box` or `learned`.
+before it runs, and an end check, which ends it when it passes; either may be a
+list of checks, which must all pass. The checks are declared as in an
+evaluation session: `settled_in_box`, `gripper_width` or `learned`.
 
 ```json
 {
@@ -892,7 +904,27 @@ declared as in an evaluation session: `settled_in_box` or `learned`.
   own frame), `base_m` (an offset in the base frame), or a box
   (`box_min_m`, `box_max_m`: to the point of the box nearest the tool). A move
   may also set `rotation` ([qw, qx, qy, qz]) and `speed_m_s` (default 0.02).
-  The step is done when its moves are, and its end check, if any, has passed.
+  A move may instead set the jaws' width, `gripper_m` (0 closes them as far as
+  they go), with `gripper_speed_m_s` and `gripper_force_n` (the grip force;
+  by default the gripper's speed and a quarter of its force, held to its
+  range). The jaws are read until they stop, at the width or closed on a part;
+  a `gripper_width` end check then tells which. The step is done when its moves
+  are, and its end checks, if any, have passed.
+- **A pick and a release** are primitive steps, for example:
+
+  ```json
+  {"name": "pick", "end": "holding", "primitive": {"moves": [
+    {"gripper_m": 0.08}, {"base_m": [0, 0, -0.02]},
+    {"gripper_m": 0, "gripper_force_n": 30}, {"base_m": [0, 0, 0.02]}]}},
+  {"name": "release", "end": ["open", "clear"], "primitive": {"moves": [
+    {"gripper_m": 0.08}, {"base_m": [0, 0, 0.03]}]}}
+  ```
+
+  A step that moves or reads the jaws needs a follower gripper on the arm. As
+  for a rollout, the gripper is initialised once while the trainer runs, and
+  later steps reuse it. After a restart of the trainer the first step to use
+  it initialises it again, which opens and closes the jaws: start a chain
+  after a restart with nothing in them.
 
 **When a step fails**, the chain backs off and tries again:
 
@@ -902,8 +934,9 @@ declared as in an evaluation session: `settled_in_box` or `learned`.
 
 After its last try, the chain stops and calls you. It also calls you at once
 when a back-off meets more force than its `max_force_n` (a half-latched part
-needs a person, not more force), when a start check does not pass, and when
-the safety envelope stopped a try. Do what the chain could not, with the leader
+needs a person, not more force), when a start check does not pass, when the
+safety envelope stopped a try, and when an end check could not be scored (a
+jaw check under a skill that does not read the jaws). Do what the chain could not, with the leader
 arm through teleoperation or by hand, then send
 `POST /rollout/chain/continue` with `{"action": "retry"}` to run the step again
 from its start check, or `{"action": "skip"}` to count it as done.

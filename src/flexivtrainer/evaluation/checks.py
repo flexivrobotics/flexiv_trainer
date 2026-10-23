@@ -28,6 +28,14 @@ plan and scored when each trial's recording is saved:
       }
     }
 
+A `gripper_width` check asks whether the jaws hold something of a given size,
+or stand open: their measured width stays inside a band. Scored from the tick
+log, where the rollout read the jaws:
+
+    "checks": {
+      "holding": {"kind": "gripper_width", "min_m": 0.010, "max_m": 0.014}
+    }
+
 A `learned` check (`learned_check.py`) is a small classifier trained from
 labelled frames, for states the arm's pose cannot settle, such as a latch
 having closed. It is scored from the trial's recorded camera frames and state
@@ -61,6 +69,7 @@ from .stats import wilson_interval
 __all__ = [
     "CHECK_KINDS",
     "Check",
+    "GripperWidth",
     "LearnedCheck",
     "SettledInBox",
     "agreement",
@@ -300,7 +309,111 @@ class LearnedCheck:
         }
 
 
-Check = SettledInBox | LearnedCheck
+@dataclass(frozen=True)
+class GripperWidth:
+    """Passes when the jaws' measured width stays in [min_m, max_m] for at
+    least `hold_s` -- at any time (`when` "any") or at the end (`when` "end").
+
+    The width is read only where the rollout reads the jaws: a primitive that
+    moves them, or a policy that drives the gripper. Elsewhere the check cannot
+    be scored. `arm`, `live` and `end_on_pass` are a box check's.
+    """
+
+    min_m: float
+    max_m: float
+    hold_s: float = 0.2
+    when: str = "any"
+    arm: int = 0
+    live: bool = False
+    end_on_pass: bool = False
+
+    kind = "gripper_width"
+
+    def __post_init__(self) -> None:
+        if not all(math.isfinite(v) for v in (self.min_m, self.max_m, self.hold_s)):
+            raise ValueError("a gripper width check's numbers must be finite")
+        if not 0 <= self.min_m <= self.max_m:
+            raise ValueError("min_m must be 0 or more, and at most max_m")
+        if self.hold_s < 0:
+            raise ValueError("hold_s must be 0 or more")
+        if self.when not in ("any", "end"):
+            raise ValueError(f"when must be 'any' or 'end', not {self.when!r}")
+        if self.arm < 0:
+            raise ValueError("arm must be 0 or more")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GripperWidth:
+        known = {
+            "kind",
+            "min_m",
+            "max_m",
+            "hold_s",
+            "when",
+            "arm",
+            "live",
+            "end_on_pass",
+        }
+        unknown = sorted(set(data) - known)
+        if unknown:
+            raise ValueError(f"unknown keys {unknown}; known are {sorted(known)}")
+        if "min_m" not in data or "max_m" not in data:
+            raise ValueError("a gripper width check needs min_m and max_m")
+        return cls(
+            min_m=float(data["min_m"]),
+            max_m=float(data["max_m"]),
+            hold_s=float(data.get("hold_s", cls.hold_s)),
+            when=str(data.get("when", cls.when)),
+            arm=int(data.get("arm", cls.arm)),
+            live=_flag(data, "live"),
+            end_on_pass=_flag(data, "end_on_pass"),
+        )
+
+    @property
+    def scored_live(self) -> bool:
+        return self.live or self.end_on_pass
+
+    def holds(self, width: float) -> bool:
+        return self.min_m <= width <= self.max_m
+
+    def width(self, measured: Any) -> float | None:
+        """The jaws' width in one arm's measured states, if they were read."""
+        gripper = measured.get("gripper") if isinstance(measured, dict) else None
+        try:
+            width = float(gripper["width"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return width if math.isfinite(width) else None
+
+    def evaluate(self, ticks: list[dict[str, Any]]) -> dict[str, Any]:
+        """`passed`, the longest stretch in the band, and when the first began."""
+        times: list[float | None] = []
+        inside: list[bool] = []
+        read = False
+        for tick in ticks:
+            try:
+                width = self.width(tick["measured"][self.arm])
+                t = float(tick["t"])
+            except (KeyError, IndexError, TypeError, ValueError):
+                width, t = None, None
+            read |= width is not None
+            times.append(t)
+            inside.append(width is not None and self.holds(width))
+        if ticks and not read:
+            return {"kind": self.kind, "error": "the jaws were not read"}
+        runs = held_runs(times, inside)
+        qualifying = [r for r in runs if r[1] - r[0] >= self.hold_s]
+        if self.when == "end":
+            qualifying = [r for r in qualifying if r[2]]
+        return {
+            "kind": self.kind,
+            "passed": bool(qualifying),
+            "held_s": round(max((r[1] - r[0] for r in runs), default=0.0), 3),
+            "first_at_s": round(qualifying[0][0], 3) if qualifying else None,
+            "ticks": len(ticks),
+        }
+
+
+Check = SettledInBox | GripperWidth | LearnedCheck
 
 
 def _flag(data: dict[str, Any], key: str) -> bool:
@@ -312,6 +425,7 @@ def _flag(data: dict[str, Any], key: str) -> bool:
 
 CHECK_KINDS: dict[str, type[Check]] = {
     SettledInBox.kind: SettledInBox,
+    GripperWidth.kind: GripperWidth,
     LearnedCheck.kind: LearnedCheck,
 }
 
