@@ -14,6 +14,7 @@
 
 """Tests for the datasets API routes (browse, preview, merge) including security."""
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,3 +162,104 @@ def test_merge_conflict_returns_409(tmp_path) -> None:
         assert response.status_code == 409
     finally:
         datasets_routes._merge_job = None
+
+
+def _client(tmp_path: Path) -> TestClient:
+    app = create_app()
+    manager = _make_manager(tmp_path)
+    app.dependency_overrides[get_runtime_manager] = lambda: manager
+    return TestClient(app)
+
+
+def _recording(root: Path, lengths: list[int]) -> Path:
+    """A dataset folder with only what labelling reads: its episode lengths."""
+    import pandas as pd
+
+    episodes = root / "meta" / "episodes" / "chunk-000"
+    episodes.mkdir(parents=True)
+    (root / "meta" / "info.json").write_text("{}")
+    pd.DataFrame(
+        {"episode_index": list(range(len(lengths))), "length": lengths}
+    ).to_parquet(episodes / "file-000.parquet")
+    return root
+
+
+def test_labels_are_set_listed_and_removed_per_episode(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    root = _recording(tmp_path / "merged" / "demos", [30, 40, 25])
+
+    empty = client.get("/datasets/check-labels", params={"path": str(root)})
+    assert empty.status_code == 200
+    assert empty.json() == {
+        "path": str(root),
+        "episodes": [
+            {"index": 0, "num_frames": 30},
+            {"index": 1, "num_frames": 40},
+            {"index": 2, "num_frames": 25},
+        ],
+        "checks": {},
+    }
+
+    label = {"path": str(root), "check": "seated", "episode": 1, "first_frame": 12}
+    assert client.put("/datasets/check-labels", json=label).status_code == 200
+    never = {**label, "episode": 2, "first_frame": None}
+    view = client.put("/datasets/check-labels", json=never).json()
+    assert view["checks"] == {
+        "seated": {
+            "episodes": {"1": 12, "2": None},
+            "summary": {"episodes": 2, "reached": 1, "never": 1},
+        }
+    }
+    stored = json.loads((root / "meta" / "check_labels.json").read_text())
+    assert stored["checks"] == {"seated": {"1": 12, "2": None}}
+
+    removed = client.delete(
+        "/datasets/check-labels",
+        params={"path": str(root), "check": "seated", "episode": 1},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["checks"]["seated"]["episodes"] == {"2": None}
+
+
+def test_a_label_the_dataset_cannot_hold_is_refused(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    root = _recording(tmp_path / "episodes" / "job" / "e1", [30])
+    base = {"path": str(root), "check": "seated", "episode": 0}
+
+    past_the_end = client.put(
+        "/datasets/check-labels", json={**base, "first_frame": 30}
+    )
+    assert past_the_end.status_code == 422
+    assert "outside episode 0" in past_the_end.json()["detail"]
+    missing = client.put(
+        "/datasets/check-labels", json={**base, "episode": 1, "first_frame": 3}
+    )
+    assert missing.status_code == 422
+    bad_name = client.put(
+        "/datasets/check-labels", json={**base, "check": "../x", "first_frame": 3}
+    )
+    assert bad_name.status_code == 422
+    negative = client.put("/datasets/check-labels", json={**base, "first_frame": -1})
+    assert negative.status_code == 422
+    assert not (root / "meta" / "check_labels.json").exists()
+
+
+def test_labels_outside_the_storage_root_are_refused(tmp_path: Path) -> None:
+    client = _client(tmp_path / "storage")
+    outside = _recording(tmp_path / "elsewhere", [30])
+    label = {"path": str(outside), "check": "seated", "episode": 0, "first_frame": 3}
+
+    assert client.put("/datasets/check-labels", json=label).status_code == 403
+    listed = client.get("/datasets/check-labels", params={"path": str(outside)})
+    assert listed.status_code == 403
+    removed = client.delete(
+        "/datasets/check-labels",
+        params={"path": str(outside), "check": "seated", "episode": 0},
+    )
+    assert removed.status_code == 403
+    gone = client.get(
+        "/datasets/check-labels",
+        params={"path": str(tmp_path / "storage" / "merged" / "nope")},
+    )
+    assert gone.status_code == 404
+    assert not (outside / "meta" / "check_labels.json").exists()

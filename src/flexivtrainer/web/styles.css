@@ -3952,6 +3952,71 @@ input[type="range"]:focus-visible::-moz-range-thumb {
     margin-bottom: 16px;
 }
 
+/* Labelling Frames: the check named, this episode's label and its buttons. */
+.label-bar {
+    display: grid;
+    gap: 12px;
+}
+
+.label-bar__check {
+    display: grid;
+    gap: 6px;
+    max-width: 320px;
+}
+
+.label-bar__status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.label-bar__text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.label-bar__text small {
+    color: var(--ink-2);
+    font-size: 12px;
+}
+
+.label-bar__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.label-bar__hint {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.label-badge {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border-radius: var(--r-pill);
+    background: var(--fill-3);
+    color: var(--ink-3);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.label-badge--holds {
+    background: var(--success-soft);
+    color: var(--success);
+}
+
+.label-badge--never {
+    background: var(--warning-soft);
+    color: var(--warning);
+}
+
 .dataset-preview-empty,
 .dataset-preview-loading {
     position: relative;
