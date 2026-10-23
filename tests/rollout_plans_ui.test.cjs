@@ -258,3 +258,87 @@ test('a success sends no failure mode, and a running chain is not judged yet', a
     run(`assert.deepEqual(posted, [['/rollout/chain/verdict', {run: '20261023_010203', outcome: 'success',
         failure_mode: null, note: ''}]]);`);
 });
+
+test('a verdict half given on one run is not carried to the next', () => {
+    const { run, html } = harness();
+    run(`
+        const chain = ${WAITING_CHAIN};
+        const done = {...chain, result: 'done', step_index: 3, waiting_for_operator: null, state: 'done'};
+        state.rolloutChainRunsFor = 'x';
+        state.rolloutChainRuns = {runs: [${FINISHED_RUN}, {...${FINISHED_RUN}, name: '20261023_020000'}], plans: {}};
+        state.rolloutStatus = {status: 'idle', chain: done};
+        renderRolloutPlans();
+        state.rolloutChainVerdict = {outcome: 'success', mode: '', note: 'A looked fine'};
+        renderRolloutPlans();
+        state.rolloutStatus = {status: 'idle', chain: {...done, record: '/s/rollouts/chains/20261023_020000.json'}};
+        renderRolloutPlans();
+        assert.deepEqual(state.rolloutChainVerdict, {outcome: '', mode: '', note: ''});
+    `);
+    assert.doesNotMatch(html(), /rollout-eval-outcome--active/);
+});
+
+test('a failed read of the runs is tried again', async () => {
+    const { run } = harness();
+    run(`
+        globalThis.now = 100000;
+        Date.now = () => now;
+        globalThis.failing = true;
+        const answer = api;
+        api = async (path, request) => {
+            if (path === '/rollout/chains' && failing) { listed = (globalThis.listed || 0) + 1; throw new Error('500'); }
+            return answer(path, request);
+        };
+        globalThis.chainRuns = {runs: [${FINISHED_RUN}], plans: {}};
+        const chain = ${WAITING_CHAIN};
+        state.rolloutStatus = {status: 'idle', chain: {...chain, result: 'done', step_index: 3,
+            waiting_for_operator: null, state: 'done'}};
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`
+        assert.equal(listed, 1);
+        renderRolloutPlans();
+        assert.equal(listed, 1, 'not again within 3 s');
+        now += 4000; failing = false;
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`assert.equal(state.rolloutChainRuns.runs[0].name, '20261023_010203');`);
+});
+
+test('escaping keeps a quoted failure mode one attribute value', () => {
+    const context = vm.createContext({ console });
+    vm.runInContext(source.replace(startup, ''), context);
+    assert.equal(
+        vm.runInContext(`escapeHtml('part "A" <b> & it\\'s')`, context),
+        'part &quot;A&quot; &lt;b&gt; &amp; it&#39;s',
+    );
+    assert.equal(vm.runInContext('escapeHtml(null) + escapeHtml(undefined) + escapeHtml(3)', context), '3');
+});
+
+test('a read that does not list the run yet is tried again', async () => {
+    const { run } = harness();
+    run(`
+        globalThis.now = 100000;
+        Date.now = () => now;
+        globalThis.chainRuns = {runs: [], plans: {}};
+        const chain = ${WAITING_CHAIN};
+        state.rolloutStatus = {status: 'idle', chain: {...chain, result: 'done', step_index: 3,
+            waiting_for_operator: null, state: 'done'}};
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`
+        assert.equal(listed, 1);
+        now += 4000;
+        globalThis.chainRuns = {runs: [${FINISHED_RUN}], plans: {}};
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`
+        assert.equal(listed, 2);
+        now += 4000;
+        renderRolloutPlans();
+        assert.equal(listed, 2, 'listed with its result: not read again');
+    `);
+});

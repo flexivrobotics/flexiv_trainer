@@ -198,9 +198,12 @@ class ChainPlan:
             object.__setattr__(self, "stiffness", values)
         if not (math.isfinite(self.check_s) and self.check_s > 0):
             raise ValueError("check_s must be positive")
-        modes = tuple(self.failure_modes)
-        if not all(isinstance(mode, str) and mode.strip() for mode in modes):
+        if not all(
+            isinstance(mode, str) and mode.strip() for mode in self.failure_modes
+        ):
             raise ValueError("failure_modes are non-empty texts")
+        # Stripped, as a verdict's failure mode is.
+        modes = tuple(mode.strip() for mode in self.failure_modes)
         if len(set(modes)) != len(modes):
             raise ValueError(f"failure modes repeat: {list(modes)}")
         object.__setattr__(self, "failure_modes", modes)
@@ -342,6 +345,7 @@ class ChainRunner:
         self._index = 0
         self._try = 0
         self._waiting: str | None = None
+        self._result: str | None = None
         self._record: dict[str, Any] = {
             # The plan file it was started from (rollout/plans.py), if any.
             "plan": plan_name,
@@ -401,7 +405,7 @@ class ChainRunner:
                 "tries": step.tries if step is not None else None,
                 "waiting_for_operator": self._waiting,
                 "record": str(self._record_path),
-                "result": self._record["result"],
+                "result": self._result,
                 "recent": self._record["events"][-_RECENT_EVENTS:],
             }
 
@@ -430,11 +434,15 @@ class ChainRunner:
             self._append_log("ERROR", "CHAIN", "The chain failed", str(exc))
         finally:
             with self._lock:
-                self._state = result
                 self._waiting = None
                 self._record["result"] = result
                 self._record["seconds"] = round(self._clock() - self._started, 1)
             self._write()
+            # Shown only once written: whoever sees the result then reads the
+            # record whole, and can judge the run.
+            with self._lock:
+                self._state = result
+                self._result = result
             self._append_log("INFO", "CHAIN", f"Chain {result}", str(self._record_path))
             if self._on_finished is not None:
                 self._on_finished(result)

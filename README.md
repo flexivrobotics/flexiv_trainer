@@ -982,7 +982,8 @@ it was a success and nobody helped: no takeover and no call for you; the
 chain's own retries are allowed. For the plan, the panel shows its runs, how
 many you judged and how many were clean, and the **clean streak**: how many
 finished runs in a row, up to the newest, were clean. A run you have not judged
-ends the streak. `GET /rollout/chains` lists the newest runs with the same
+ends the streak. A run the trainer stopped or lost mid-chain, whose record never
+got its result, counts as interrupted: judge it too. `GET /rollout/chains` lists the newest runs with the same
 counts per plan.
 
 ## Typical End-To-End Session

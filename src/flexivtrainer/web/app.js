@@ -78,7 +78,9 @@ const state = {
     // verdict being given on the newest run.
     rolloutChainRuns: null,
     rolloutChainRunsFor: "",
+    rolloutChainRunsTriedAt: 0,
     rolloutChainVerdict: { outcome: "", mode: "", note: "" },
+    rolloutChainVerdictFor: "",
     rolloutChainVerdictBusy: false,
     teleopBootstrapped: false,
     rolloutBootstrapped: false,
@@ -1662,10 +1664,15 @@ function _timestampSuffix() {
     return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+// Safe in text and in attribute values alike: quotes are escaped too, so a
+// failure mode such as `part "A" missing` stays one option value.
 function escapeHtml(text) {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
 function setMarkupIfChanged(element, renderKey, markup) {
@@ -8525,16 +8532,30 @@ function renderRolloutPlans() {
     const chain = status.chain || null;
     const chainLive = !!chain && !chain.result;
     const plans = state.rolloutPlans || [];
-    // A chain that has just finished: read its run, to judge it.
-    const finished = chain && chain.result ? `${chain.record}|${chain.result}` : "";
-    if (finished && state.rolloutChainRunsFor !== finished) {
-        state.rolloutChainRunsFor = finished;
-        refreshRolloutChainRuns().catch(() => { });
-    }
-    const run = chain
+    const listedRun = () => (chain
         ? ((state.rolloutChainRuns && state.rolloutChainRuns.runs) || [])
             .find((entry) => entry.name === chainRunName(chain)) || null
-        : null;
+        : null);
+    // A chain that has just finished: read its run, to judge it, until the
+    // run is listed with its result; a failed read is tried again.
+    const finished = chain && chain.result ? `${chain.record}|${chain.result}` : "";
+    if (finished && state.rolloutChainRunsFor !== finished
+        && Date.now() - state.rolloutChainRunsTriedAt > 3000) {
+        state.rolloutChainRunsTriedAt = Date.now();
+        refreshRolloutChainRuns().then(() => {
+            if (listedRun()?.result) state.rolloutChainRunsFor = finished;
+        }).catch(() => { });
+    }
+    const run = listedRun();
+    // A verdict half given on one run is not carried to the next.
+    const runName = chain ? chainRunName(chain) : "";
+    if (state.rolloutChainVerdictFor !== runName) {
+        state.rolloutChainVerdictFor = runName;
+        state.rolloutChainVerdict = { outcome: "", mode: "", note: "" };
+    }
+    if (run && state.rolloutChainVerdict.mode && !(run.failure_modes || []).includes(state.rolloutChainVerdict.mode)) {
+        state.rolloutChainVerdict.mode = "";
+    }
     // Like the other panels: rebuild only when something shown changed. The
     // note being typed is kept out, so the poll never wipes it.
     const renderKey = JSON.stringify([

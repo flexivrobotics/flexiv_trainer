@@ -27,22 +27,32 @@ takeover in any try and no call for the operator. The chain's own retries are
 allowed. Runs are counted per plan, newest first; the **streak** is how many
 finished runs in a row, up to the newest, were clean. A finished run without a
 verdict ends the streak: nobody has said it was clean.
+
+A run whose record never got its result -- the trainer was stopped or died
+mid-chain -- is **interrupted**: it counts, and can be judged, unless it is the
+chain running now.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from flexivtrainer.evaluation.outcome import Verdict
+from flexivtrainer.evaluation.outcome import DEFAULT_FAILURE_MODES, Verdict
 from flexivtrainer.observability import warn
 
 __all__ = ["judge_run", "read_runs", "summarize_runs"]
 
 _WRITE_TRIES = 5
+INTERRUPTED = "interrupted"
+#: Verdicts are written one at a time: each rewrites the whole record.
+_judging = threading.Lock()
 
 
 def _records(directory: Path) -> dict[str, Path]:
@@ -53,25 +63,36 @@ def _records(directory: Path) -> dict[str, Path]:
     return {path.stem: path for path in sorted(directory.glob("*.json"))}
 
 
-def _describe(name: str, record: dict[str, Any]) -> dict[str, Any]:
-    events = record.get("events") or []
+def _modes(record: dict[str, Any]) -> list[str]:
+    """The run's failure modes; a run recorded before plans named them takes
+    the defaults, as its plan did."""
+    return list(record.get("failure_modes") or DEFAULT_FAILURE_MODES)
+
+
+def _describe(name: str, record: dict[str, Any], live: str | None) -> dict[str, Any]:
+    events = [event for event in record.get("events") or [] if isinstance(event, dict)]
     takeovers = sum(
         int((event.get("outcome") or {}).get("takeovers") or 0) for event in events
     )
     calls = sum(1 for event in events if event.get("event") == "operator called")
     verdict = record.get("verdict")
+    if verdict is not None and not isinstance(verdict, dict):
+        raise ValueError("its verdict is not an object")
+    result = record.get("result")
+    if result is None and name != live:
+        result = INTERRUPTED
     return {
         "name": name,
         "plan": record.get("plan"),
         "about": record.get("about", ""),
         "started_at": record.get("started_at"),
-        "result": record.get("result"),
+        "result": result,
         "seconds": record.get("seconds"),
         "steps": record.get("steps") or [],
         "back_offs": sum(1 for event in events if event.get("event") == "back-off"),
         "takeovers": takeovers,
         "operator_calls": calls,
-        "failure_modes": record.get("failure_modes") or [],
+        "failure_modes": _modes(record),
         "verdict": verdict,
         "clean": bool(
             verdict
@@ -82,8 +103,11 @@ def _describe(name: str, record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def read_runs(directory: Path, limit: int | None = None) -> list[dict[str, Any]]:
-    """The runs in `directory`, newest first; an unreadable one says why."""
+def read_runs(
+    directory: Path, limit: int | None = None, *, live: str | None = None
+) -> list[dict[str, Any]]:
+    """The runs in `directory`, newest first; an unreadable one says why.
+    `live` names the chain running now, whose record has no result yet."""
     runs = []
     names = sorted(_records(directory), reverse=True)
     for name in names[:limit] if limit else names:
@@ -92,10 +116,9 @@ def read_runs(directory: Path, limit: int | None = None) -> list[dict[str, Any]]
             record = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(record, dict):
                 raise ValueError("not a chain record")
-        except (OSError, ValueError) as exc:
+            runs.append(_describe(name, record, live))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
             runs.append({"name": name, "error": str(exc)})
-            continue
-        runs.append(_describe(name, record))
     return runs
 
 
@@ -145,38 +168,45 @@ def judge_run(
     *,
     failure_mode: str | None = None,
     note: str = "",
+    live: str | None = None,
 ) -> dict[str, Any]:
     """Write the operator's verdict into run `name`'s record; returns the run.
 
     A failure needs one of the run's failure modes. A new verdict replaces an
-    earlier one. A run still going has nothing to judge yet.
+    earlier one. The chain running now (`live`) has nothing to judge yet.
     """
     path = _records(directory).get(name)
     if path is None:
         raise FileNotFoundError(f"no chain run named {name!r}")
-    record = json.loads(path.read_text(encoding="utf-8"))
-    if record.get("result") is None:
+    if name == live:
         raise RuntimeError(f"chain run {name!r} has not finished")
-    modes = record.get("failure_modes") or []
-    mode = (failure_mode or "").strip() or None if outcome == "failure" else None
-    if outcome == "failure":
-        if mode is None:
-            raise ValueError("a failure needs a failure mode")
-        if mode not in modes:
-            raise ValueError(f"failure mode {mode!r} is not one of {modes}")
-    verdict = Verdict(outcome=outcome, failure_mode=mode, note=note.strip())
-    record["verdict"] = asdict(verdict)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    # Windows refuses the replace while someone has the file open.
-    for attempt in range(_WRITE_TRIES):
-        try:
-            temporary.replace(path)
-            break
-        except PermissionError as exc:
-            if attempt == _WRITE_TRIES - 1:
-                temporary.unlink(missing_ok=True)
-                warn("The chain run's verdict was not saved", str(exc))
-                raise RuntimeError(f"{path.name} is in use; try again") from exc
-            time.sleep(0.05)
-    return _describe(name, record)
+    with _judging:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            raise ValueError(f"{path.name} is not a chain record")
+        modes = _modes(record)
+        mode = (failure_mode or "").strip() or None if outcome == "failure" else None
+        if outcome == "failure":
+            if mode is None:
+                raise ValueError("a failure needs a failure mode")
+            if mode not in modes:
+                raise ValueError(f"failure mode {mode!r} is not one of {modes}")
+        verdict = Verdict(outcome=outcome, failure_mode=mode, note=note.strip())
+        record["verdict"] = asdict(verdict)
+        handle, temporary = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{name}-", suffix=".tmp"
+        )
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, indent=2) + "\n")
+        # Windows refuses the replace while someone has the file open.
+        for attempt in range(_WRITE_TRIES):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                if attempt == _WRITE_TRIES - 1:
+                    Path(temporary).unlink(missing_ok=True)
+                    warn("The chain run's verdict was not saved", str(exc))
+                    raise RuntimeError(f"{path.name} is in use; try again") from exc
+                time.sleep(0.05)
+    return _describe(name, record, live)

@@ -35,16 +35,19 @@ from flexivtrainer.rollout.chain_runs import judge_run, read_runs, summarize_run
 from flexivtrainer.runtime.manager import get_runtime_manager
 
 
-def _run(directory, name, *, result="done", verdict=None, events=(), plan="pick"):
+def _run(
+    directory, name, *, result="done", verdict=None, events=(), plan="pick", modes=True
+):
     record = {
         "plan": plan,
         "about": "",
         "started_at": "2026-10-23T22:00:00+08:00",
         "steps": ["pick"],
-        "failure_modes": ["dropped it", "other"],
         "events": list(events),
         "result": result,
     }
+    if modes:
+        record["failure_modes"] = ["dropped it", "other"]
     if verdict is not None:
         record["verdict"] = {"outcome": verdict, "failure_mode": None, "note": ""}
     directory.mkdir(parents=True, exist_ok=True)
@@ -61,6 +64,8 @@ def test_a_plan_names_what_may_go_wrong():
     plan = ChainPlan.from_dict({"steps": steps, "failure_modes": ["dropped it"]})
     assert plan.failure_modes == ("dropped it",)
     assert ChainPlan.from_dict({"steps": steps}).failure_modes == ()
+    padded = ChainPlan.from_dict({"steps": steps, "failure_modes": [" stalled "]})
+    assert padded.failure_modes == ("stalled",)
     for modes, message in (
         ("dropped it", "a list of texts"),
         (["dropped it", "dropped it"], "repeat"),
@@ -92,9 +97,10 @@ def test_the_streak_counts_clean_runs_up_to_the_newest(tmp_path):
     _run(chains, "20261023_100700", verdict="success", events=[BACK_OFF])
     # Still going: not counted.
     _run(chains, "20261023_100800", result=None)
+    live = "20261023_100800"
     _run(chains, "20261023_090000", verdict="success", plan="other")
     (chains / "20261023_090100.json").write_text("{broken")
-    runs = read_runs(chains)
+    runs = read_runs(chains, live=live)
     assert [run["name"] for run in runs][:2] == ["20261023_100800", "20261023_100700"]
     assert runs[1]["back_offs"] == 1 and runs[1]["clean"] is True
     assert runs[2]["clean"] is True and runs[3]["takeovers"] == 1
@@ -113,8 +119,42 @@ def test_the_streak_counts_clean_runs_up_to_the_newest(tmp_path):
     assert summary["other"]["streak"] == 1
     # A finished run nobody judged ends the streak.
     _run(chains, "20261023_100900")
-    assert summarize_runs(read_runs(chains))["pick"]["streak"] == 0
+    assert summarize_runs(read_runs(chains, live=live))["pick"]["streak"] == 0
     assert len(read_runs(chains, limit=3)) == 3
+
+
+def test_a_run_that_never_got_its_result_counts_and_can_be_judged(tmp_path):
+    chains = tmp_path / "chains"
+    _run(chains, "a1", verdict="success")
+    _run(chains, "a2", verdict="success")
+    # The trainer stopped mid-chain: no result was written.
+    _run(chains, "a3", result=None, events=[CALL])
+    _run(chains, "a4", verdict="success")
+    runs = {run["name"]: run for run in read_runs(chains)}
+    assert runs["a3"]["result"] == "interrupted" and runs["a3"]["clean"] is False
+    summary = summarize_runs(read_runs(chains))["pick"]
+    assert summary["runs"] == 4 and summary["streak"] == 1
+    assert summary["longest_streak"] == 2
+    judged = judge_run(chains, "a3", "failure", failure_mode="other")
+    assert judged["verdict"]["outcome"] == "failure"
+    # The chain going now has no result either, but is not judged yet.
+    with pytest.raises(RuntimeError, match="has not finished"):
+        judge_run(chains, "a3", "success", live="a3")
+
+
+def test_old_runs_take_the_default_modes_and_a_broken_one_does_not_hide_the_rest(
+    tmp_path,
+):
+    chains = tmp_path / "chains"
+    _run(chains, "old", modes=False)
+    (chains / "odd.json").write_text(
+        json.dumps({"events": ["not an event"], "verdict": "yes"})
+    )
+    runs = {run["name"]: run for run in read_runs(chains)}
+    assert runs["old"]["failure_modes"] == list(DEFAULT_FAILURE_MODES)
+    assert "error" in runs["odd"]
+    judged = judge_run(chains, "old", "failure", failure_mode=DEFAULT_FAILURE_MODES[0])
+    assert judged["verdict"]["failure_mode"] == DEFAULT_FAILURE_MODES[0]
 
 
 def test_a_verdict_is_written_into_the_finished_run(tmp_path):
@@ -126,7 +166,7 @@ def test_a_verdict_is_written_into_the_finished_run(tmp_path):
     with pytest.raises(FileNotFoundError):
         judge_run(chains, "../a", "success")
     with pytest.raises(RuntimeError, match="has not finished"):
-        judge_run(chains, "going", "success")
+        judge_run(chains, "going", "success", live="going")
     with pytest.raises(ValueError, match="needs a failure mode"):
         judge_run(chains, "a", "failure")
     with pytest.raises(ValueError, match="not one of"):

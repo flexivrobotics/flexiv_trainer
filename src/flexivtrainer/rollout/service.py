@@ -1787,10 +1787,18 @@ class RolloutService:
             checkpoint = self._settings.storage.root / checkpoint
         return self.start(str(checkpoint), task=data.get("task", ""), practice=plan)
 
+    def _live_chain_run(self) -> str | None:
+        """The run of the chain going now, whose record has no result yet."""
+        chain = self._chain
+        if chain is None:
+            return None
+        status = chain.status()
+        return None if status["result"] is not None else Path(status["record"]).stem
+
     def chain_runs(self, limit: int = 50) -> dict[str, Any]:
         """The newest chain runs, and per plan how many in a row were clean."""
         directory = self._settings.storage.rollouts_root / CHAINS_DIR
-        runs = read_runs(directory)
+        runs = read_runs(directory, live=self._live_chain_run())
         return {"runs": runs[:limit], "plans": summarize_runs(runs)}
 
     def chain_verdict(
@@ -1803,6 +1811,7 @@ class RolloutService:
             outcome,
             failure_mode=failure_mode,
             note=note,
+            live=self._live_chain_run(),
         )
         verdict = judged["verdict"]
         self._append_log(
