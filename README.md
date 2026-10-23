@@ -679,6 +679,15 @@ Near misses labelled `--never` are the most useful labels you can give.
 Labels are stored in the dataset's `meta/check_labels.json` and follow their
 episodes through a merge.
 
+In the web UI: **Data Processing → Labelling Frames**. Load recordings, merged
+datasets or both, name the check, then for each episode pause where the state
+first holds and press **Holds from here**, or press **Never holds**. Each label
+is saved at once. A labelled episode opens at its label, so you can check it.
+The page counts frames from 1, as its playback counter does. The file and the
+command line count from 0, so frame 413 on the page is `--first-frame 412`.
+
+From the command line:
+
 ```bash
 python -m flexivtrainer.evaluation.learned_check label <dataset> --check closed --episode 3 --first-frame 412
 python -m flexivtrainer.evaluation.learned_check label <dataset> --check closed --episode 4 --never

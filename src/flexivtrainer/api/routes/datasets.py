@@ -22,6 +22,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from flexivtrainer.evaluation.check_labels import (
+    describe,
+    episode_lengths,
+    read_labels,
+    remove_label,
+    write_label,
+)
 from flexivtrainer.observability import info, ok
 from flexivtrainer.runtime.manager import RuntimeManager, get_runtime_manager
 
@@ -31,10 +38,21 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 _merge_lock = threading.Lock()
 _merge_job: dict[str, Any] | None = None
 
+# A label is a read, change and write of one file: two at once would lose one.
+_labels_lock = threading.Lock()
+
 
 class MergeRequest(BaseModel):
     episode_paths: list[str] = Field(default_factory=list)
     output_name: str
+
+
+class CheckLabelRequest(BaseModel):
+    path: str
+    check: str
+    episode: int = Field(ge=0)
+    # The first frame at which the check's state holds; None: it never does.
+    first_frame: int | None = Field(default=None, ge=0)
 
 
 @router.get("/episodes")
@@ -162,6 +180,78 @@ def series(
     except IndexError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _dataset_root(runtime: RuntimeManager, path: str) -> Path:
+    try:
+        return runtime.dataset_root(Path(path))
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _labels_view(root: Path) -> dict:
+    """A dataset's episodes and every check's labels, for the labelling page."""
+    lengths = episode_lengths(root)
+    return {
+        "path": str(root),
+        "episodes": [
+            {"index": episode, "num_frames": length}
+            for episode, length in sorted(lengths.items())
+        ],
+        "checks": {
+            name: {
+                "episodes": {str(e): first for e, first in sorted(episodes.items())},
+                "summary": describe(episodes),
+            }
+            for name, episodes in sorted(read_labels(root).items())
+        },
+    }
+
+
+@router.get("/check-labels")
+def check_labels(
+    path: str, runtime: RuntimeManager = Depends(get_runtime_manager)
+) -> dict:
+    """A dataset's learned-check labels (meta/check_labels.json)."""
+    root = _dataset_root(runtime, path)
+    try:
+        return _labels_view(root)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/check-labels")
+def put_check_label(
+    request: CheckLabelRequest, runtime: RuntimeManager = Depends(get_runtime_manager)
+) -> dict:
+    """Label one episode: the first frame at which the check's state holds, or
+    null when it never does."""
+    root = _dataset_root(runtime, request.path)
+    try:
+        with _labels_lock:
+            write_label(root, request.check, request.episode, request.first_frame)
+        return _labels_view(root)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/check-labels")
+def delete_check_label(
+    path: str,
+    check: str,
+    episode: int,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    """Remove one episode's label, so training leaves that episode out."""
+    root = _dataset_root(runtime, path)
+    try:
+        with _labels_lock:
+            remove_label(root, check, episode)
+        return _labels_view(root)
+    except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

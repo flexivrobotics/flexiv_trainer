@@ -96,6 +96,17 @@ const state = {
     mergedSelectedEpisode: null,
     mergedEpisodes: [],
     mergedScopeCache: {},
+    // Labelling Frames: each loaded dataset's episodes and labels, keyed by
+    // path (as /datasets/check-labels returns them); the episode shown, as
+    // {path, episode}; the check being labelled; and that episode's preview.
+    labelViews: {},
+    labelTarget: null,
+    labelCheck: "",
+    labelPreview: null,
+    labelSeries: null,
+    labelFrame: 0,
+    labelPlaying: false,
+    labelBusy: false,
     // Training page state
     mergedDatasetPath: "",
     // "local" uses mergedDatasetPath; "hub" uses the repo id below. Kept on
@@ -1139,6 +1150,17 @@ const PROCESSING_MODES = {
         modalTitle: "Merging selected datasets…",
         emptyMessage: "No datasets selected.",
         openBrowser: () => openProcessingDatasetBrowser(),
+    },
+    labels: {
+        cardTitle: "Labelling Frames",
+        cardDescription: "Mark the frame where a check's state begins, to train a learned check.",
+        loadTitle: "Load Recordings or Datasets",
+        itemNoun: "recording",
+        emptyMessage: "No recordings or datasets loaded.",
+        addLabel: "Recordings",
+        openBrowser: () => openEpisodeBrowser(),
+        otherAddLabel: "Datasets",
+        openOtherBrowser: () => openProcessingDatasetBrowser(),
     },
 };
 
@@ -5102,6 +5124,7 @@ const MODE_TILE_ICONS = {
     datasets: WIZARD_ICON(`<ellipse cx="12" cy="6" rx="7" ry="2.8"></ellipse><path d="M5 6v6c0 1.55 3.13 2.8 7 2.8s7-1.25 7-2.8V6"></path><path d="M5 12v6c0 1.55 3.13 2.8 7 2.8s7-1.25 7-2.8v-6"></path>`),
     new: WIZARD_ICON(`<path d="m11 3.5 1.8 4.9 4.9 1.8-4.9 1.8L11 16.9l-1.8-4.9-4.9-1.8 4.9-1.8z"></path><path d="M18.5 15v5M16 17.5h5"></path>`),
     fine_tune: WIZARD_ICON(`<path d="M4 7h9M17 7h3M4 17h3M11 17h9"></path><circle cx="15" cy="7" r="2"></circle><circle cx="9" cy="17" r="2"></circle>`),
+    labels: WIZARD_ICON(`<path d="M5.5 20.5V4"></path><path d="M5.5 4.5h11.5l-2.5 4.25 2.5 4.25H5.5"></path>`),
 };
 const MODE_TILE_CHEVRON_SVG = `<svg class="mode-tile__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6 6 6-6 6"></path></svg>`;
 
@@ -5121,7 +5144,10 @@ function _wizardStepsMarkup(labels, current) {
 }
 
 function _processingStepsMarkup() {
-    return _wizardStepsMarkup(["Mode", "Load", "Merge", "Review"], state.processingMode ? state.processingStep : 0);
+    const labels = state.processingMode === "labels"
+        ? ["Mode", "Load", "Label"]
+        : ["Mode", "Load", "Merge", "Review"];
+    return _wizardStepsMarkup(labels, state.processingMode ? state.processingStep : 0);
 }
 
 // Hub datasets skip the preview page, so the indicator drops it too.
@@ -5180,6 +5206,9 @@ function renderProcessingModePicker(container) {
                 state.selectedEpisodes = [];
                 state.preview = null;
                 state.previewSeries = null;
+                state.labelTarget = null;
+                state.labelPreview = null;
+                state.labelSeries = null;
             }
             state.processingMode = key;
             renderProcessing();
@@ -5234,8 +5263,12 @@ function renderProcessing() {
                                 </svg>
                             </button>` : ""}
                             <button class="round-icon-button round-icon-button--add" id="training-add-episode" type="button" aria-label="Add ${mode.itemNoun} dataset" title="Add ${mode.itemNoun} dataset">
-                                ${WIZARD_PLUS_SVG}<span>Add</span>
+                                ${WIZARD_PLUS_SVG}<span>${mode.addLabel || "Add"}</span>
                             </button>
+                            ${mode.openOtherBrowser ? `
+                            <button class="round-icon-button round-icon-button--add" id="processing-add-other" type="button" aria-label="Add merged dataset" title="Add merged dataset">
+                                ${WIZARD_PLUS_SVG}<span>${mode.otherAddLabel}</span>
+                            </button>` : ""}
                         </div>
                     </div>
                     <div class="episode-list" id="load-episode-list"></div>
@@ -5275,6 +5308,9 @@ function renderProcessing() {
             });
         }
         byId("training-add-episode").onclick = () => mode.openBrowser();
+        if (mode.openOtherBrowser) {
+            byId("processing-add-other").onclick = () => mode.openOtherBrowser();
+        }
         byId("processing-back-modes").onclick = () => {
             state.processingMode = null;
             renderProcessing();
@@ -5290,6 +5326,8 @@ function renderProcessing() {
         }
         byId("training-next-step").onclick = () => {
             state.processingStep = 2;
+            // Read the labels afresh: the command line may have changed them.
+            state.labelViews = {};
             renderProcessing();
             _animateWizardStep(container);
         };
@@ -5301,6 +5339,11 @@ function renderProcessing() {
                 renderProcessing();
             };
         });
+        return;
+    }
+
+    if (state.processingMode === "labels") {
+        renderLabelStep(container);
         return;
     }
 
@@ -5467,6 +5510,300 @@ function renderProcessing() {
         restorePickerScroll();
         renderDatasetPreviewBlock("merged-preview-block", state.mergedPreview, state.mergedSeries?.series || null, "mergedFrame", "mergedPlaying");
         return;
+    }
+}
+
+// --- Labelling Frames ---------------------------------------------------------
+// A learned check trains on one label per episode: the first frame at which its
+// state holds, or "never" (evaluation/check_labels.py). Frames count from 1
+// here, as the playback counter does; the labels file counts them from 0.
+
+const LABEL_CHECK_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+let _labelViewsLoading = null;
+
+// undefined: not labelled; null: the state never holds; else its first frame.
+function _labelOf(path, episode) {
+    const labelled = state.labelViews[path]?.checks?.[state.labelCheck.trim()]?.episodes || {};
+    const key = String(episode);
+    return Object.prototype.hasOwnProperty.call(labelled, key) ? labelled[key] : undefined;
+}
+
+function _labelText(first) {
+    if (first === undefined) return "not labelled";
+    if (first === null) return "never holds";
+    return `holds from frame ${first + 1}`;
+}
+
+function _labelCheckNames() {
+    const names = new Set();
+    Object.values(state.labelViews).forEach((view) => {
+        Object.keys(view.checks || {}).forEach((name) => names.add(name));
+    });
+    return [...names].sort();
+}
+
+// The current check's labels across every loaded dataset.
+function _labelSummary() {
+    const total = { episodes: 0, reached: 0, never: 0 };
+    Object.values(state.labelViews).forEach((view) => {
+        const summary = view.checks?.[state.labelCheck.trim()]?.summary;
+        if (!summary) return;
+        total.episodes += summary.episodes;
+        total.reached += summary.reached;
+        total.never += summary.never;
+    });
+    return total;
+}
+
+async function loadLabelViews() {
+    await Promise.all(state.episodes
+        .filter((item) => !state.labelViews[item.path])
+        .map(async (item) => {
+            try {
+                state.labelViews[item.path] = await api(`/datasets/check-labels?path=${encodeURIComponent(item.path)}`);
+            } catch (error) {
+                state.labelViews[item.path] = { path: item.path, episodes: [], checks: {}, error: error.message };
+            }
+        }));
+}
+
+function renderLabelStep(container) {
+    if (state.episodes.some((item) => !state.labelViews[item.path])) {
+        container.innerHTML = `
+            ${_processingStepsMarkup()}
+            <div class="wizard-body"><section class="panel dataset-preview-panel"><div id="label-loading"></div></section></div>
+        `;
+        _showPreviewLoadingOverlay("label-loading");
+        if (!_labelViewsLoading) {
+            _labelViewsLoading = loadLabelViews().finally(() => {
+                _labelViewsLoading = null;
+                if (state.processingMode === "labels" && state.processingStep === 2) renderProcessing();
+            });
+        }
+        return;
+    }
+    if (state.labelTarget && !state.labelViews[state.labelTarget.path]) {
+        state.labelTarget = null;
+        state.labelPreview = null;
+        state.labelSeries = null;
+    }
+    if (!state.labelCheck) {
+        state.labelCheck = _labelCheckNames()[0] || "";
+    }
+    const restorePickerScroll = _keepListScroll(container, "#label-episode-picker");
+    container.innerHTML = `
+        ${_processingStepsMarkup()}
+        <div class="wizard-body">
+            <div class="training-layout">
+                <aside class="panel wizard-aside">
+                    <div class="panel-header"><h3>Episodes</h3></div>
+                    <div class="episode-list" id="label-episode-picker"></div>
+                </aside>
+                <div class="training-main">
+                    <section class="panel label-bar">
+                        <div class="label-bar__check">
+                            <label class="field-label" for="label-check">Check</label>
+                            <input class="text-input" id="label-check" list="label-check-names" value="${escapeHtml(state.labelCheck)}" placeholder="e.g. seated" spellcheck="false" autocomplete="off">
+                            <datalist id="label-check-names"></datalist>
+                        </div>
+                        <div class="label-bar__status" id="label-status"></div>
+                        <p class="label-bar__hint">Pause where the state first holds (a part seated, a latch closed) and press <strong>Holds from here</strong>. Mark near misses <strong>Never holds</strong>: they teach the check the most.</p>
+                    </section>
+                    <section class="panel dataset-preview-panel">
+                        <div id="label-preview-block"></div>
+                    </section>
+                </div>
+            </div>
+        </div>
+        <div class="control-bar control-bar--floating-step-nav">
+            <button class="secondary-button" id="label-prev" type="button">Back</button>
+        </div>
+    `;
+    const input = byId("label-check");
+    input.oninput = () => {
+        state.labelCheck = input.value;
+        _renderLabelPicker();
+        _renderLabelStatus();
+    };
+    byId("label-prev").onclick = () => {
+        state.labelPlaying = false;
+        _stopDatasetPlayback("labelPlaying");
+        state.processingStep = 1;
+        renderProcessing();
+        _animateWizardStep(container);
+    };
+    _renderLabelPicker();
+    restorePickerScroll();
+    _renderLabelStatus();
+    _renderLabelPreview();
+}
+
+function _renderLabelPicker() {
+    const picker = byId("label-episode-picker");
+    if (!picker) return;
+    const top = picker.scrollTop;
+    const target = state.labelTarget;
+    picker.innerHTML = "";
+    let currentHeading = null;
+    state.episodes.forEach((item) => {
+        const view = state.labelViews[item.path];
+        if (!view) return;
+        const episodes = view.episodes || [];
+        // A recording holds one episode and is listed under its job; a merged
+        // dataset is a heading over its episodes.
+        const single = episodes.length === 1;
+        const heading = single ? item.job || null : item.name;
+        if (heading !== currentHeading || !single) {
+            picker.insertAdjacentHTML("beforeend", _jobHeadingMarkup(heading));
+        }
+        currentHeading = single ? heading : undefined;
+        if (view.error) {
+            picker.insertAdjacentHTML("beforeend", `
+                <div class="episode-row" title="${escapeHtml(view.error)}">
+                    <div class="episode-row__main"><span>${escapeHtml(item.name)}</span></div>
+                    <span class="episode-row__meta">Unreadable</span>
+                </div>`);
+            return;
+        }
+        episodes.forEach((episode) => {
+            const first = _labelOf(item.path, episode.index);
+            const selected = !!target && target.path === item.path && target.episode === episode.index;
+            const tone = first === undefined ? "none" : first === null ? "never" : "holds";
+            const badge = first === undefined ? "—" : first === null ? "never" : `from ${first + 1}`;
+            const row = document.createElement("div");
+            row.className = `episode-row episode-row--selectable ${selected ? "episode-row--selected" : ""}`.trim();
+            row.innerHTML = `
+                <div class="episode-row__main"><span>${escapeHtml(single ? item.name : `Episode ${episode.index}`)}</span></div>
+                <span class="label-badge label-badge--${tone}" title="${escapeHtml(_labelText(first))}">${badge}</span>
+            `;
+            row.onclick = () => selectLabelEpisode(item.path, episode.index);
+            picker.appendChild(row);
+        });
+    });
+    picker.scrollTop = top;
+}
+
+function _renderLabelStatus() {
+    const box = byId("label-status");
+    if (!box) return;
+    const names = byId("label-check-names");
+    if (names) {
+        names.innerHTML = _labelCheckNames().map((name) => `<option value="${escapeHtml(name)}"></option>`).join("");
+    }
+    const check = state.labelCheck.trim();
+    const valid = LABEL_CHECK_NAME.test(check);
+    const target = state.labelTarget;
+    const first = target ? _labelOf(target.path, target.episode) : undefined;
+    const summary = _labelSummary();
+    let line = "Pick an episode.";
+    if (!valid) {
+        line = check ? "A check name is 1-64 letters, digits, '.', '_' or '-'." : "Name the check you are labelling.";
+    } else if (target) {
+        line = `This episode: ${_labelText(first)}.`;
+    }
+    const counts = !valid ? "" : summary.episodes
+        ? `${summary.episodes} episode${summary.episodes === 1 ? "" : "s"} labelled: ${summary.reached} reach it, ${summary.never} never.`
+        : "No episodes labelled for this check yet.";
+    const ready = valid && !!target && !!state.labelPreview && !state.labelBusy;
+    const disabled = ready ? "" : "disabled";
+    box.innerHTML = `
+        <div class="label-bar__text"><span>${escapeHtml(line)}</span><small>${escapeHtml(counts)}</small></div>
+        <div class="label-bar__actions">
+            ${valid && typeof first === "number" ? `<button class="secondary-button" id="label-goto" type="button" ${state.labelPreview ? "" : "disabled"}>Go to frame ${first + 1}</button>` : ""}
+            ${valid && first !== undefined ? `<button class="secondary-button" id="label-clear" type="button" ${disabled}>Clear</button>` : ""}
+            <button class="secondary-button" id="label-never" type="button" ${disabled}>Never holds</button>
+            <button id="label-holds" type="button" ${disabled}>Holds from here</button>
+        </div>
+    `;
+    const goto = byId("label-goto");
+    if (goto) {
+        goto.onclick = () => {
+            state.labelPlaying = false;
+            _stopDatasetPlayback("labelPlaying");
+            state.labelFrame = first;
+            _renderLabelPreview();
+        };
+    }
+    const clear = byId("label-clear");
+    if (clear) clear.onclick = () => saveLabel(undefined);
+    byId("label-never").onclick = () => saveLabel(null);
+    byId("label-holds").onclick = () => saveLabel(state.labelFrame);
+}
+
+function _renderLabelPreview() {
+    const block = byId("label-preview-block");
+    if (!block) return;
+    if (!state.labelTarget) {
+        block.innerHTML = `<div class="dataset-preview-empty">${WIZARD_PREVIEW_SVG}<span>Pick an episode to label.</span></div>`;
+        return;
+    }
+    if (!state.labelPreview) {
+        _showPreviewLoadingOverlay("label-preview-block");
+        return;
+    }
+    renderDatasetPreviewBlock("label-preview-block", state.labelPreview, state.labelSeries?.series || null, "labelFrame", "labelPlaying");
+}
+
+async function selectLabelEpisode(path, episode) {
+    state.labelTarget = { path, episode };
+    state.labelPreview = null;
+    state.labelSeries = null;
+    state.labelPlaying = false;
+    _stopDatasetPlayback("labelPlaying");
+    _renderLabelPicker();
+    _renderLabelStatus();
+    _renderLabelPreview();
+    const query = `path=${encodeURIComponent(path)}&episode_index=${episode}`;
+    try {
+        const preview = await api(`/datasets/preview?${query}`);
+        let series = null;
+        try {
+            series = await api(`/datasets/series?${query}`);
+        } catch (_) {
+            series = null;
+        }
+        // Ignore a stale response if another episode was picked meanwhile.
+        if (state.labelTarget?.path !== path || state.labelTarget?.episode !== episode) return;
+        state.labelPreview = preview;
+        state.labelSeries = series;
+        // Open a labelled episode at its label, so it can be checked at a glance.
+        const first = _labelOf(path, episode);
+        state.labelFrame = typeof first === "number" ? first : 0;
+    } catch (error) {
+        if (state.labelTarget?.path === path && state.labelTarget?.episode === episode) {
+            state.labelTarget = null;
+        }
+        showToast(error.message, true);
+    }
+    _renderLabelPicker();
+    _renderLabelStatus();
+    _renderLabelPreview();
+}
+
+// firstFrame: a frame index (the state holds from it), null (it never does) or
+// undefined (remove the label).
+async function saveLabel(firstFrame) {
+    const target = state.labelTarget;
+    const check = state.labelCheck.trim();
+    if (!target || !LABEL_CHECK_NAME.test(check) || state.labelBusy) return;
+    state.labelBusy = true;
+    _renderLabelStatus();
+    try {
+        state.labelViews[target.path] = firstFrame === undefined
+            ? await api(
+                `/datasets/check-labels?path=${encodeURIComponent(target.path)}&check=${encodeURIComponent(check)}&episode=${target.episode}`,
+                { method: "DELETE" },
+            )
+            : await api("/datasets/check-labels", {
+                method: "PUT",
+                body: JSON.stringify({ path: target.path, check, episode: target.episode, first_frame: firstFrame }),
+            });
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.labelBusy = false;
+        _renderLabelPicker();
+        _renderLabelStatus();
     }
 }
 

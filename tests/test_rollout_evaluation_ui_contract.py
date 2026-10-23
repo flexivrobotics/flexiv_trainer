@@ -66,8 +66,8 @@ def test_a_trial_is_shown_by_its_label() -> None:
 
 def test_the_page_loads_the_new_script_and_styles() -> None:
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
-    assert "/static/app.js?v=20261016-leader-takeover" in index
-    assert "/static/styles.css?v=20261016-leader-takeover" in index
+    assert "/static/app.js?v=20261023-label-frames" in index
+    assert "/static/styles.css?v=20261023-label-frames" in index
     assert ".rollout-eval-summary" in (WEB_ROOT / "styles.css").read_text(
         encoding="utf-8"
     )

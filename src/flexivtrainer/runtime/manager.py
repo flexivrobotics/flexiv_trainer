@@ -845,6 +845,10 @@ class RuntimeManager:
         repo_id = f"local/{dataset_path.name}"
         return dataset_path, repo_id
 
+    def dataset_root(self, dataset_path: Path) -> Path:
+        """A dataset folder, resolved; refused outside the storage root."""
+        return self._resolve_dataset_repo(dataset_path)[0]
+
     def _load_dataset(self, dataset_path: Path) -> Any:
         """Return a cached LeRobotDataset for the given path.
 
