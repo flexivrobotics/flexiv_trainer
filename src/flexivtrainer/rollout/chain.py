@@ -79,6 +79,7 @@ from pathlib import Path
 from typing import Any
 
 from flexivtrainer.evaluation.checks import Check, parse_checks
+from flexivtrainer.evaluation.outcome import DEFAULT_FAILURE_MODES
 from flexivtrainer.observability import warn
 from flexivtrainer.rollout.primitives import Primitive
 
@@ -171,6 +172,9 @@ class ChainPlan:
     #: How long a start check may take to pass (s), beyond its own hold.
     check_s: float = 1.0
     about: str = ""
+    #: What the operator may say went wrong in a run; empty takes the
+    #: defaults single rollouts use.
+    failure_modes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "steps", tuple(self.steps))
@@ -194,24 +198,33 @@ class ChainPlan:
             object.__setattr__(self, "stiffness", values)
         if not (math.isfinite(self.check_s) and self.check_s > 0):
             raise ValueError("check_s must be positive")
+        modes = tuple(self.failure_modes)
+        if not all(isinstance(mode, str) and mode.strip() for mode in modes):
+            raise ValueError("failure_modes are non-empty texts")
+        if len(set(modes)) != len(modes):
+            raise ValueError(f"failure modes repeat: {list(modes)}")
+        object.__setattr__(self, "failure_modes", modes)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ChainPlan:
         if not isinstance(data, Mapping):
             raise ValueError("a chain plan is an object")
-        known = {"steps", "checks", "stiffness", "check_s", "about"}
+        known = {"steps", "checks", "stiffness", "check_s", "about", "failure_modes"}
         unknown = sorted(set(data) - known)
         if unknown:
             raise ValueError(f"unknown chain settings {unknown}")
         steps = data.get("steps")
         if not isinstance(steps, list):
             raise ValueError("steps is a list")
+        if not isinstance(data.get("failure_modes", []), list):
+            raise ValueError("failure_modes is a list of texts")
         return cls(
             steps=tuple(ChainStep.from_dict(step) for step in steps),
             checks=parse_checks(data.get("checks")),
             stiffness=data.get("stiffness"),
             check_s=float(data.get("check_s", cls.check_s)),
             about=str(data.get("about", "")),
+            failure_modes=tuple(data.get("failure_modes") or ()),
         )
 
     def live(self, names: tuple[str, ...]) -> dict[str, Check]:
@@ -311,6 +324,7 @@ class ChainRunner:
         append_log: Callable[..., None],
         on_finished: Callable[[str], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        plan_name: str | None = None,
     ) -> None:
         self._plan = plan
         self._run_skill = run_skill
@@ -329,9 +343,12 @@ class ChainRunner:
         self._try = 0
         self._waiting: str | None = None
         self._record: dict[str, Any] = {
+            # The plan file it was started from (rollout/plans.py), if any.
+            "plan": plan_name,
             "about": plan.about,
             "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "steps": [step.name for step in plan.steps],
+            "failure_modes": list(plan.failure_modes or DEFAULT_FAILURE_MODES),
             "events": [],
             "result": None,
         }

@@ -73,6 +73,13 @@ const state = {
     rolloutPlanName: "",
     rolloutPlanBusy: false,
     rolloutLastPractice: null,
+    // Chain runs on disk with their verdicts and per-plan streaks
+    // (/rollout/chains), the finished run they were last read for, and the
+    // verdict being given on the newest run.
+    rolloutChainRuns: null,
+    rolloutChainRunsFor: "",
+    rolloutChainVerdict: { outcome: "", mode: "", note: "" },
+    rolloutChainVerdictBusy: false,
     teleopBootstrapped: false,
     rolloutBootstrapped: false,
     trainingBootstrapped: false,
@@ -7858,6 +7865,7 @@ async function bootstrapRollout() {
     refreshRolloutDevices({ silent: true }).catch((error) => showToast(error.message, true));
     refreshRolloutEvaluations().catch(() => { });
     refreshRolloutPlans().catch(() => { });
+    refreshRolloutChainRuns().catch(() => { });
     startRolloutPolling();
 }
 
@@ -8340,6 +8348,84 @@ function startRolloutPlan() {
     return rolloutPlanRequest(`/rollout/plans/${encodeURIComponent(name)}/start`);
 }
 
+async function refreshRolloutChainRuns() {
+    state.rolloutChainRuns = await api("/rollout/chains");
+    renderRolloutPlans();
+}
+
+function chainRunName(chain) {
+    return String(chain.record || "").split(/[\\/]/).pop().replace(/\.json$/, "");
+}
+
+async function saveChainVerdict(run) {
+    const verdict = state.rolloutChainVerdict;
+    if (!verdict.outcome || state.rolloutChainVerdictBusy) return;
+    if (verdict.outcome === "failure" && !verdict.mode) {
+        showToast("Choose what went wrong.", true);
+        return;
+    }
+    state.rolloutChainVerdictBusy = true;
+    renderRolloutPlans();
+    try {
+        await api("/rollout/chain/verdict", {
+            method: "POST",
+            body: JSON.stringify({
+                run,
+                outcome: verdict.outcome,
+                failure_mode: verdict.outcome === "failure" ? verdict.mode : null,
+                note: verdict.note || "",
+            }),
+        });
+        state.rolloutChainVerdict = { outcome: "", mode: "", note: "" };
+        await refreshRolloutChainRuns();
+    } catch (error) {
+        showToast(error.message, true);
+    } finally {
+        state.rolloutChainVerdictBusy = false;
+        renderRolloutPlans();
+    }
+}
+
+function _chainVerdictMarkup(run) {
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const runs = state.rolloutChainRuns || {};
+    const tally = (runs.plans || {})[run.plan || run.about || ""];
+    const tallyLine = tally
+        ? `<p class="rollout-eval-line">This plan: ${tally.runs} runs, ${tally.judged} judged, ${tally.clean} clean · clean streak <strong>${
+            tally.streak}</strong> (longest ${tally.longest_streak})</p>`
+        : "";
+    if (run.verdict) {
+        const said = run.verdict.outcome === "success"
+            ? `Success${run.clean ? ", clean" : `, helped (${plural(run.takeovers, "takeover")}, ${plural(run.operator_calls, "call")})`}`
+            : run.verdict.outcome === "failure" ? `Failure (${run.verdict.failure_mode})` : "Can't tell";
+        return `<p class="rollout-eval-line">Your verdict: <strong>${escapeHtml(said)}</strong></p>${tallyLine}`;
+    }
+    const verdict = state.rolloutChainVerdict;
+    const busy = state.rolloutChainVerdictBusy;
+    const button = (value, label) => `<button type="button" class="secondary-button rollout-eval-outcome${
+        verdict.outcome === value ? " rollout-eval-outcome--active" : ""
+    }" data-chain-outcome="${value}" ${busy ? "disabled" : ""}>${label}</button>`;
+    return `
+        <div class="rollout-eval-verdict">
+            <p class="rollout-eval-line">How did this run go? A clean run is a success with no takeover and no call for you.</p>
+            <div class="rollout-eval-outcomes">
+                ${button("success", "Success")}
+                ${button("failure", "Failure")}
+                ${button("unknown", "Can't tell")}
+            </div>
+            ${verdict.outcome === "failure" ? `
+                <select id="rollout-chain-mode">
+                    <option value="">What went wrong?</option>
+                    ${(run.failure_modes || []).map((mode) => `<option value="${escapeHtml(mode)}"${
+                        mode === verdict.mode ? " selected" : ""}>${escapeHtml(mode)}</option>`).join("")}
+                </select>` : ""}
+            <input type="text" id="rollout-chain-note" placeholder="Note (optional)" autocomplete="off" maxlength="2000">
+            <button type="button" class="start-button" id="rollout-chain-save" ${
+                verdict.outcome && !busy ? "" : "disabled"}>Save verdict</button>
+        </div>
+        ${tallyLine}`;
+}
+
 function formatChainEvent(event) {
     let what = event.event;
     if (event.attempt) what += ` ${event.attempt}`;
@@ -8361,7 +8447,7 @@ function chainStateText(chain) {
     return chain.state;
 }
 
-function _chainMarkup(chain) {
+function _chainMarkup(chain, run) {
     const steps = (chain.steps || []).map((name, index) => {
         const tone = index < chain.step_index
             ? " rollout-chain-step--done"
@@ -8388,6 +8474,7 @@ function _chainMarkup(chain) {
                 </div>` : ""}
             ${events ? `<ul class="rollout-chain-events">${events}</ul>` : ""}
             ${record ? `<p class="rollout-eval-line">Record: <code>${escapeHtml(record)}</code></p>` : ""}
+            ${chain.result && run ? _chainVerdictMarkup(run) : ""}
         </div>`;
 }
 
@@ -8438,10 +8525,23 @@ function renderRolloutPlans() {
     const chain = status.chain || null;
     const chainLive = !!chain && !chain.result;
     const plans = state.rolloutPlans || [];
-    // Like the other panels: rebuild only when something shown changed.
+    // A chain that has just finished: read its run, to judge it.
+    const finished = chain && chain.result ? `${chain.record}|${chain.result}` : "";
+    if (finished && state.rolloutChainRunsFor !== finished) {
+        state.rolloutChainRunsFor = finished;
+        refreshRolloutChainRuns().catch(() => { });
+    }
+    const run = chain
+        ? ((state.rolloutChainRuns && state.rolloutChainRuns.runs) || [])
+            .find((entry) => entry.name === chainRunName(chain)) || null
+        : null;
+    // Like the other panels: rebuild only when something shown changed. The
+    // note being typed is kept out, so the poll never wipes it.
     const renderKey = JSON.stringify([
         status.status, plans, state.rolloutPlanName, state.rolloutPlanBusy,
-        chain, practice, practiceLive,
+        chain, practice, practiceLive, run, state.rolloutChainRuns && state.rolloutChainRuns.plans,
+        state.rolloutChainVerdict.outcome, state.rolloutChainVerdict.mode,
+        state.rolloutChainVerdictBusy,
     ]);
     if (panel.dataset.renderKey === renderKey) {
         return;
@@ -8491,7 +8591,7 @@ function renderRolloutPlans() {
                 state.rolloutPlanBusy || status.status === "stopping" ? "disabled" : ""}>Stop</button>` : ""}
             ${!live && plans.length ? `<button type="button" class="start-button" id="rollout-plan-start" ${canStart ? "" : "disabled"}>${startLabel}</button>` : ""}
         </div>
-        ${chain ? _chainMarkup(chain) : ""}
+        ${chain ? _chainMarkup(chain, run) : ""}
         ${practice ? _practiceMarkup(practice, practiceLive) : ""}
     `;
 
@@ -8515,6 +8615,29 @@ function renderRolloutPlans() {
     if (skip) skip.onclick = () => rolloutPlanRequest("/rollout/chain/continue", { action: "skip" });
     const goOn = byId("rollout-practice-continue");
     if (goOn) goOn.onclick = () => rolloutPlanRequest("/rollout/practice/continue");
+    panel.querySelectorAll("[data-chain-outcome]").forEach((button) => {
+        button.onclick = () => {
+            state.rolloutChainVerdict.outcome = button.dataset.chainOutcome;
+            if (state.rolloutChainVerdict.outcome !== "failure") {
+                state.rolloutChainVerdict.mode = "";
+            }
+            renderRolloutPlans();
+        };
+    });
+    const mode = byId("rollout-chain-mode");
+    if (mode) {
+        mode.onchange = () => {
+            state.rolloutChainVerdict.mode = mode.value;
+            renderRolloutPlans();
+        };
+    }
+    const note = byId("rollout-chain-note");
+    if (note) {
+        note.value = state.rolloutChainVerdict.note || "";
+        note.oninput = () => { state.rolloutChainVerdict.note = note.value; };
+    }
+    const save = byId("rollout-chain-save");
+    if (save && run) save.onclick = () => saveChainVerdict(run.name);
 }
 
 // ---------------------------------------------------------------------------
