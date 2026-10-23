@@ -212,6 +212,29 @@ def continue_chain(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.get("/plans")
+def list_plans(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    """The chain and practice plans in <storage>/rollouts/plans/."""
+    return {"plans": runtime.rollout.plans()}
+
+
+@router.post("/plans/{name}/start")
+def start_plan(
+    name: str, runtime: RuntimeManager = Depends(get_runtime_manager)
+) -> dict:
+    info("Plan requested", f"plan={name}")
+    try:
+        result = runtime.rollout.start_plan(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    ok("Plan started", f"plan={name}")
+    return result
+
+
 @router.get("/checkpoint-info")
 def rollout_checkpoint_info(
     path: str | None = None,

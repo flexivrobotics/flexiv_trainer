@@ -88,6 +88,7 @@ from flexivtrainer.rollout.executors.waypoint import (
 )
 from flexivtrainer.rollout.hardware import _default_robot_factory
 from flexivtrainer.rollout.live_checks import LiveChecks
+from flexivtrainer.rollout.plans import CHAIN, list_plans, read_plan
 from flexivtrainer.rollout.primitives import Primitive, PrimitiveRunner
 from flexivtrainer.rollout.recorder import (
     RecordingPlan,
@@ -1768,6 +1769,20 @@ class RolloutService:
                 {key: progress[key] for key in ("name", "about", "total", "judged")}
             )
         return sessions
+
+    def plans(self) -> list[dict[str, Any]]:
+        """The chain and practice plans on disk (plans.py)."""
+        return list_plans(self._settings.storage.rollouts_root)
+
+    def start_plan(self, name: str) -> dict[str, Any]:
+        """Run the chain or practice plan `name` from disk."""
+        kind, plan, data = read_plan(self._settings.storage.rollouts_root, name)
+        if kind == CHAIN:
+            return self.start_chain(plan)
+        checkpoint = Path(data["checkpoint_path"]).expanduser()
+        if not checkpoint.is_absolute():
+            checkpoint = self._settings.storage.root / checkpoint
+        return self.start(str(checkpoint), task=data.get("task", ""), practice=plan)
 
     def evaluation_session(self, name: str) -> dict[str, Any]:
         return SessionStore(self._settings.storage.rollouts_root).progress(name)
