@@ -101,7 +101,10 @@ def _bad_name(name: str) -> str | None:
         )
     if name == "session":
         # Evaluation sessions are folders holding a session.json.
-        return "session.json makes the plans folder look like an evaluation session; rename it"
+        return (
+            "session.json makes the plans folder look like an evaluation session; "
+            "rename it"
+        )
     return None
 
 
