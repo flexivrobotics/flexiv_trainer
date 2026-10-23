@@ -38,6 +38,10 @@ def _wait(job, seconds=120.0):
     return job.status()
 
 
+def _script(code):
+    return lambda request, data: [sys.executable, "-c", code]
+
+
 def test_the_command_is_the_one_the_readme_gives(tmp_path):
     job = CheckTraining(tmp_path, python="python")
     data = [tmp_path / "datasets" / "a", tmp_path / "datasets" / "b"]
@@ -96,24 +100,16 @@ def test_a_failed_training_says_why_and_a_running_one_can_be_stopped(
 ):
     job = CheckTraining(tmp_path)
     data = [tmp_path / "datasets" / "a"]
-    monkeypatch.setattr(
-        job,
-        "command",
-        lambda request, data: [
-            sys.executable, "-c",
-            "import sys; print('reading', file=sys.stderr); "
-            "print('error: no episode has a label', file=sys.stderr); sys.exit(2)",
-        ],
-    )  # fmt: skip
+    failing = (
+        "import sys; print('reading', file=sys.stderr); "
+        "print('error: no episode has a label', file=sys.stderr); sys.exit(2)"
+    )
+    monkeypatch.setattr(job, "command", _script(failing))
     job.start(REQUEST, data)
     status = _wait(job)
     assert status["state"] == "failed"
     assert status["error"] == "no episode has a label"
-    monkeypatch.setattr(
-        job,
-        "command",
-        lambda request, data: [sys.executable, "-c", "import time; time.sleep(60)"],
-    )
+    monkeypatch.setattr(job, "command", _script("import time; time.sleep(60)"))
     job.start({**REQUEST, "name": "slow"}, data)
     with pytest.raises(RuntimeError, match="already training"):
         job.start({**REQUEST, "name": "other"}, data)
@@ -141,10 +137,6 @@ def test_the_routes_keep_training_to_the_storage_root(tmp_path, monkeypatch):
     assert client.get("/checks/train").json()["state"] == "idle"
     assert client.post("/checks/train/stop").status_code == 409
     assert client.get("/checks").json() == {"checks": []}
-
-
-def _script(code):
-    return lambda request, data: [sys.executable, "-c", code]
 
 
 def test_no_new_job_while_one_is_stopping_and_an_old_one_cannot_touch_it(
