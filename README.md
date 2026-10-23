@@ -632,7 +632,9 @@ the tool comes to rest inside a box, in the arm's base frame, for at least
 
 `when` is `any` (at any point in the rollout) or `end` (still there when the
 rollout ends). `arm` picks an arm by its position in the tick log; the default
-is the first.
+is the first. A box check can also act while a trial runs, with `live` and
+`end_on_pass` as a learned check does (next section); it is then scored from
+the measured pose on every tick.
 
 Your verdict stays the measurement. The panel shows how often each check
 agrees with the verdicts, how many failures it passed and how many successes
@@ -846,6 +848,76 @@ you drive, the `action` column holds what teleoperation records, so a corrected
 part reads like a demonstration. `rollout_outcome.json` counts the takeovers,
 the ticks and seconds you drove, and every switch's duration. B-spline policies
 cannot be taken over yet.
+
+## Run A Task As A Chain Of Steps
+
+A longer task can be split into short steps, each a skill or a generic
+primitive, joined by checks. Each step may have a start check, which must pass
+before it runs, and an end check, which ends it when it passes. The checks are
+declared as in an evaluation session: `settled_in_box` or `learned`.
+
+```json
+{
+  "steps": [
+    {"name": "approach", "skill": "skills/approach", "end": "ready", "max_s": 30},
+    {
+      "name": "insert",
+      "skill": "skills/insert",
+      "start": "ready",
+      "end": "home",
+      "max_s": 20,
+      "tries": 3,
+      "back_off": {
+        "moves": [
+          {"tool_m": [0, 0, -0.02]},
+          {"box_min_m": [0.40, -0.01, 0.31], "box_max_m": [0.42, 0.01, 0.33]}
+        ],
+        "max_force_n": 25
+      }
+    },
+    {"name": "lift", "primitive": {"moves": [{"base_m": [0, 0, 0.05]}]}}
+  ],
+  "checks": {
+    "ready": {"kind": "settled_in_box", "box_min_m": [0.40, -0.01, 0.31], "box_max_m": [0.42, 0.01, 0.33], "hold_s": 0.3},
+    "home": {"kind": "learned", "model": "checks/home", "hold_s": 0.2}
+  }
+}
+```
+
+- **A skill step** names a checkpoint (absolute, or relative to the storage
+  root) and runs as a rollout until its end check passes, or until `max_s`
+  seconds are up. It needs an end check: nothing else says it is done.
+- **A primitive step** moves the tool in straight lines, slowly, with every
+  axis motion-controlled. A move is one of `tool_m` (an offset in the tool's
+  own frame), `base_m` (an offset in the base frame), or a box
+  (`box_min_m`, `box_max_m`: to the point of the box nearest the tool). A move
+  may also set `rotation` ([qw, qx, qy, qz]) and `speed_m_s` (default 0.02).
+  The step is done when its moves are, and its end check, if any, has passed.
+
+**When a step fails**, the chain backs off and tries again:
+
+1. The step's `back_off` primitive takes the arm back towards where the step
+   starts, and the step's start check must pass again.
+2. The step runs again, up to `tries` times in all.
+
+After its last try, the chain stops and calls you. It also calls you at once
+when a back-off meets more force than its `max_force_n` (a half-latched part
+needs a person, not more force), when a start check does not pass, and when
+the safety envelope stopped a try. Do what the chain could not, with the leader
+arm through teleoperation or by hand, then send
+`POST /rollout/chain/continue` with `{"action": "retry"}` to run the step again
+from its start check, or `{"action": "skip"}` to count it as done.
+
+Start a chain with `POST /rollout/chain` and `{"plan": {...}}`; stop it as you
+stop a rollout. Each step runs as a rollout of its own, so the leader arm can
+take over a skill as in any rollout; primitives cannot be taken over. A
+back-off and a start check move at their skill's stiffness. A primitive step
+moves at the plan's `stiffness`, or `ROLLOUT__CARTESIAN_STIFFNESS`, which wins
+over both as it does for a skill. `GET /rollout/status` reports the chain under
+`chain`: its state, the step and try, and why it waits for you. Every run is
+written as it goes to `<storage>/rollouts/chains/<time>.json`: each try, how it
+ended and in what time, its back-offs, your takeovers and your calls. A chain
+drives one arm. There is no chain page in the UI yet.
 
 ## Typical End-To-End Session
 

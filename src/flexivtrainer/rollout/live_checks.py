@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Score learned checks while a rollout runs.
+"""Score checks while a rollout runs.
 
 A learned check is trained and scored on recordings (evaluation/learned_check.py).
 To end a skill when its state is reached, or to reward learning on the robot,
@@ -21,9 +21,13 @@ control loop does not have, so the planner hands each tick's frames and state
 over and moves on; a worker thread scores the NEWEST tick it was given,
 skipping any that arrived while it was busy.
 
-Each check keeps the offline rule: it passes once its probability has stayed
-at or above the threshold for `hold_s`, timed by the ticks it scored. A check
-with `end_on_pass` ends the rollout when it passes, as the end of a skill.
+A box check (`settled_in_box`) needs only the measured pose and velocity, so
+it is scored on the planner's thread, on every tick.
+
+Each check keeps the offline rule: it passes once it has held for `hold_s`,
+timed by the ticks it scored -- a learned check's probability at or above its
+threshold, a box check's tool inside the box and nearly still. A check with
+`end_on_pass` ends the rollout when it passes, as the end of a skill.
 
 The probabilities are written into each tick of the recording -- the newest
 one scored, so about a tick behind the frame it is written beside. The verdict
@@ -40,7 +44,7 @@ from typing import Any
 
 import numpy as np
 
-from flexivtrainer.evaluation.checks import LearnedCheck
+from flexivtrainer.evaluation.checks import Check, LearnedCheck, SettledInBox
 from flexivtrainer.observability import describe_exception, warn
 
 __all__ = ["LiveChecks"]
@@ -58,11 +62,11 @@ class _Held:
 
 
 class LiveChecks:
-    """The learned checks of one rollout, scored off the control loop."""
+    """The checks of one rollout, scored while it runs."""
 
     def __init__(
         self,
-        checks: dict[str, LearnedCheck],
+        checks: dict[str, Check],
         storage_root: Path | None,
         *,
         state_names: Any,
@@ -76,6 +80,18 @@ class LiveChecks:
                 load_model as loader,
             )
         self._checks = dict(checks)
+        self._learned = {
+            name: check
+            for name, check in self._checks.items()
+            if isinstance(check, LearnedCheck)
+        }
+        self._boxes = {
+            name: check
+            for name, check in self._checks.items()
+            if isinstance(check, SettledInBox)
+        }
+        # Each box check's last sample, for a speed when the tick carries none.
+        self._previous: dict[str, tuple[float, list[float]]] = {}
         self._storage_root = storage_root
         self._state_names = state_names
         self._loader = loader
@@ -94,13 +110,21 @@ class LiveChecks:
     def __bool__(self) -> bool:
         return bool(self._checks)
 
+    @property
+    def needs_frames(self) -> bool:
+        """Whether a check reads camera frames and the state vector; box
+        checks read only the measured pose."""
+        return bool(self._learned)
+
     # --- the service's side ----------------------------------------------------
 
     def start(self) -> None:
         """Load every model, then start scoring. Raises if one does not load,
         so a trial never starts with a check that cannot answer."""
-        for name, check in self._checks.items():
+        for name, check in self._learned.items():
             self._models[name] = self._loader(check.model_path(self._storage_root))
+        if not self._learned:
+            return
         self._thread = threading.Thread(
             target=self._run, name="rollout-live-checks", daemon=True
         )
@@ -119,6 +143,7 @@ class LiveChecks:
         with self._lock:
             self._generation += 1
             self._pending = None
+            self._previous = {}
             self._held = {name: _Held() for name in self._checks}
 
     # --- the planner's side ----------------------------------------------------
@@ -133,6 +158,10 @@ class LiveChecks:
         pose_format: str,
     ) -> None:
         """Hand over one tick. Never blocks; replaces a tick not yet scored."""
+        if self._boxes:
+            self._score_boxes(float(t), snapshot)
+        if not self._learned:
+            return
         item = {
             "t": float(t),
             "state": np.asarray(state, dtype=np.float32).reshape(-1),
@@ -164,6 +193,11 @@ class LiveChecks:
                     return name
         return None
 
+    def all_passed(self) -> bool:
+        """Whether every check has passed."""
+        with self._lock:
+            return all(held.first_at is not None for held in self._held.values())
+
     def summary(self) -> dict[str, Any]:
         """Per check: whether and when it passed, its last probability, and how
         many ticks were scored and skipped -- for the trial's outcome."""
@@ -181,6 +215,30 @@ class LiveChecks:
             }
             return {"checks": checks, "scored": self.scored, "skipped": self.skipped}
 
+    def _score_boxes(self, t: float, snapshot: dict[str, Any]) -> None:
+        robots = snapshot.get("robots") if isinstance(snapshot, dict) else None
+        arms = list((robots or {}).values())
+        with self._lock:
+            for name, check in self._boxes.items():
+                states = (
+                    arms[check.arm].get("states") if check.arm < len(arms) else None
+                )
+                if not isinstance(states, dict) or "tcp_pose" not in states:
+                    continue
+                position = [float(v) for v in states["tcp_pose"][:3]]
+                velocity = states.get("tcp_vel")
+                speed = None
+                if velocity is not None and len(velocity) >= 3:
+                    speed = float(np.linalg.norm(np.asarray(velocity[:3], float)))
+                elif name in self._previous and t > self._previous[name][0]:
+                    t0, p0 = self._previous[name]
+                    speed = float(np.linalg.norm(np.subtract(position, p0))) / (t - t0)
+                self._previous[name] = (t, position)
+                inside = check.holds(position, speed)
+                held = self._held[name]
+                held.p, held.t = float(inside), t
+                _hold(held, check, t, inside)
+
     # --- the worker ------------------------------------------------------------
 
     def _run(self) -> None:
@@ -196,8 +254,8 @@ class LiveChecks:
             except Exception as exc:  # a check must never stop the rollout
                 detail = describe_exception(exc)
                 with self._lock:
-                    for held in self._held.values():
-                        held.error = detail
+                    for name in self._learned:
+                        self._held[name].error = detail
                 warn("A live check could not be scored", detail)
 
     def _score(self, item: dict[str, Any]) -> None:
@@ -237,10 +295,16 @@ class LiveChecks:
                     else check.threshold
                 )
                 held.p, held.t = p, t
-                if p >= threshold:
-                    if held.run_start is None:
-                        held.run_start = t
-                    if held.first_at is None and t - held.run_start >= check.hold_s:
-                        held.first_at = held.run_start
-                else:
-                    held.run_start = None
+                _hold(held, check, t, p >= threshold)
+
+
+def _hold(held: _Held, check: Check, t: float, passing: bool) -> None:
+    """The offline rule, one tick at a time: a check passes once it has held
+    for `hold_s`, and is timed from the start of that stretch."""
+    if passing:
+        if held.run_start is None:
+            held.run_start = t
+        if held.first_at is None and t - held.run_start >= check.hold_s:
+            held.first_at = held.run_start
+    else:
+        held.run_start = None

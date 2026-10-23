@@ -37,14 +37,14 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from flexivtrainer.practice.space import Command, Sample
+from flexivtrainer.practice.space import Sample
+from flexivtrainer.rollout.primitives import MoveInterrupted, move_tool
 from flexivtrainer.rollout.safety import SafetyEnvelope
 
 __all__ = ["ResetInterrupted", "StartBox", "go_to_start"]
 
-
-class ResetInterrupted(RuntimeError):
-    """Someone else took the arm while it was being reset."""
+#: Someone else took the arm while it was being reset.
+ResetInterrupted = MoveInterrupted
 
 
 def _triple(value: Any, name: str) -> tuple[float, float, float]:
@@ -147,28 +147,23 @@ def go_to_start(
     Raises ResetInterrupted when a send is refused (an operator has the arm),
     and RuntimeError when the arm does not get there in time.
     """
-    safety = safety or SafetyEnvelope()
-    limits = (box.speed_m_s, 0.5, 0.5, 1.0)
 
     def move(position: np.ndarray, target: np.ndarray, what: str) -> None:
-        safety.check_workspace([[position.tolist()]])
-        pose = Command(position, target, np.zeros(3)).pose()
-        if not send(pose, limits):
-            raise ResetInterrupted(f"the arm was taken while it {what}")
-        deadline = clock() + box.timeout_s
-        while not stop.is_set():
-            here = read()
-            off = float(np.linalg.norm(here.position - position))
-            turned = Rotation.from_matrix(here.rotation.T @ target).magnitude()
-            if off <= box.tolerance_m and math.degrees(turned) <= box.tolerance_deg:
-                return
-            if clock() > deadline:
-                raise RuntimeError(
-                    f"the arm did not reach the start within {box.timeout_s:g} s "
-                    f"while it {what}: {off * 1000:.1f} mm and "
-                    f"{math.degrees(turned):.1f} deg away"
-                )
-            stop.wait(0.02)
+        move_tool(
+            position,
+            target,
+            read=read,
+            send=send,
+            stop=stop,
+            speed_m_s=box.speed_m_s,
+            tolerance_m=box.tolerance_m,
+            tolerance_deg=box.tolerance_deg,
+            timeout_s=box.timeout_s,
+            what=what,
+            goal="the start",
+            safety=safety,
+            clock=clock,
+        )
 
     here = read()
     if box.retreat_m:

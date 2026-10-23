@@ -357,6 +357,22 @@ def test_a_checkpoint_with_a_practice_space_rolls_out_as_a_step_skill(tmp_path, 
     assert "Step skill loaded" in messages and "100 steps/s" in messages
 
 
+def test_a_clock_that_reads_the_same_for_two_steps_does_not_stop_the_skill(
+    tmp_path, rdk, monkeypatch
+):
+    # Windows' clock is coarse enough for two steps to start at one reading.
+    monkeypatch.setattr(
+        "flexivtrainer.practice.runner.time", SimpleNamespace(monotonic=lambda: 7.0)
+    )
+    service, _ = _service(tmp_path, _Arm())
+    service._settings.rollout.max_steps = 3
+    service.start(_skill(tmp_path))
+    _wait_until_done(service)
+    status = service.status()
+    assert status["stop_reason"] == "timeout" and status["error"] is None
+    assert [m["hz"] for m in status["metrics"]] == [0.0] * 3
+
+
 def test_a_step_skill_drives_one_arm(tmp_path, rdk):
     service, _ = _service(tmp_path, _Arm(), sides=("left_arm", "right_arm"))
     with pytest.raises(RuntimeError, match="drives one arm"):
