@@ -180,7 +180,7 @@ const FINISHED_RUN = `{
 }`;
 
 test('a finished chain asks for a verdict, and a failure needs what went wrong', async () => {
-    const { run, element, html } = harness();
+    const { run, html } = harness();
     run(`
         const chain = ${WAITING_CHAIN};
         globalThis.chainRuns = {runs: [${FINISHED_RUN}], plans: {pick_place: {
