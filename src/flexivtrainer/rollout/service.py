@@ -61,6 +61,7 @@ from flexivtrainer.rollout.chain import (
     ChainStep,
     Outcome,
 )
+from flexivtrainer.rollout.chain_runs import judge_run, read_runs, summarize_runs
 from flexivtrainer.rollout.checkpoint import (
     _checkpoint_target_hz,
     _default_policy_loader,
@@ -996,8 +997,9 @@ class RolloutService:
         if chain is not None and chain.is_alive():
             raise RuntimeError("A chain is running; stop it first")
 
-    def start_chain(self, plan: ChainPlan) -> dict[str, Any]:
-        """Run `plan`'s steps in order, each as a rollout of its own."""
+    def start_chain(self, plan: ChainPlan, name: str | None = None) -> dict[str, Any]:
+        """Run `plan`'s steps in order, each as a rollout of its own. `name` is
+        the plan file's, when it came from one: runs are counted by it."""
         self._refuse_during_chain()
         with self._lock:
             if self._awaiting is not None:
@@ -1047,6 +1049,7 @@ class RolloutService:
             run_primitive=partial(self._chain_primitive, plan, skills),
             record_path=record,
             append_log=self._append_log,
+            plan_name=name,
         )
         with self._lock:
             self._logs.clear()
@@ -1778,11 +1781,47 @@ class RolloutService:
         """Run the chain or practice plan `name` from disk."""
         kind, plan, data = read_plan(self._settings.storage.rollouts_root, name)
         if kind == CHAIN:
-            return self.start_chain(plan)
+            return self.start_chain(plan, name)
         checkpoint = Path(data["checkpoint_path"]).expanduser()
         if not checkpoint.is_absolute():
             checkpoint = self._settings.storage.root / checkpoint
         return self.start(str(checkpoint), task=data.get("task", ""), practice=plan)
+
+    def _live_chain_run(self) -> str | None:
+        """The run of the chain going now, whose record has no result yet."""
+        chain = self._chain
+        if chain is None:
+            return None
+        status = chain.status()
+        return None if status["result"] is not None else Path(status["record"]).stem
+
+    def chain_runs(self, limit: int = 50) -> dict[str, Any]:
+        """The newest chain runs, and per plan how many in a row were clean."""
+        directory = self._settings.storage.rollouts_root / CHAINS_DIR
+        runs = read_runs(directory, live=self._live_chain_run())
+        return {"runs": runs[:limit], "plans": summarize_runs(runs)}
+
+    def chain_verdict(
+        self, run: str, outcome: str, *, failure_mode: str | None = None, note: str = ""
+    ) -> dict[str, Any]:
+        """The operator's judgement of a finished chain run."""
+        judged = judge_run(
+            self._settings.storage.rollouts_root / CHAINS_DIR,
+            run,
+            outcome,
+            failure_mode=failure_mode,
+            note=note,
+            live=self._live_chain_run(),
+        )
+        verdict = judged["verdict"]
+        self._append_log(
+            "OK",
+            "CHAIN",
+            "Verdict saved",
+            f"{run}: {verdict['outcome']}"
+            + (f" ({verdict['failure_mode']})" if verdict["failure_mode"] else ""),
+        )
+        return judged
 
     def evaluation_session(self, name: str) -> dict[str, Any]:
         return SessionStore(self._settings.storage.rollouts_root).progress(name)

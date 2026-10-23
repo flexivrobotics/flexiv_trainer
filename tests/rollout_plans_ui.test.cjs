@@ -37,6 +37,7 @@ function harness() {
         globalThis.reply = {status: 'running'};
         api = async (path, request) => {
             if (path === '/rollout/plans') return {plans: globalThis.plans};
+            if (path === '/rollout/chains') { globalThis.listed = (globalThis.listed || 0) + 1; return globalThis.chainRuns; }
             posted.push([path, request && request.body ? JSON.parse(request.body) : null]);
             return globalThis.reply;
         };
@@ -170,4 +171,174 @@ test('a stopped practice keeps its totals in view', () => {
     assert.match(shown, /4 episodes, 1 success/);
     assert.doesNotMatch(shown, /Practice waits for you/);
     assert.doesNotMatch(shown, /rollout-plan-stop/);
+});
+
+const FINISHED_RUN = `{
+    name: '20261023_010203', plan: 'pick_place', about: 'pick, place, release', result: 'done',
+    takeovers: 0, operator_calls: 0, back_offs: 1, failure_modes: ['dropped it', 'other'],
+    verdict: null, clean: false,
+}`;
+
+test('a finished chain asks for a verdict, and a failure needs what went wrong', async () => {
+    const { run, html } = harness();
+    run(`
+        const chain = ${WAITING_CHAIN};
+        globalThis.chainRuns = {runs: [${FINISHED_RUN}], plans: {pick_place: {
+            runs: 4, judged: 3, successes: 3, clean: 2, streak: 2, longest_streak: 2}}};
+        state.rolloutStatus = {status: 'idle', chain: {...chain, result: 'done', step_index: 3,
+            waiting_for_operator: null, state: 'done'}};
+        renderRolloutPlans();
+    `);
+    // The finished run is read once, then shown with the form.
+    await run('Promise.resolve()');
+    run('renderRolloutPlans(); renderRolloutPlans(); assert.equal(listed, 1);');
+    assert.match(html(), /How did this run go\?/);
+    assert.match(html(), /This plan: 4 runs, 3 judged, 2 clean · clean streak <strong>2<\/strong> \(longest 2\)/);
+    run(`
+        globalThis.toasts = [];
+        showToast = (message) => toasts.push(message);
+        state.rolloutChainVerdict.outcome = 'failure';
+        renderRolloutPlans();
+    `);
+    assert.match(html(), /<option value="dropped it">dropped it<\/option>/);
+    await run(`saveChainVerdict('20261023_010203')`);
+    run(`assert.equal(posted.length, 0); assert.deepEqual(toasts, ['Choose what went wrong.']);`);
+    run(`
+        state.rolloutChainVerdict.mode = 'dropped it';
+        state.rolloutChainVerdict.note = 'slid out';
+        globalThis.chainRuns = {runs: [{...${FINISHED_RUN}, verdict: {outcome: 'failure', failure_mode: 'dropped it'}}],
+            plans: {pick_place: {runs: 4, judged: 4, successes: 3, clean: 2, streak: 0, longest_streak: 2}}};
+    `);
+    await run(`saveChainVerdict('20261023_010203')`);
+    run(`
+        assert.deepEqual(posted, [['/rollout/chain/verdict', {run: '20261023_010203', outcome: 'failure',
+            failure_mode: 'dropped it', note: 'slid out'}]]);
+        assert.deepEqual(state.rolloutChainVerdict, {outcome: '', mode: '', note: ''});
+    `);
+    assert.match(html(), /Your verdict: <strong>Failure \(dropped it\)<\/strong>/);
+    assert.match(html(), /clean streak <strong>0<\/strong>/);
+    assert.doesNotMatch(html(), /How did this run go/);
+});
+
+test('a judged run says whether it was clean or helped', () => {
+    const { run, html } = harness();
+    run(`
+        const chain = ${WAITING_CHAIN};
+        state.rolloutChainRunsFor = '/s/rollouts/chains/20261023_010203.json|done';
+        state.rolloutChainRuns = {runs: [{...${FINISHED_RUN}, takeovers: 2, operator_calls: 1,
+            verdict: {outcome: 'success', failure_mode: null}}], plans: {}};
+        state.rolloutStatus = {status: 'idle', chain: {...chain, result: 'done', step_index: 3,
+            waiting_for_operator: null, state: 'done'}};
+        renderRolloutPlans();
+    `);
+    assert.match(html(), /Your verdict: <strong>Success, helped \(2 takeovers, 1 call\)<\/strong>/);
+    run(`
+        state.rolloutChainRuns = {runs: [{...${FINISHED_RUN}, clean: true,
+            verdict: {outcome: 'success', failure_mode: null}}], plans: {}};
+        renderRolloutPlans();
+    `);
+    assert.match(html(), /Your verdict: <strong>Success, clean<\/strong>/);
+});
+
+test('a success sends no failure mode, and a running chain is not judged yet', async () => {
+    const { run, html } = harness();
+    run(`
+        const chain = ${WAITING_CHAIN};
+        state.rolloutChainRunsFor = 'x';
+        state.rolloutChainRuns = {runs: [{...${FINISHED_RUN}, result: null}], plans: {}};
+        state.rolloutStatus = {status: 'running', chain};
+        renderRolloutPlans();
+    `);
+    assert.doesNotMatch(html(), /How did this run go/);
+    run(`
+        globalThis.chainRuns = {runs: [], plans: {}};
+        state.rolloutChainVerdict = {outcome: 'success', mode: 'dropped it', note: ''};
+    `);
+    await run(`saveChainVerdict('20261023_010203')`);
+    run(`assert.deepEqual(posted, [['/rollout/chain/verdict', {run: '20261023_010203', outcome: 'success',
+        failure_mode: null, note: ''}]]);`);
+});
+
+test('a verdict half given on one run is not carried to the next', () => {
+    const { run, html } = harness();
+    run(`
+        const chain = ${WAITING_CHAIN};
+        const done = {...chain, result: 'done', step_index: 3, waiting_for_operator: null, state: 'done'};
+        state.rolloutChainRunsFor = 'x';
+        state.rolloutChainRuns = {runs: [${FINISHED_RUN}, {...${FINISHED_RUN}, name: '20261023_020000'}], plans: {}};
+        state.rolloutStatus = {status: 'idle', chain: done};
+        renderRolloutPlans();
+        state.rolloutChainVerdict = {outcome: 'success', mode: '', note: 'A looked fine'};
+        renderRolloutPlans();
+        state.rolloutStatus = {status: 'idle', chain: {...done, record: '/s/rollouts/chains/20261023_020000.json'}};
+        renderRolloutPlans();
+        assert.deepEqual(state.rolloutChainVerdict, {outcome: '', mode: '', note: ''});
+    `);
+    assert.doesNotMatch(html(), /rollout-eval-outcome--active/);
+});
+
+test('a failed read of the runs is tried again', async () => {
+    const { run } = harness();
+    run(`
+        globalThis.now = 100000;
+        Date.now = () => now;
+        globalThis.failing = true;
+        const answer = api;
+        api = async (path, request) => {
+            if (path === '/rollout/chains' && failing) { listed = (globalThis.listed || 0) + 1; throw new Error('500'); }
+            return answer(path, request);
+        };
+        globalThis.chainRuns = {runs: [${FINISHED_RUN}], plans: {}};
+        const chain = ${WAITING_CHAIN};
+        state.rolloutStatus = {status: 'idle', chain: {...chain, result: 'done', step_index: 3,
+            waiting_for_operator: null, state: 'done'}};
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`
+        assert.equal(listed, 1);
+        renderRolloutPlans();
+        assert.equal(listed, 1, 'not again within 3 s');
+        now += 4000; failing = false;
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`assert.equal(state.rolloutChainRuns.runs[0].name, '20261023_010203');`);
+});
+
+test('escaping keeps a quoted failure mode one attribute value', () => {
+    const context = vm.createContext({ console });
+    vm.runInContext(source.replace(startup, ''), context);
+    assert.equal(
+        vm.runInContext(`escapeHtml('part "A" <b> & it\\'s')`, context),
+        'part &quot;A&quot; &lt;b&gt; &amp; it&#39;s',
+    );
+    assert.equal(vm.runInContext('escapeHtml(null) + escapeHtml(undefined) + escapeHtml(3)', context), '3');
+});
+
+test('a read that does not list the run yet is tried again', async () => {
+    const { run } = harness();
+    run(`
+        globalThis.now = 100000;
+        Date.now = () => now;
+        globalThis.chainRuns = {runs: [], plans: {}};
+        const chain = ${WAITING_CHAIN};
+        state.rolloutStatus = {status: 'idle', chain: {...chain, result: 'done', step_index: 3,
+            waiting_for_operator: null, state: 'done'}};
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`
+        assert.equal(listed, 1);
+        now += 4000;
+        globalThis.chainRuns = {runs: [${FINISHED_RUN}], plans: {}};
+        renderRolloutPlans();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    run(`
+        assert.equal(listed, 2);
+        now += 4000;
+        renderRolloutPlans();
+        assert.equal(listed, 2, 'listed with its result: not read again');
+    `);
 });

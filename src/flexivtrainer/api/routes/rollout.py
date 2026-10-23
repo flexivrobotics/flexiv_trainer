@@ -74,6 +74,14 @@ class ContinueChainRequest(BaseModel):
     action: Literal["retry", "skip"] = "retry"
 
 
+class ChainVerdictRequest(BaseModel):
+    # A run's name: its record's file name in <rollouts>/chains/, without .json.
+    run: str
+    outcome: Literal["success", "failure", "unknown"]
+    failure_mode: str | None = None
+    note: str = ""
+
+
 class RolloutDeviceRequest(BaseModel):
     device: str = "auto"
 
@@ -233,6 +241,32 @@ def start_plan(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     ok("Plan started", f"plan={name}")
     return result
+
+
+@router.get("/chains")
+def chain_runs(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
+    """The newest chain runs, and per plan how many in a row were clean."""
+    return runtime.rollout.chain_runs()
+
+
+@router.post("/chain/verdict")
+def chain_verdict(
+    request: ChainVerdictRequest,
+    runtime: RuntimeManager = Depends(get_runtime_manager),
+) -> dict:
+    try:
+        return runtime.rollout.chain_verdict(
+            request.run,
+            request.outcome,
+            failure_mode=request.failure_mode,
+            note=request.note,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/checkpoint-info")

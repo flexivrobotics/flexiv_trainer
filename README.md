@@ -972,6 +972,20 @@ written as it goes to `<storage>/rollouts/chains/<time>.json`: each try, how it
 ended and in what time, its back-offs, your takeovers and your calls. A chain
 drives one arm.
 
+**Judge each run.** A chain that reached its last step has not necessarily
+done the task: a learned check can pass a near miss, and you may have skipped a
+step. When a run ends, the panel asks how it went, as for a recorded rollout.
+A failure needs one of the plan's `failure_modes` (a list in the plan; without
+one, the defaults single rollouts use). The verdict is written into the run's
+record, and `POST /rollout/chain/verdict` takes it too. A run is **clean** when
+it was a success and nobody helped: no takeover and no call for you; the
+chain's own retries are allowed. For the plan, the panel shows its runs, how
+many you judged and how many were clean, and the **clean streak**: how many
+finished runs in a row, up to the newest, were clean. A run you have not judged
+ends the streak. A run the trainer stopped or lost mid-chain, whose record never
+got its result, counts as interrupted: judge it too. `GET /rollout/chains` lists the newest runs with the same
+counts per plan.
+
 ## Typical End-To-End Session
 
 For a normal session, the order is:

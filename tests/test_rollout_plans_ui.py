@@ -58,6 +58,9 @@ def test_the_rollout_page_hosts_the_plans_panel_and_uses_the_plans_api() -> None
     assert '"/rollout/chain/continue", { action: "retry" }' in panel
     assert '"/rollout/chain/continue", { action: "skip" }' in panel
     assert '"/rollout/practice/continue"' in panel
+    assert "refreshRolloutChainRuns()" in _function(source, "bootstrapRollout")
+    assert '"/rollout/chain/verdict"' in _function(source, "saveChainVerdict")
+    assert '"/rollout/chains"' in _function(source, "refreshRolloutChainRuns")
     assert ".rollout-chain-step--current" in (WEB_ROOT / "styles.css").read_text(
         encoding="utf-8"
     )
