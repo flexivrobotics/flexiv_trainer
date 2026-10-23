@@ -8,7 +8,8 @@ __pycache__/
 .ruff_cache/
 .coverage
 .hypothesis/
-.venv/
+.venv*/
+.vscode/
 .env
 *.egg-info/
 
