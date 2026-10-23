@@ -147,6 +147,20 @@ test('practice shows its totals and asks the operator to go on after a success',
     run(`assert.deepEqual(posted, [['/rollout/practice/continue', null]]);`);
 });
 
+test('a finished practice on the reply that starts a chain is not kept', () => {
+    const { run, html } = harness();
+    run(`
+        state.rolloutLastPractice = null;
+        state.rolloutStatus = {status: 'running', chain: ${WAITING_CHAIN},
+            practice: {...${PRACTICE}, state: 'finished'}};
+        renderRolloutPlans();
+        state.rolloutStatus = {status: 'running', chain: ${WAITING_CHAIN}, practice: null};
+        renderRolloutPlans();
+    `);
+    assert.doesNotMatch(html(), /<strong>Practice<\/strong>/);
+    run('assert.equal(state.rolloutLastPractice, null);');
+});
+
 test('a stopped practice keeps its totals in view', () => {
     const { run, html } = harness();
     run(`state.rolloutStatus = {status: 'running', practice: ${PRACTICE}}; renderRolloutPlans();`);

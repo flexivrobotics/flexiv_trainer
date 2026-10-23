@@ -87,16 +87,39 @@ def _files(rollouts_root: Path) -> dict[str, Path]:
     return {
         path.stem: path
         for path in sorted(directory.glob("*.json"))
-        if path.is_file() and _NAME.match(path.stem)
+        # Hidden files are an editor's, not plans.
+        if path.is_file() and not path.name.startswith(".")
     }
+
+
+def _bad_name(name: str) -> str | None:
+    """Why a plan file's name cannot be used, or None."""
+    if not _NAME.match(name):
+        return (
+            "a plan's file name is 1-64 letters, digits, '.', '_' or '-', starting "
+            "with a letter or digit; rename the file"
+        )
+    if name == "session":
+        # Evaluation sessions are folders holding a session.json.
+        return "session.json makes the plans folder look like an evaluation session; rename it"
+    return None
+
+
+def _read(path: Path) -> Any:
+    # utf-8-sig: an editor may save the file with a byte-order mark.
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def list_plans(rollouts_root: Path) -> list[dict[str, Any]]:
     """Every plan on disk: its name, kind and summary, or why it is unusable."""
     plans = []
     for name, path in _files(rollouts_root).items():
+        why = _bad_name(name)
+        if why is not None:
+            plans.append({"name": name, "kind": None, "error": why})
+            continue
         try:
-            kind, _, summary = _parse(json.loads(path.read_text(encoding="utf-8")))
+            kind, _, summary = _parse(_read(path))
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             plans.append({"name": name, "kind": None, "error": str(exc)})
             continue
@@ -112,6 +135,9 @@ def read_plan(rollouts_root: Path, name: str) -> tuple[str, Any, dict[str, Any]]
     path = _files(rollouts_root).get(name)
     if path is None:
         raise FileNotFoundError(f"no plan named {name!r}")
-    data = json.loads(path.read_text(encoding="utf-8"))
+    why = _bad_name(name)
+    if why is not None:
+        raise ValueError(why)
+    data = _read(path)
     kind, plan, _ = _parse(data)
     return kind, plan, data

@@ -93,6 +93,20 @@ def test_plans_are_listed_with_what_they_run_or_why_they_cannot(tmp_path):
     assert "checkpoint_path" in plans["no_checkpoint"]["error"]
 
 
+def test_a_plan_file_named_badly_says_so_and_a_byte_order_mark_is_fine(tmp_path):
+    _write(tmp_path, "pick place", LIFT)
+    _write(tmp_path, "session", LIFT)
+    directory = tmp_path / PLANS_DIR
+    (directory / "bom.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(LIFT).encode())
+    plans = {entry["name"]: entry for entry in list_plans(tmp_path)}
+    assert plans["bom"]["kind"] == "chain"
+    assert "rename the file" in plans["pick place"]["error"]
+    assert "evaluation session" in plans["session"]["error"]
+    with pytest.raises(ValueError, match="rename the file"):
+        read_plan(tmp_path, "pick place")
+    assert read_plan(tmp_path, "bom")[0] == "chain"
+
+
 def test_a_plan_is_read_only_from_the_files_on_disk(tmp_path):
     _write(tmp_path, "lift", LIFT)
     kind, plan, data = read_plan(tmp_path, "lift")

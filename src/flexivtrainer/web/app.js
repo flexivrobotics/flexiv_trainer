@@ -8427,11 +8427,14 @@ function renderRolloutPlans() {
     }
     const status = state.rolloutStatus || {};
     const isRunning = status.status === "running" || status.status === "stopping";
-    if (status.practice) {
+    // Kept while it practises, for after a stop: a finished one's status can
+    // still ride on the reply that starts the next chain, and is not kept.
+    const practicing = !!status.practice && status.practice.state !== "finished";
+    if (practicing) {
         state.rolloutLastPractice = status.practice;
     }
     const practice = status.practice || state.rolloutLastPractice;
-    const practiceLive = !!status.practice && isRunning;
+    const practiceLive = practicing && isRunning;
     const chain = status.chain || null;
     const chainLive = !!chain && !chain.result;
     const plans = state.rolloutPlans || [];
