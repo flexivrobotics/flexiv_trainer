@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -451,7 +452,7 @@ def test_a_chain_runs_its_steps_as_rollouts_on_the_robot(tmp_path, rdk):  # noqa
     assert 0.403 <= arm.pose[0] <= 0.405
     # The lift backed off 2 cm along the tool's z, which points down.
     assert arm.pose[2] == pytest.approx(0.32)
-    record = json.loads(open(status["chain"]["record"]).read())
+    record = json.loads(Path(status["chain"]["record"]).read_text())
     events = [
         (e["step"], e["event"], e.get("outcome", {}).get("reason"))
         for e in record["events"]
@@ -505,7 +506,7 @@ def test_a_skill_out_of_time_backs_off_and_a_jam_calls_the_operator(tmp_path, rd
     # Nothing else may take the arm meanwhile.
     with pytest.raises(RuntimeError, match="A chain is running"):
         service.start(skill)
-    record = json.loads(open(status["chain"]["record"]).read())
+    record = json.loads(Path(status["chain"]["record"]).read_text())
     assert record["events"][0]["outcome"]["reason"] == "time limit"
     assert record["events"][1]["outcome"]["blocked"] == {
         "force_n": 30.0,
