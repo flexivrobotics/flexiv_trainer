@@ -55,6 +55,7 @@ def create_app() -> FastAPI:
             daemon=True,
         ).start()
         yield
+        checks.shutdown()
         if get_runtime_manager.cache_info().currsize:
             get_runtime_manager().shutdown()
             get_runtime_manager.cache_clear()

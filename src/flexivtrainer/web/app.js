@@ -1654,10 +1654,15 @@ function _timestampSuffix() {
     return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+// Safe in text and in attribute values alike: quotes are escaped too, so a
+// failure mode such as `part "A" missing` stays one option value.
 function escapeHtml(text) {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
 function setMarkupIfChanged(element, renderKey, markup) {
@@ -5835,8 +5840,15 @@ function _union(key) {
 }
 
 async function refreshLabelTrainJob() {
+    const wasLive = LABEL_TRAIN_LIVE.has(state.labelTrainJob?.state);
     state.labelTrainJob = await api("/checks/train");
-    _renderLabelTrainStatus();
+    // The form locks while a job runs, and unlocks when it ends: found
+    // running on opening the page, it must lock now, not after.
+    if (LABEL_TRAIN_LIVE.has(state.labelTrainJob?.state) !== wasLive) {
+        _renderLabelTrain();
+    } else {
+        _renderLabelTrainStatus();
+    }
     _pollLabelTrain();
 }
 
@@ -5940,20 +5952,34 @@ function _renderLabelTrainStatus() {
     }
     const last = (job.log || []).slice(-1)[0] || "starting";
     if (LABEL_TRAIN_LIVE.has(job.state)) {
+        const line = `${Math.round(job.seconds || 0)} s · ${last}`;
+        const shown = byId("label-train-progress");
+        const stop = byId("label-train-stop");
+        // Update the line only: a Stop button rebuilt every second can lose
+        // the click that lands on it.
+        if (shown && stop && box.dataset.model === job.model) {
+            shown.textContent = line;
+            stop.disabled = job.state === "stopping";
+            return;
+        }
+        box.dataset.model = job.model;
         box.innerHTML = `
             <div class="label-train__live">
-                <span>Training <code>${escapeHtml(job.model)}</code> · ${Math.round(job.seconds || 0)} s · ${escapeHtml(last)}</span>
+                <span>Training <code>${escapeHtml(job.model)}</code> · <span id="label-train-progress">${escapeHtml(line)}</span></span>
                 <button type="button" class="stop-button" id="label-train-stop" ${job.state === "stopping" ? "disabled" : ""}>Stop</button>
             </div>`;
         byId("label-train-stop").onclick = () => stopLabelTrain();
         return;
     }
+    box.dataset.model = "";
     if (job.state === "done") {
         box.innerHTML = _labelTrainResultMarkup(job);
     } else if (job.state === "failed") {
         box.innerHTML = `<p class="rollout-verdict rollout-error">Training <code>${escapeHtml(job.model)}</code> failed: ${escapeHtml(job.error || last)}</p>`;
     } else {
-        box.innerHTML = `<p class="label-bar__hint">Training <code>${escapeHtml(job.model)}</code> was stopped.</p>`;
+        box.innerHTML = job.saved
+            ? `<p class="label-bar__hint">Training <code>${escapeHtml(job.model)}</code> was stopped after the check was saved: it is listed with the others.</p>`
+            : `<p class="label-bar__hint">Training <code>${escapeHtml(job.model)}</code> was stopped.</p>`;
     }
 }
 

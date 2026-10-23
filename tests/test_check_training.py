@@ -141,3 +141,81 @@ def test_the_routes_keep_training_to_the_storage_root(tmp_path, monkeypatch):
     assert client.get("/checks/train").json()["state"] == "idle"
     assert client.post("/checks/train/stop").status_code == 409
     assert client.get("/checks").json() == {"checks": []}
+
+
+def _script(code):
+    return lambda request, data: [sys.executable, "-c", code]
+
+
+def test_no_new_job_while_one_is_stopping_and_an_old_one_cannot_touch_it(
+    tmp_path, monkeypatch
+):
+    job = CheckTraining(tmp_path)
+    data = [tmp_path / "datasets" / "a"]
+    monkeypatch.setattr(job, "command", _script("import time; time.sleep(60)"))
+    job.start(REQUEST, data)
+    old = job._process
+    job.stop()
+    with pytest.raises(RuntimeError, match="already training"):
+        job.start({**REQUEST, "name": "next"}, data)
+    assert _wait(job, 10.0)["state"] == "stopped"
+    job.start({**REQUEST, "name": "next"}, data)
+    # A late word from the old process is not the new job's.
+    job._wait(old)
+    assert job.status()["state"] == "running" and job.status()["name"] == "next"
+    job.stop()
+    _wait(job, 10.0)
+
+
+def test_a_stop_after_the_check_was_saved_keeps_it_and_one_before_cleans_up(
+    tmp_path, monkeypatch
+):
+    job = CheckTraining(tmp_path)
+    data = [tmp_path / "datasets" / "a"]
+    out = tmp_path / "checks" / "closed"
+    saved = (
+        "import pathlib, sys, time; p = pathlib.Path(sys.argv[1]); "
+        "p.mkdir(parents=True); (p / 'check.json').write_text('{}'); time.sleep(60)"
+    )
+    monkeypatch.setattr(
+        job, "command", lambda request, data: [sys.executable, "-c", saved, str(out)]
+    )
+    job.start(REQUEST, data)
+    deadline = time.monotonic() + 10
+    while not (out / "check.json").exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    job.stop()
+    status = _wait(job, 10.0)
+    assert status["state"] == "stopped" and status["saved"] is True
+    assert (out / "check.json").is_file()
+    partial = (
+        "import pathlib, sys, time; p = pathlib.Path(sys.argv[1]); "
+        "p.mkdir(parents=True); (p / 'head.safetensors').write_text('half'); "
+        "time.sleep(60)"
+    )
+    second = tmp_path / "checks" / "second"
+    monkeypatch.setattr(
+        job,
+        "command",
+        lambda request, data: [sys.executable, "-c", partial, str(second)],
+    )
+    job.start({**REQUEST, "name": "second"}, data)
+    while not (second / "head.safetensors").exists():
+        assert time.monotonic() < deadline + 10
+        time.sleep(0.02)
+    job.stop()
+    status = _wait(job, 10.0)
+    assert status["state"] == "stopped" and status["saved"] is False
+    assert not second.exists(), "a half-written check would block its name"
+
+
+def test_names_must_match_whole_and_crops_keep_every_digit(tmp_path):
+    job = CheckTraining(tmp_path, python="python")
+    data = [tmp_path / "datasets" / "a"]
+    with pytest.raises(ValueError, match="a check's name"):
+        job.command({**REQUEST, "name": "closed\n"}, data)
+    command = job.command(
+        {**REQUEST, "crops": {"wrist": [0.1234561, 0, 0.1234564, 1]}}, data
+    )
+    assert "wrist=0.1234561,0.0,0.1234564,1.0" in command

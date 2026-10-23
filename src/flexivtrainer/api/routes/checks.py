@@ -47,18 +47,30 @@ class TrainCheckRequest(BaseModel):
     epochs: int | None = Field(default=None, ge=1, le=500)
 
 
+def _root(runtime: RuntimeManager) -> Path:
+    return runtime.settings.storage.root.expanduser().resolve()
+
+
 def _training(runtime: RuntimeManager) -> CheckTraining:
-    root = runtime.settings.storage.root.expanduser().resolve()
+    root = _root(runtime)
     with _jobs_lock:
         if root not in _jobs:
             _jobs[root] = CheckTraining(root)
         return _jobs[root]
 
 
+def shutdown() -> None:
+    """Stop any check still training: the server is stopping."""
+    with _jobs_lock:
+        jobs = list(_jobs.values())
+    for job in jobs:
+        job.shutdown()
+
+
 @router.get("")
 def checks(runtime: RuntimeManager = Depends(get_runtime_manager)) -> dict:
     """The trained checks, newest first, with their held-out reports."""
-    return {"checks": list_checks(runtime.settings.storage.root)}
+    return {"checks": list_checks(_root(runtime))}
 
 
 @router.get("/train")

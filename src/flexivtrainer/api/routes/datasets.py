@@ -200,14 +200,17 @@ def _inputs(root: Path) -> tuple[list[str], list[str]]:
         features = info.get("features") or {}
     except (OSError, ValueError):
         return [], []
+    # The check reads video cameras only, and state columns by their listed
+    # names; nothing else is offered, as training would refuse it.
     cameras = [
         key.removeprefix("observation.images.")
         for key, feature in features.items()
         if key.startswith("observation.images.")
-        and feature.get("dtype") in {"video", "image"}
+        and feature.get("dtype") == "video"
         and not (feature.get("info") or {}).get("is_depth_map")
     ]
-    state = list((features.get("observation.state") or {}).get("names") or [])
+    names = (features.get("observation.state") or {}).get("names")
+    state = [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
     return cameras, state
 
 

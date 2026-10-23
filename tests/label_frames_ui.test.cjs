@@ -255,3 +255,38 @@ test('the job reads as it runs, as its held-out report, or as why it failed', ()
     `);
     assert.match(element('label-train-status').innerHTML, /failed: no episode has a label/);
 });
+
+test('a job found running on opening the page locks the form', async () => {
+    const { run, element } = harness();
+    run(`
+        globalThis.job = {state: 'running', model: 'checks/seated', seconds: 5, log: []};
+        state.labelViews = {...views}; state.labelCheck = 'seated'; state.labelTrainJob = null;
+        state.labelTrain.cameras = ['wrist_1'];
+        renderProcessing();
+    `);
+    await new Promise((resolve) => setImmediate(resolve));
+    const panel = element('label-train').innerHTML;
+    assert.match(panel, /id="label-train-start" disabled/);
+    assert.match(panel, /data-train-camera="wrist_1" checked disabled/);
+});
+
+test('the stop button stays put while the job runs, and a late stop says the check was saved', () => {
+    const { run, element } = harness();
+    run(`state.labelViews = {...views}; state.labelCheck = 'seated'; renderProcessing();`);
+    run(`
+        state.labelTrainJob = {state: 'running', model: 'checks/seated', seconds: 42, log: ['epoch 1/30: loss 0.5']};
+        _renderLabelTrainStatus();
+    `);
+    const first = element('label-train-status').innerHTML;
+    run(`
+        state.labelTrainJob = {state: 'running', model: 'checks/seated', seconds: 43, log: ['epoch 2/30: loss 0.4']};
+        _renderLabelTrainStatus();
+    `);
+    assert.equal(element('label-train-status').innerHTML, first, 'not rebuilt');
+    assert.equal(element('label-train-progress').textContent, '43 s · epoch 2/30: loss 0.4');
+    run(`
+        state.labelTrainJob = {state: 'stopped', model: 'checks/seated', log: [], saved: true};
+        _renderLabelTrainStatus();
+    `);
+    assert.match(element('label-train-status').innerHTML, /stopped after the check was saved/);
+});

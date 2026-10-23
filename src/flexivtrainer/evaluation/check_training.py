@@ -27,7 +27,9 @@ chains and practice name as `checks/<name>`.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -44,6 +46,7 @@ CHECKS_DIR = "checks"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _CAMERA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _LOG_LINES = 200
+_LIVE = ("running", "stopping")
 
 
 def list_checks(storage_root: Path) -> list[dict[str, Any]]:
@@ -92,13 +95,16 @@ class CheckTraining:
         self._error: str | None = None
         self._started = 0.0
         self._ended: float | None = None
+        self._out = self._root / CHECKS_DIR
+        # Stopped after the check was saved: it stays, listed as any other.
+        self._saved = False
 
     def command(self, request: dict[str, Any], data: Sequence[Path]) -> list[str]:
         """The training command for `request`, its datasets already resolved."""
         name = request["name"]
-        if not _NAME.match(name):
+        if not _NAME.fullmatch(name):
             raise ValueError("a check's name is 1-64 letters, digits, '.', '_' or '-'")
-        if not _NAME.match(request["check"]):
+        if not _NAME.fullmatch(request["check"]):
             raise ValueError("a label name is 1-64 letters, digits, '.', '_' or '-'")
         if not data:
             raise ValueError("name at least one labelled dataset")
@@ -114,7 +120,7 @@ class CheckTraining:
         for path in data:
             command += ["--data", str(path)]
         for camera in cameras:
-            if not _CAMERA.match(camera):
+            if not _CAMERA.fullmatch(camera):
                 raise ValueError(f"{camera!r} is not a camera name")
             command += ["--camera", camera]
         for camera, box in (request.get("crops") or {}).items():
@@ -130,7 +136,8 @@ class CheckTraining:
                     f"{camera}'s crop is x0,y0,x1,y1, fractions of the frame, each "
                     "low below its high"
                 )
-            command += ["--crop", f"{camera}=" + ",".join(f"{v:g}" for v in values)]
+            # repr keeps every digit: a box checked here must not round shut.
+            command += ["--crop", f"{camera}=" + ",".join(repr(v) for v in values)]
         for column in state:
             command += ["--state", column]
         encoder = request.get("encoder")
@@ -142,7 +149,7 @@ class CheckTraining:
 
     def start(self, request: dict[str, Any], data: Sequence[Path]) -> dict[str, Any]:
         with self._lock:
-            if self._state == "running":
+            if self._state in _LIVE:
                 raise RuntimeError("A check is already training")
             out = self._root / CHECKS_DIR / request.get("name", "")
             command = self.command(request, data)
@@ -156,7 +163,10 @@ class CheckTraining:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                # Its messages in UTF-8 on Windows too, as they are read.
+                env={**os.environ, "PYTHONUTF8": "1"},
             )
+            self._out = out
             self._state = "running"
             self._job = {
                 "name": request["name"],
@@ -168,6 +178,7 @@ class CheckTraining:
             self._log.clear()
             self._result = None
             self._error = None
+            self._saved = False
             self._started = time.monotonic()
             self._ended = None
             process = self._process
@@ -181,8 +192,16 @@ class CheckTraining:
             if self._state != "running" or process is None:
                 raise RuntimeError("No check is training")
             self._state = "stopping"
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
         return self.status()
+
+    def shutdown(self) -> None:
+        """Stop a training still going when the server stops."""
+        with self._lock:
+            process = self._process if self._state in _LIVE else None
+        if process is not None and process.poll() is None:
+            process.terminate()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -194,6 +213,7 @@ class CheckTraining:
                 "log": list(self._log),
                 "result": self._result,
                 "error": self._error,
+                "saved": self._saved,
             }
 
     def _read_log(self, process: subprocess.Popen) -> None:
@@ -202,23 +222,34 @@ class CheckTraining:
             line = line.rstrip()
             if line:
                 with self._lock:
-                    self._log.append(line)
+                    # Only the job this process belongs to.
+                    if self._process is process:
+                        self._log.append(line)
 
     def _wait(self, process: subprocess.Popen) -> None:
         assert process.stdout is not None
         output = process.stdout.read()
         code = process.wait()
         with self._lock:
-            self._ended = time.monotonic()
-            if self._state == "stopping":
-                self._state = "stopped"
+            if self._process is not process:
                 return
+            self._ended = time.monotonic()
             try:
                 self._result = json.loads(output) if code == 0 else None
             except ValueError:
                 self._result = None
+            # A stop that came after the check was saved does not unsave it.
             if code == 0 and self._result is not None:
                 self._state = "done"
+                return
+            # A folder this job made but did not finish (stopped, or failed,
+            # mid-save) would block the name; check.json is written last.
+            out = self._out
+            self._saved = (out / "check.json").is_file()
+            if out.is_dir() and not self._saved:
+                shutil.rmtree(out, ignore_errors=True)
+            if self._state == "stopping":
+                self._state = "stopped"
                 return
             self._state = "failed"
             tail = [line for line in self._log if line.startswith("error:")]
