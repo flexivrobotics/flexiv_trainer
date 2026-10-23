@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Any
 
 from flexivtrainer.evaluation.checks import Check, parse_checks
+from flexivtrainer.observability import warn
 from flexivtrainer.rollout.primitives import Primitive
 
 __all__ = ["CHAINS_DIR", "ChainPlan", "ChainRunner", "ChainStep", "Outcome"]
@@ -89,6 +90,9 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 
 RETRY = "retry"
 SKIP = "skip"
+
+#: Tries to replace the record file before leaving it to the next event.
+_WRITE_TRIES = 5
 
 
 @dataclass(frozen=True)
@@ -456,11 +460,13 @@ class ChainRunner:
     def _wait_for_operator(self, step: ChainStep, why: str) -> str:
         # Cleared before go_on() can be accepted, so an early answer is kept.
         self._go_on.clear()
+        # Written before the wait is shown, so whoever sees it reads the record
+        # complete, and not while it is being replaced.
+        self._event(step, "operator called", why=why)
         with self._lock:
             self._state = "waiting for the operator"
             self._waiting = f"{step.name}: {why}"
             self._action = None
-        self._event(step, "operator called", why=why)
         self._append_log("WARN", "CHAIN", f"Operator needed at {step.name}", why)
         while not self.stop_event.is_set():
             if self._go_on.wait(0.1):
@@ -498,9 +504,20 @@ class ChainRunner:
         self._write()
 
     def _write(self) -> None:
+        """The record so far, replaced whole. Windows refuses the replace while
+        someone has the file open: tried again briefly, then left to the next
+        event, as the record must never stop the chain."""
         with self._lock:
             text = json.dumps(self._record, indent=2) + "\n"
         self._record_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._record_path.with_suffix(".tmp")
         temporary.write_text(text, encoding="utf-8")
-        temporary.replace(self._record_path)
+        for attempt in range(_WRITE_TRIES):
+            try:
+                temporary.replace(self._record_path)
+                return
+            except PermissionError as exc:
+                if attempt == _WRITE_TRIES - 1:
+                    warn("The chain's record was not updated", str(exc))
+                    return
+                time.sleep(0.05)

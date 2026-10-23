@@ -401,6 +401,20 @@ def test_a_try_the_safety_envelope_stopped_is_not_backed_off(tmp_path):
     chain.join(WAIT_S)
 
 
+def test_a_record_the_disk_will_not_replace_does_not_stop_the_chain(
+    tmp_path, monkeypatch
+):
+    # Windows refuses to replace a file someone has open.
+    def refuse(self, target):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr("flexivtrainer.rollout.chain._WRITE_TRIES", 2)
+    monkeypatch.setattr(Path, "replace", refuse)
+    chain, _ = _chain(tmp_path, [INSERT], _Rig(skills=[_ok()]))
+    chain.join(WAIT_S)
+    assert chain.status()["state"] == "done"
+
+
 # --- on the fake robot, through the rollout service ---------------------------------
 
 

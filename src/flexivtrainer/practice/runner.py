@@ -318,7 +318,9 @@ class StepRunner:
                     self._infer_ms = 0.0
                     result = env.step(None)
                 observation = result.observation
-                hz = 1.0 / (started - previous) if previous is not None else 0.0
+                # Two readings can be equal on a coarse clock (Windows).
+                period = started - previous if previous is not None else 0.0
+                hz = 1.0 / period if period > 0 else 0.0
                 previous = started
                 self._append_metric(
                     {
