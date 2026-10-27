@@ -85,6 +85,13 @@ def _predict_action_chunk(
                 )
 
     fresh = action_queue is None or len(action_queue) == 0
+    # A relative-pose chunk is relative to the pose it was predicted from, so a
+    # cached action keeps that anchor rather than this tick's pose.
+    from flexivtrainer.policies.lerobot_plugins.relative_pose import (  # noqa: PLC0415
+        hold_relative_pose_anchor,
+    )
+
+    hold_relative_pose_anchor(preprocessor, hold=not fresh)
 
     # predict_action calls policy.select_action internally. If a cached action
     # queue has entries, it pops the next one; otherwise it runs inference to

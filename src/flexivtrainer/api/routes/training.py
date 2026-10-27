@@ -48,6 +48,9 @@ class StartTrainingRequest(BaseModel):
     checkpoint_path: str | None = None
     checkpoint_repo_id: str | None = None
     checkpoint_revision: str | None = None
+    # Train Cartesian pose actions relative to the gripper's current pose (UMI
+    # style). A fine-tune follows its checkpoint instead.
+    relative_pose: bool = False
 
     @model_validator(mode="after")
     def _check_sources(self) -> StartTrainingRequest:
@@ -224,6 +227,7 @@ def start_training(
             checkpoint_source=request.checkpoint_source,
             checkpoint_repo_id=request.checkpoint_repo_id,
             checkpoint_revision=request.checkpoint_revision,
+            relative_pose=request.relative_pose,
         )
     # Hub errors subclass RuntimeError, so they must precede the 409 handler.
     except HubDatasetNotTaggedError as exc:

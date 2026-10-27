@@ -514,6 +514,22 @@ class RolloutService:
         overrides_applied = (
             override_fn(policy, rollout_cfg) if override_fn is not None else False
         )
+        from flexivtrainer.policies.lerobot_plugins.relative_pose import (  # noqa: PLC0415
+            uses_relative_pose,
+        )
+
+        if uses_relative_pose(preprocessor):
+            # Both re-anchor every tick: ensembling blends chunks predicted
+            # from different poses, and a step skill predicts one action a tick.
+            if getattr(policy.config, "temporal_ensemble_coeff", None) is not None:
+                raise RuntimeError(
+                    "A relative-pose ACT policy cannot ensemble chunks predicted "
+                    "from different poses; set disable_temporal_ensemble"
+                )
+            if space is not None:
+                raise RuntimeError(
+                    "Relative-pose policies are not supported as step skills yet"
+                )
         compile_act = bool(
             policy_type == "act" and getattr(rollout_cfg, "compile_model", False)
         )
