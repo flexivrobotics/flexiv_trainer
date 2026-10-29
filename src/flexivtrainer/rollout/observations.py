@@ -24,6 +24,7 @@ import numpy as np
 from flexivtrainer.data.lerobot_io import (
     POSE_FORMAT_QUATERNION,
     POSE_FORMAT_ROTATION_6D,
+    build_features_from_sample,
     default_recording_entry_keys,
     extract_recording_frame_values,
     extract_recording_images,
@@ -288,17 +289,21 @@ def grab_images(
     return images
 
 
+def _state_entries(sides: list[str], cameras: list[str] | None) -> list[str]:
+    return [
+        entry
+        for entry in default_recording_entry_keys(sides, cameras)
+        if entry.startswith("observation.state.")
+    ]
+
+
 def _state_vectors(
     snapshot: dict[str, Any],
     sides: list[str],
     cameras: list[str] | None,
     pose_format: str,
 ) -> dict[str, np.ndarray]:
-    state_entries = [
-        entry
-        for entry in default_recording_entry_keys(sides, cameras)
-        if entry.startswith("observation.state.")
-    ]
+    state_entries = _state_entries(sides, cameras)
     frame_values = extract_recording_frame_values(
         snapshot, state_entries, sides, cameras, pose_format
     )
@@ -349,6 +354,90 @@ def resolve_state_pose_format(
         f"(rotation-6D) or {widths[POSE_FORMAT_QUATERNION]} (legacy quaternion). "
         "The checkpoint was trained on a different arm or gripper layout"
     )
+
+
+def resolve_state_columns(
+    snapshot: dict[str, Any],
+    sides: list[str],
+    cameras: list[str] | None,
+    state_names: list[str],
+    extra_names: tuple[str, ...] | list[str] = (),
+) -> np.ndarray:
+    """Index of each trained state name in the full rotation-6D state.
+
+    Rollout reads every metric of every arm; a checkpoint may have been trained
+    on a subset (a UMI export has pose and gripper only), so the policy is fed
+    exactly the columns it names, in its order. ``extra_names`` are columns
+    rollout computes itself (``pose_history``), placed after the robot's.
+    """
+    features, _, _ = build_features_from_sample(
+        snapshot, {}, _state_entries(sides, cameras), sides, cameras=cameras
+    )
+    available = list((features.get("observation.state") or {}).get("names") or [])
+    available += list(extra_names)
+    missing = [name for name in state_names if name not in available]
+    if missing:
+        hint = ""
+        if any(name.endswith(".gripper.force") for name in missing):
+            hint = (
+                ". The checkpoint was trained with the gripper force (the tactile "
+                "grip force of a UMI export), but the gripper reports no force"
+            )
+        raise RuntimeError(
+            f"Checkpoint state names {missing} are not in the configured arms' "
+            f"state ({len(available)} columns){hint}"
+        )
+    return np.asarray([available.index(name) for name in state_names], dtype=np.intp)
+
+
+def resolve_state_layout(
+    snapshot: dict[str, Any],
+    sides: list[str],
+    cameras: list[str] | None,
+    checkpoint_state_dim: int | None,
+    state_names: list[str] | None,
+    append_log: Callable[..., None] | None = None,
+    extra_names: tuple[str, ...] | list[str] = (),
+) -> tuple[str, np.ndarray | None]:
+    """The pose format and, for a checkpoint with named state, its columns.
+
+    Without names (checkpoints from before the state-name sidecar), the full
+    state is fed and only its width is matched, as ``resolve_state_pose_format``.
+    """
+    if state_names is None:
+        return (
+            resolve_state_pose_format(
+                snapshot, sides, cameras, checkpoint_state_dim, append_log
+            ),
+            None,
+        )
+    index = resolve_state_columns(snapshot, sides, cameras, state_names, extra_names)
+    detail = f"{len(state_names)} named columns: {', '.join(state_names)}"
+    info("Rollout feeds the checkpoint's trained state columns", detail)
+    if append_log is not None:
+        append_log("INFO", "ROLLOUT", "Trained state columns", detail)
+    return POSE_FORMAT_ROTATION_6D, index
+
+
+def select_state(
+    observation: dict[str, Any],
+    state_index: np.ndarray | None,
+    extra: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """The observation with only the trained state columns, for the policy.
+
+    ``extra`` holds the computed columns ``resolve_state_columns`` placed after
+    the robot's. The full observation stays as built, for the recording and
+    live checks.
+    """
+    if state_index is None or "observation.state" not in observation:
+        return observation
+    state = observation["observation.state"]
+    if extra is not None and len(extra):
+        state = np.concatenate([state, np.asarray(extra, dtype=state.dtype)])
+    selected = dict(observation)
+    selected["observation.state"] = state[state_index]
+    return selected
 
 
 def build_observation(

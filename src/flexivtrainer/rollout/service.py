@@ -71,8 +71,10 @@ from flexivtrainer.rollout.checkpoint import (
     checkpoint_control,
     checkpoint_gripper_command_metadata,
     checkpoint_image_resolutions,
+    checkpoint_slam_world_frame,
     checkpoint_space,
     checkpoint_state_input_dim,
+    checkpoint_state_names,
     resolve_checkpoint_path,
     resolve_hub_checkpoint,
 )
@@ -530,6 +532,16 @@ class RolloutService:
                 raise RuntimeError(
                     "Relative-pose policies are not supported as step skills yet"
                 )
+        else:
+            frame = checkpoint_slam_world_frame(
+                checkpoint_path, self._settings.storage.root
+            )
+            if frame is not None:
+                raise RuntimeError(
+                    f"This policy was trained on absolute poses in a SLAM map "
+                    f"frame ({frame}), not the robot's, so it would drive the arm "
+                    "to map coordinates. Retrain it with relative pose."
+                )
         compile_act = bool(
             policy_type == "act" and getattr(rollout_cfg, "compile_model", False)
         )
@@ -544,6 +556,11 @@ class RolloutService:
         # config.json is what from_pretrained loaded the policy from, so its
         # declared state width is the one the policy's normalizer will enforce.
         state_dim = checkpoint_state_input_dim(checkpoint_path)
+        # Named state lets rollout feed exactly the trained columns; without
+        # names only the state width is matched.
+        state_names = checkpoint_state_names(
+            checkpoint_path, self._settings.storage.root
+        )
         waypoint_layout: list[dict[str, Any]] | None = None
         waypoint_action_dim: int | None = None
         waypoint_layout_inferred = False
@@ -701,6 +718,7 @@ class RolloutService:
                     task=task,
                     bspline_layout=bspline_layout,
                     state_dim=state_dim,
+                    state_names=state_names,
                     end_effector_config=end_effector_config,
                     motion_limits=motion_limits,
                     max_steps=app_rollout.max_steps,
@@ -808,6 +826,7 @@ class RolloutService:
                     action_layout=waypoint_layout,
                     action_dim=waypoint_action_dim,
                     state_dim=state_dim,
+                    state_names=state_names,
                     gripper_sides=waypoint_gripper_sides,
                     gripper_target_mode=waypoint_gripper_target_mode,
                     end_effector_config=end_effector_config,

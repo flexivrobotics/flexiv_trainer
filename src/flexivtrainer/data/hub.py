@@ -42,6 +42,7 @@ from flexivtrainer.config import AppSettings
 HUB_CACHE_DIRNAME = "hub"
 HUB_MARKER_FILENAME = ".flexivtrainer_hub.json"
 ACTION_NAMES_FILENAME = "action_names.json"
+STATE_NAMES_FILENAME = "state_names.json"
 
 # ``owner/name``: exactly one slash, each segment starting alphanumeric. This is
 # the security boundary, applied before any part of the string touches a path.

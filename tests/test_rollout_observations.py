@@ -26,7 +26,10 @@ from flexivtrainer.data.lerobot_io import (
 from flexivtrainer.rollout.observations import (
     _predict_action_chunk,
     build_observation,
+    resolve_state_columns,
+    resolve_state_layout,
     resolve_state_pose_format,
+    select_state,
 )
 
 # Mirror the resolution order in observations.py so the patch target tracks the
@@ -186,3 +189,74 @@ def test_build_observation_emits_the_requested_pose_format() -> None:
         [0.1, 0.2, 0.3, 0.0, 1.0, 0.0, 0.0]
     )
     assert "observation.images.ego" in legacy
+
+
+# What a UMI export trains on: the pose and gripper width, plus the grip force
+# when it was exported with --tactile-grip-force.
+_UMI_STATE = [
+    *(f"right_arm.tcp_pose.{axis}" for axis in "xyz"),
+    *(
+        f"right_arm.tcp_rotation_6d.{axis}"
+        for axis in ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
+    ),
+    "right_arm.gripper.width",
+]
+
+
+@pytest.mark.parametrize(
+    "names", [_UMI_STATE, [*_UMI_STATE, "right_arm.gripper.force"]]
+)
+def test_state_columns_select_the_trained_subset_in_its_order(names) -> None:
+    snapshot = _snapshot(["right_arm"])
+    full = build_observation(snapshot, {}, ["right_arm"])["observation.state"]
+    assert full.shape == (23,)
+
+    index = resolve_state_columns(snapshot, ["right_arm"], None, names)
+
+    assert len(index) == len(names)
+    # Pose first, then the gripper's width (0.05) and force (1.0) after the
+    # twist and wrench the subset skips.
+    assert full[index][:3].tolist() == pytest.approx([0.1, 0.2, 0.3])
+    assert full[index][9:].tolist() == pytest.approx([0.05, 1.0][: len(names) - 9])
+    reordered = resolve_state_columns(
+        snapshot, ["right_arm"], None, list(reversed(names))
+    )
+    assert reordered.tolist() == list(reversed(index.tolist()))
+
+
+def test_state_columns_name_a_gripper_without_force() -> None:
+    snapshot = _snapshot(["right_arm"])
+    snapshot["robots"]["robot_0"]["gripper"] = {"width": 0.05}
+
+    resolve_state_columns(snapshot, ["right_arm"], None, _UMI_STATE)
+    with pytest.raises(RuntimeError, match="gripper reports no force"):
+        resolve_state_columns(
+            snapshot, ["right_arm"], None, [*_UMI_STATE, "right_arm.gripper.force"]
+        )
+
+
+def test_state_layout_without_names_keeps_the_width_match() -> None:
+    snapshot = _snapshot(["single_arm"])
+
+    assert resolve_state_layout(snapshot, ["single_arm"], None, 21, None) == (
+        POSE_FORMAT_QUATERNION,
+        None,
+    )
+    pose_format, index = resolve_state_layout(
+        _snapshot(["right_arm"]), ["right_arm"], None, 10, _UMI_STATE
+    )
+    assert pose_format == POSE_FORMAT_ROTATION_6D
+    assert len(index) == 10
+
+
+def test_select_state_leaves_the_full_observation_for_the_recording() -> None:
+    observation = build_observation(_snapshot(["right_arm"]), {}, ["right_arm"])
+    index = resolve_state_columns(
+        _snapshot(["right_arm"]), ["right_arm"], None, _UMI_STATE
+    )
+
+    selected = select_state(observation, index)
+
+    assert selected["observation.state"].shape == (10,)
+    assert observation["observation.state"].shape == (23,)
+    assert select_state(observation, None) is observation

@@ -43,6 +43,7 @@ from flexivtrainer.policies.lerobot_plugins.relative_pose import (
     to_absolute,
     to_relative,
 )
+from flexivtrainer.rollout.checkpoint import checkpoint_slam_world_frame
 
 UMI_NAMES = ["x", "y", "z", "r00", "r10", "r20", "r01", "r11", "r21", "gripper"]
 TCP_NAMES = [
@@ -348,6 +349,52 @@ def test_a_job_refuses_relative_poses_it_cannot_convert(tmp_path: Path) -> None:
         )
     with pytest.raises(ValueError, match="not supported for smolvla"):
         service._relative_pose_layout(True, "smolvla", joints, None)
+
+
+def _umi_export(tmp_path: Path) -> Path:
+    """A dataset with the metadata flexiv_gdk's UMI export writes beside it."""
+    dataset = make_dataset(tmp_path, state_size=10)
+    (dataset / "meta" / "flexiv_extras.json").write_text(
+        json.dumps({"world_frame": "IMU frame of the first keyframe"}),
+        encoding="utf-8",
+    )
+    return dataset
+
+
+def test_a_job_refuses_umi_poses_as_absolute(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    umi = _umi_export(tmp_path)
+    model_dir = tmp_path / "absolute_checkpoint"
+    model_dir.mkdir()
+
+    with pytest.raises(ValueError, match="SLAM map frame"):
+        service._relative_pose_layout(False, "act", umi, None)
+    # Nor by fine-tuning a checkpoint trained on absolute poses.
+    with pytest.raises(ValueError, match="SLAM map frame"):
+        service._relative_pose_layout(
+            False, "act", umi, {"model_path": str(model_dir)}
+        )
+    # A robot recording still trains on absolute poses.
+    robot = make_dataset(tmp_path / "robot")
+    assert service._relative_pose_layout(False, "act", robot, None) is None
+
+
+def test_rollout_finds_the_slam_frame_of_a_checkpoints_dataset(
+    tmp_path: Path,
+) -> None:
+    umi = _umi_export(tmp_path)
+    robot = make_dataset(tmp_path / "robot")
+    for name, dataset, expected in (
+        ("umi", umi, "IMU frame of the first keyframe"),
+        ("robot", robot, None),
+    ):
+        model_dir = tmp_path / name / "pretrained_model"
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}", encoding="utf-8")
+        (model_dir / "train_config.json").write_text(
+            json.dumps({"dataset": {"root": str(dataset)}}), encoding="utf-8"
+        )
+        assert checkpoint_slam_world_frame(str(model_dir)) == expected
 
 
 def test_the_patches_are_installed_once() -> None:

@@ -30,8 +30,8 @@ from flexivtrainer.data.gripper_command import (
     GripperCommandMetadata,
     read_gripper_command_metadata,
 )
-from flexivtrainer.data.hub import ACTION_NAMES_FILENAME
-from flexivtrainer.data.lerobot_io import first_dataset_task
+from flexivtrainer.data.hub import ACTION_NAMES_FILENAME, STATE_NAMES_FILENAME
+from flexivtrainer.data.lerobot_io import first_dataset_task, slam_world_frame
 from flexivtrainer.practice.space import SPACE_FILENAME, PracticeSpace, read_space
 
 _LANGUAGE_POLICY_TYPES = {"multi_task_dit", "smolvla", "pi0", "pi05"}
@@ -333,6 +333,74 @@ def checkpoint_action_names(
             return names
 
     return _hub_dataset_action_names(checkpoint_path, settings)
+
+
+def _named_state(names: Any, width: Any) -> list[str] | None:
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(name, str) and name for name in names)
+        or len(set(names)) != len(names)
+    ):
+        return None
+    if width is not None and width != len(names):
+        return None
+    return list(names)
+
+
+def _placeholder_state(names: list[str]) -> bool:
+    """The ``state_i`` names a recording falls back to when it cannot name
+    its columns (``recorder.recorded_state_names``); they name no metric."""
+    return names == [f"state_{i}" for i in range(len(names))]
+
+
+def checkpoint_state_names(
+    checkpoint_path: str, storage_root: Path | None = None
+) -> list[str] | None:
+    """Recover the ordered ``observation.state`` names a checkpoint was trained on.
+
+    Tried in order: the ``state_names.json`` sidecar written at training, then a
+    local copy of the training dataset. ``None`` means the checkpoint predates
+    the sidecar and its dataset is gone or unnamed; rollout then falls back to
+    matching the state width.
+    """
+    model_dir = _checkpoint_model_dir(checkpoint_path)
+    width = checkpoint_state_input_dim(checkpoint_path)
+    payload = _read_json(model_dir / STATE_NAMES_FILENAME)
+    if payload is not None:
+        names = _named_state(payload.get("state_names"), width)
+        if names is None:
+            raise ValueError(
+                f"State names do not match the checkpoint's observation.state: "
+                f"{model_dir / STATE_NAMES_FILENAME}"
+            )
+        return None if _placeholder_state(names) else names
+    for candidate in _checkpoint_dataset_candidates(checkpoint_path, storage_root):
+        info = _read_json(candidate / "meta" / "info.json") or {}
+        features = info.get("features")
+        if not isinstance(features, dict):
+            continue
+        state = features.get("observation.state")
+        if isinstance(state, dict):
+            names = _named_state(state.get("names"), width)
+            if names is not None:
+                return None if _placeholder_state(names) else names
+    return None
+
+
+def checkpoint_slam_world_frame(
+    checkpoint_path: str, storage_root: Path | None = None
+) -> str | None:
+    """The SLAM map frame of the checkpoint's training poses, if a UMI export.
+
+    Read from a local copy of the training dataset; None when it is a robot
+    recording or the dataset is gone.
+    """
+    for candidate in _checkpoint_dataset_candidates(checkpoint_path, storage_root):
+        frame = slam_world_frame(candidate)
+        if frame is not None:
+            return frame
+    return None
 
 
 def resolve_hub_checkpoint(

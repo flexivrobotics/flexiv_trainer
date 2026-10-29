@@ -7046,6 +7046,18 @@ function computeTrainingSteps(policy, editsOverride = null) {
     return epochs * Math.ceil(frames / batch);
 }
 
+// Families whose training can convert pose actions relative to the current
+// gripper pose (policies/lerobot_plugins/relative_pose.py).
+const RELATIVE_POSE_POLICIES = ["act", "diffusion", "multi_task_dit"];
+
+// Sent as relative_pose on start. A fine-tune follows its checkpoint instead.
+function trainingRelativePose() {
+    if (state.trainingMode === "fine_tune") return false;
+    const policy = state.selectedPolicy;
+    return RELATIVE_POSE_POLICIES.includes(policy)
+        && !!(state.policyConfig[policy] || {}).__relative_pose;
+}
+
 function renderPolicyConfigPanel(policy, options = {}) {
     const panel = byId("policy-config-panel");
     if (!panel || !policy || !Array.isArray(policy.fields)) return;
@@ -7096,9 +7108,22 @@ function renderPolicyConfigPanel(policy, options = {}) {
             ${readout}
         </div>`;
     }).join("");
+    const relativeOn = !!edits.__relative_pose;
+    const relativeHint = relativeOn && ensembleOn
+        ? "Rollout refuses temporal ensembling with relative poses; turn it off here or in the rollout settings."
+        : "Train pose actions relative to the gripper's current pose (UMI style).";
+    const relativeRow = !options.fineTune && RELATIVE_POSE_POLICIES.includes(key)
+        ? `<div class="config-field">
+            <label class="field-label field-label--toggle">
+                <span class="field-label__text">relative_pose</span>
+                <span class="config-toggle"><input type="checkbox" data-toggle="relative_pose" ${relativeOn ? "checked" : ""} /> enable</span>
+            </label>
+            <small class="field-hint">${relativeHint}</small>
+        </div>`
+        : "";
     panel.className = "policy-config-panel";
     panel.innerHTML = `<div class="panel-header"><h3>${options.fineTune ? "Fine-tuning Configuration" : "Training Configuration"}</h3></div>
-        <div class="config-grid">${rows}</div>`;
+        <div class="config-grid">${rows}${relativeRow}</div>`;
 
     const updateStepsReadout = () => {
         const el = byId("steps-readout");
@@ -7144,6 +7169,13 @@ function renderPolicyConfigPanel(policy, options = {}) {
             edits.__temporal_ensemble = toggle.checked;
             if (toggle.checked) edits.n_action_steps = 1;
             else delete edits.n_action_steps;
+            renderPolicyConfigPanel(policy);
+        };
+    }
+    const relativeToggle = panel.querySelector("[data-toggle='relative_pose']");
+    if (relativeToggle) {
+        relativeToggle.onchange = () => {
+            edits.__relative_pose = relativeToggle.checked;
             renderPolicyConfigPanel(policy);
         };
     }
@@ -7284,6 +7316,7 @@ async function startTrainingRun(outputDir) {
                 ? buildFineTuneExtraArgs()
                 : buildTrainingExtraArgs(state.selectedPolicy),
             training_mode: state.trainingMode || "new",
+            relative_pose: trainingRelativePose(),
             checkpoint_path: state.trainingMode === "fine_tune"
                 ? state.trainingCheckpointPath
                 : null,

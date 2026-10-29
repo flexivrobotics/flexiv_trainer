@@ -28,6 +28,7 @@ from flexivtrainer.config import (  # noqa: E402
 )
 from flexivtrainer.data.hub import (  # noqa: E402
     ACTION_NAMES_FILENAME,
+    STATE_NAMES_FILENAME,
     HubRef,
     parse_hub_ref,
 )
@@ -37,6 +38,7 @@ from flexivtrainer.jobs.train_policy import (  # noqa: E402
 )
 from flexivtrainer.rollout.checkpoint import (  # noqa: E402
     checkpoint_action_names,
+    checkpoint_state_names,
     resolve_hub_checkpoint,
 )
 
@@ -301,6 +303,68 @@ class TestActionNamesSidecar:
         service = TrainingService(make_settings(tmp_path))
         root = write_dataset_meta(tmp_path / "datasets" / "d", ["x", "x"])
         assert service._dataset_action_names(root) is None
+
+
+def _checkpoint(tmp_path: Path, state_width: int) -> Path:
+    model_dir = tmp_path / "training" / "run" / "checkpoints" / "000100"
+    model_dir = model_dir / "pretrained_model"
+    model_dir.mkdir(parents=True)
+    config = {"input_features": {"observation.state": {"shape": [state_width]}}}
+    (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"w")
+    return model_dir
+
+
+class TestStateNamesSidecar:
+    def test_written_beside_each_checkpoint_and_read_back(self, tmp_path):
+        model_dir = _checkpoint(tmp_path, 3)
+        job = TrainingJob(
+            job_id="j",
+            command=["x"],
+            output_dir=tmp_path / "training" / "run",
+            dataset_root=tmp_path,
+            policy_type="act",
+            state_names=["arm.tcp_pose.x", "arm.gripper.width", "arm.gripper.force"],
+        )
+
+        TrainingService._sync_action_names(job)
+
+        payload = json.loads((model_dir / STATE_NAMES_FILENAME).read_text())
+        assert payload["state_names"] == job.state_names
+        # No action names on the job: only the state sidecar is written.
+        assert not (model_dir / ACTION_NAMES_FILENAME).exists()
+        assert checkpoint_state_names(str(model_dir)) == job.state_names
+
+    def test_dataset_state_names_read(self, tmp_path):
+        service = TrainingService(make_settings(tmp_path))
+        root = write_dataset_meta(tmp_path / "datasets" / "d", ["x", "y"])
+        assert service._dataset_state_names(root) == ["x", "y"]
+
+    def test_sidecar_must_match_the_state_width(self, tmp_path):
+        model_dir = _checkpoint(tmp_path, 4)
+        (model_dir / STATE_NAMES_FILENAME).write_text(
+            json.dumps({"state_names": ["a", "b", "c"]}), encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="State names do not match"):
+            checkpoint_state_names(str(model_dir))
+
+    def test_falls_back_to_the_training_dataset(self, tmp_path):
+        model_dir = _checkpoint(tmp_path, 2)
+        root = write_dataset_meta(tmp_path / "datasets" / "d", ["x", "y"])
+        (model_dir / "train_config.json").write_text(
+            json.dumps({"dataset": {"root": str(root)}}), encoding="utf-8"
+        )
+        assert checkpoint_state_names(str(model_dir)) == ["x", "y"]
+
+    def test_none_without_names(self, tmp_path):
+        assert checkpoint_state_names(str(_checkpoint(tmp_path, 23))) is None
+
+    def test_placeholder_names_fall_back_to_the_width(self, tmp_path):
+        model_dir = _checkpoint(tmp_path, 2)
+        (model_dir / STATE_NAMES_FILENAME).write_text(
+            json.dumps({"state_names": ["state_0", "state_1"]}), encoding="utf-8"
+        )
+        assert checkpoint_state_names(str(model_dir)) is None
 
 
 class TestHubCheckpointRollout:

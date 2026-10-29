@@ -44,6 +44,7 @@ from flexivtrainer.rollout.executors.waypoint import (
     pose_command,
 )
 from flexivtrainer.rollout.live_checks import LiveChecks
+from flexivtrainer.rollout.pose_history import PoseHistory, history_columns
 from flexivtrainer.rollout.recorder import RolloutRecorder
 from flexivtrainer.rollout.safety import SafetyEnvelope, SafetyStop
 from flexivtrainer.rollout.takeover import Takeover, operator_action
@@ -104,6 +105,7 @@ class WaypointRunner:
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
         gripper_command_parameters: GripperCommandMetadata | None = None,
         camera_names: list[str] | None = None,
+        state_names: list[str] | None = None,
         safety: SafetyEnvelope | None = None,
         recorder: RolloutRecorder | None = None,
         send_twist: bool = True,
@@ -148,6 +150,12 @@ class WaypointRunner:
         self._action_layout = action_layout
         self._action_dim = action_dim
         self._state_dim = state_dim
+        # The checkpoint's trained state columns; None feeds the full state.
+        self._state_names = state_names
+        # Columns computed from recent poses (UMI motion, rotation since start);
+        # the history itself starts with each run.
+        self._history_spec = history_columns(state_names)
+        self._pose_history: PoseHistory | None = None
         self._motion_limits = motion_limits
         self._planner_hz_fallback = planner_hz_fallback
         self._expected_hz_fallback = expected_hz_fallback
@@ -312,6 +320,7 @@ class WaypointRunner:
         cameras = self._camera_names
         camera_names = resolve_recording_image_names(None, sides, cameras)
         pose_format: str | None = None
+        state_index: np.ndarray | None = None
         layout = self._action_layout
         gripper = self._gripper_executor
         # Off by default: _actions_to_lists already syncs the tensors it copies,
@@ -354,6 +363,8 @@ class WaypointRunner:
             if self._prepare_policy is not None:
                 self._prepare_policy(policy)
             policy.reset()
+            if self._history_spec is not None:
+                self._pose_history = PoseHistory(self._history_spec, self._sides)
             waypoint_executor = WaypointExecutor(
                 robots,
                 layout,
@@ -417,6 +428,9 @@ class WaypointRunner:
                 snapshot = observations.read_robot_snapshot(
                     robots, gripper_states, sides
                 )
+                if self._pose_history is not None:
+                    # Operator ticks too, so the motion stays continuous.
+                    self._pose_history.update(time.monotonic(), snapshot)
                 safety.check_force(_measured_arms(snapshot, "ext_wrench_in_world"))
                 control = takeover.control() if takeover is not None else "policy"
                 if control != "policy":
@@ -424,8 +438,14 @@ class WaypointRunner:
                     # policy plans nothing, so its stale-plan watchdog rests.
                     last_fresh = None
                     if pose_format is None:
-                        pose_format = observations.resolve_state_pose_format(
-                            snapshot, sides, cameras, self._state_dim, self._append_log
+                        pose_format, state_index = observations.resolve_state_layout(
+                            snapshot,
+                            sides,
+                            cameras,
+                            self._state_dim,
+                            self._state_names,
+                            self._append_log,
+                            self._history_names(),
                         )
                     self._operator_tick(
                         snapshot=snapshot,
@@ -455,6 +475,9 @@ class WaypointRunner:
                     # the arm, not from the queue or ensemble of before.
                     self._reset_pending = False
                     policy.reset()
+                    if self._pose_history is not None:
+                        self._pose_history.reset()
+                        self._pose_history.update(time.monotonic(), snapshot)
                     replan_now = True
                 safety.check_stale(time.monotonic(), last_fresh)
                 now = time.monotonic()
@@ -462,8 +485,14 @@ class WaypointRunner:
                 mark = now
 
                 if pose_format is None:
-                    pose_format = observations.resolve_state_pose_format(
-                        snapshot, sides, cameras, self._state_dim, self._append_log
+                    pose_format, state_index = observations.resolve_state_layout(
+                        snapshot,
+                        sides,
+                        cameras,
+                        self._state_dim,
+                        self._state_names,
+                        self._append_log,
+                        self._history_names(),
                     )
                 observation = observations.build_observation(
                     snapshot, images, sides, cameras, pose_format
@@ -481,7 +510,9 @@ class WaypointRunner:
                 if cuda_graph_step_begin is not None:
                     cuda_graph_step_begin()
                 actions, fresh = observations._predict_action_chunk(
-                    observation,
+                    observations.select_state(
+                        observation, state_index, self._history_values()
+                    ),
                     policy,
                     self._device,
                     preprocessor,
@@ -662,6 +693,14 @@ class WaypointRunner:
             )
             self._release_robots()
             self._on_finished(self._stop_reason, step)
+
+    def _history_names(self) -> tuple[str, ...]:
+        """The state columns computed from the pose history, if trained on any."""
+        return self._history_spec.names if self._history_spec is not None else ()
+
+    def _history_values(self) -> np.ndarray | None:
+        history = self._pose_history
+        return history.values() if history is not None else None
 
     def _operator_tick(
         self,
