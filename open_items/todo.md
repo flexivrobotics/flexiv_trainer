@@ -50,8 +50,10 @@ converts each chunk back with `T_cur · T_rel`.
    (e.g. `chunk_size` 30, `n_action_steps` 15) jerks between chunks.
 
 4. **Tactile grip force: training and rollout sensors differ.** Training
-   uses the tared fingertip |Fz|, and rollout uses the electric gripper's
-   motor force estimate. They can differ in offset and scale, and the
+   uses the fingertips' recorded |Fz| with no tare, and rollout uses the
+   electric gripper's motor force estimate. They can differ in offset and
+   scale; the fingertips' open-gripper reading drifts by about 3 N over 30 s
+   on the `screw` captures, as large as the grasp signal. The
    gripper's force limit is set by hand from the range the export prints.
    Options:
    - a calibration that maps the gripper's force to the fingertip force,
@@ -139,13 +141,9 @@ converts each chunk back with `T_cur · T_rel`.
 - **Tactile grip force, on or off at export.** The exporter writes no
   tactile data by default. With `--tactile-grip-force`, it adds one state
   value, `right_arm.gripper.force` in N. That is the mean of the two
-  fingertips' Paxini |Fz|, each re-tared while the gripper is open (opening
-  ≥ `--tactile-open-opening`, default 0.5). At rollout, that column is fed
-  the electric gripper's measured `force`. The action never includes the
-  force.
-  - **Why re-tare while open.** On the `screw` captures, a fingertip's
-    open-gripper reading drifted by about 3 N over 30 s, which is as large
-    as the grasp signal.
+  fingertips' Paxini |Fz| as recorded, with no tare. At rollout, that
+  column is fed the electric gripper's measured `force`. The action never
+  includes the force.
   - **A gripper with no force reading** makes rollout refuse such a
     checkpoint, with an error that names `gripper.force`.
 
