@@ -38,10 +38,12 @@ from flexivtrainer.policies.lerobot_plugins.relative_pose import (
     checkpoint_pose_layout,
     hold_relative_pose_anchor,
     pose_layout,
+    range_normalized_width_stats,
     relative_action_stats,
     state_anchors,
     to_absolute,
     to_relative,
+    unnormalized_rotation_stats,
 )
 from flexivtrainer.rollout.checkpoint import checkpoint_slam_world_frame
 
@@ -349,6 +351,145 @@ def test_a_job_refuses_relative_poses_it_cannot_convert(tmp_path: Path) -> None:
         )
     with pytest.raises(ValueError, match="not supported for smolvla"):
         service._relative_pose_layout(True, "smolvla", joints, None)
+
+
+ROWS = ("r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z")
+# A UMI export with --recent-motion-ms 50 --rotation-wrt-start: pose 9, width,
+# motion 9, width change, rotation since start 6.
+UMI_STATE = [
+    *TCP_NAMES[:9],
+    "left.gripper.width",
+    *(f"left.tcp_motion_50ms.{a}" for a in ("x", "y", "z", *ROWS)),
+    "left.gripper.width_change_50ms",
+    *(f"left.tcp_rotation_wrt_start.{a}" for a in ROWS),
+]
+UNNORMALIZED = [*range(13, 19), *range(20, 26)]
+
+
+def _state_stats(rng) -> dict[str, np.ndarray]:
+    width = len(UMI_STATE)
+    low = rng.uniform(-1, 0, width)
+    return {
+        "mean": rng.normal(size=width),
+        "std": rng.uniform(1e-5, 0.2, width),
+        "min": low,
+        "max": low + rng.uniform(1e-4, 1, width),
+        "q01": low,
+        "q99": low + 0.5,
+        "q50": rng.normal(size=width),
+        "count": np.array([1000]),
+    }
+
+
+def test_only_the_extra_rotation_columns_get_unit_stats() -> None:
+    stats = _state_stats(np.random.default_rng(3))
+    before = {key: value.copy() for key, value in stats.items()}
+
+    out = unnormalized_rotation_stats(stats, UMI_STATE)
+
+    kept = [i for i in range(len(UMI_STATE)) if i not in UNNORMALIZED]
+    expected = {"mean": 0, "std": 1, "min": -1, "max": 1, "q01": -1, "q99": 1}
+    for key, value in expected.items():
+        assert out[key][UNNORMALIZED].tolist() == [value] * len(UNNORMALIZED)
+        assert out[key][kept].tolist() == stats[key][kept].tolist()
+    assert out["q50"].tolist() == stats["q50"].tolist()
+    assert out["count"].tolist() == [1000]
+    assert "q10" not in out
+    for key, value in before.items():
+        assert stats[key].tolist() == value.tolist()
+    # A state without UMI's extra inputs is left alone.
+    plain = unnormalized_rotation_stats(stats, [f"s{i}" for i in range(26)])
+    assert plain["std"].tolist() == stats["std"].tolist()
+
+
+@pytest.mark.parametrize("mode", ["MEAN_STD", "MIN_MAX"])
+def test_the_normalizer_passes_those_columns_through(mode) -> None:
+    from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+    from lerobot.processor import NormalizerProcessorStep
+
+    rng = np.random.default_rng(4)
+    stats = unnormalized_rotation_stats(_state_stats(rng), UMI_STATE)
+    step = NormalizerProcessorStep(
+        features={
+            "observation.state": PolicyFeature(
+                type=FeatureType.STATE, shape=(len(UMI_STATE),)
+            )
+        },
+        norm_map={FeatureType.STATE: NormalizationMode[mode]},
+        stats={"observation.state": stats},
+    )
+    state = torch.as_tensor(
+        rng.uniform(-1, 1, (2, len(UMI_STATE))), dtype=torch.float32
+    )
+
+    out = step._normalize_observation({"observation.state": state}, inverse=False)[
+        "observation.state"
+    ]
+
+    assert torch.allclose(out[:, UNNORMALIZED], state[:, UNNORMALIZED], atol=1e-5)
+    assert not torch.allclose(out[:, :3], state[:, :3])
+
+
+WIDTH = UMI_STATE.index("left.gripper.width")
+
+
+def test_only_the_gripper_width_gets_its_range_as_mean_and_std() -> None:
+    stats = _state_stats(np.random.default_rng(5))
+    before = {key: value.copy() for key, value in stats.items()}
+
+    out = range_normalized_width_stats(stats, UMI_STATE)
+
+    low, high = stats["min"][WIDTH], stats["max"][WIDTH]
+    assert out["mean"][WIDTH] == pytest.approx((low + high) / 2)
+    assert out["std"][WIDTH] == pytest.approx((high - low) / 2)
+    kept = [i for i in range(len(UMI_STATE)) if i != WIDTH]
+    for key in stats.keys() - {"count"}:
+        assert out[key][kept].tolist() == stats[key][kept].tolist()
+    for key, value in before.items():
+        assert stats[key].tolist() == value.tolist()
+    # The UMI layout's bare opening counts too; its change and force do not.
+    names = ["gripper", "left.gripper.width_change_50ms", "left.gripper.force"]
+    three = {key: np.array(value[:3]) for key, value in stats.items() if key != "count"}
+    out = range_normalized_width_stats(three, names)
+    assert out["std"].tolist()[1:] == three["std"].tolist()[1:]
+    assert out["std"][0] != three["std"][0]
+
+
+def test_a_constant_gripper_width_keeps_its_stats() -> None:
+    stats = _state_stats(np.random.default_rng(6))
+    stats["max"][WIDTH] = stats["min"][WIDTH]
+
+    out = range_normalized_width_stats(stats, UMI_STATE)
+
+    assert out["mean"][WIDTH] == stats["mean"][WIDTH]
+    assert out["std"][WIDTH] == stats["std"][WIDTH]
+
+
+def test_mean_std_maps_the_gripper_width_range_onto_unit_range() -> None:
+    from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+    from lerobot.processor import NormalizerProcessorStep
+
+    stats = range_normalized_width_stats(
+        _state_stats(np.random.default_rng(7)), UMI_STATE
+    )
+    step = NormalizerProcessorStep(
+        features={
+            "observation.state": PolicyFeature(
+                type=FeatureType.STATE, shape=(len(UMI_STATE),)
+            )
+        },
+        norm_map={FeatureType.STATE: NormalizationMode.MEAN_STD},
+        stats={"observation.state": stats},
+    )
+    state = torch.zeros((2, len(UMI_STATE)), dtype=torch.float32)
+    state[0, WIDTH] = float(stats["min"][WIDTH])
+    state[1, WIDTH] = float(stats["max"][WIDTH])
+
+    out = step._normalize_observation({"observation.state": state}, inverse=False)[
+        "observation.state"
+    ]
+
+    assert out[:, WIDTH].tolist() == pytest.approx([-1.0, 1.0], abs=1e-5)
 
 
 def _umi_export(tmp_path: Path) -> Path:

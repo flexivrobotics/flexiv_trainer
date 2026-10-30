@@ -29,17 +29,7 @@ converts each chunk back with `T_cur · T_rel`.
      pose and gripper entries, or add a training-time column filter that
      drops twist and wrench from an existing dataset.
 
-2. **Normalization of the extra rotation columns.** ACT normalizes state
-   with mean/std. Some columns are nearly constant across a dataset:
-   - the diagonal entries (`r1_x`, `r2_y`) of `tcp_motion_<ms>ms`, which
-     stay near 1;
-   - `tcp_rotation_wrt_start`, when the demos barely rotate.
-
-   Such columns blow up into large z-scores at rollout. Check their std in
-   the dataset's `meta/stats.json`. If they're tiny, drop those columns or
-   skip normalizing them, as UMI does for rotations.
-
-3. **Temporal ensembling with relative poses.** Rollout refuses a
+2. **Temporal ensembling with relative poses.** Rollout refuses a
    relative-pose ACT policy until `disable_temporal_ensemble` is set in the
    ACT rollout config. LeRobot's ACT ensembles inside `select_action`, before
    the postprocessor makes poses absolute, so it would average offsets from
@@ -49,7 +39,7 @@ converts each chunk back with `T_cur · T_rel`.
    ensembler in the rollout runner. Only worth doing if chunked execution
    (e.g. `chunk_size` 30, `n_action_steps` 15) jerks between chunks.
 
-4. **Tactile grip force: training and rollout sensors differ.** Training
+3. **Tactile grip force: training and rollout sensors differ.** Training
    uses the fingertips' recorded |Fz| with no tare, and rollout uses the
    electric gripper's motor force estimate. They can differ in offset and
    scale; the fingertips' open-gripper reading drifts by about 3 N over 30 s
@@ -60,13 +50,13 @@ converts each chunk back with `T_cur · T_rel`.
      from a few grasps measured with both;
    - a rollout start check that the gripper reads near 0 N while open.
 
-5. **Practice step skills.** `practice/runner.py` predicts one action per
+4. **Practice step skills.** `practice/runner.py` predicts one action per
    tick through `predict_action`. That re-anchors every tick, so step skills
    with relative poses are refused. Supporting them means holding the anchor
    there the same way `rollout/observations.py` does. Only needed if
    practice step skills are used with these policies.
 
-6. **Closer to UMI's inputs.** Not done:
+5. **Closer to UMI's inputs.** Not done:
    - random noise on the start pose (σ 0.05, per training sample), for
      `--rotation-wrt-start`;
    - UMI's per-sensor latency shifts. Training poses are SLAM poses at the
@@ -74,17 +64,17 @@ converts each chunk back with `T_cur · T_rel`.
      latency old. A constant delay mostly cancels in the motion;
    - the previous gripper width as an input (only its change is given).
 
-7. **Roll out absolute UMI policies.** Needs a base←map calibration applied
+6. **Roll out absolute UMI policies.** Needs a base←map calibration applied
    to state and actions. Until then, they are refused (see Done).
 
-8. **Lower priority limitations.**
+7. **Lower priority limitations.**
    - Relative pose is refused for bspline_diffusion, smolvla and pi0. The
      supported families are act, diffusion and multi_task_dit.
    - The pre- and post-processor steps share the anchor through a
      module-level slot (`_ANCHORS`) keyed by `pair_id`. Two rollouts of the
      same checkpoint in one process would share that slot.
 
-9. **Housekeeping.**
+8. **Housekeeping.**
    - Commit the uncommitted work:
      - in flexiv_trainer, everything after `65b38d0` (state names, pose
        history, tactile, the training checkbox, the UMI absolute-pose
@@ -96,7 +86,7 @@ converts each chunk back with `T_cur · T_rel`.
 ## Before rolling out a relative-pose policy
 
 - **Turn off temporal ensembling** in the ACT rollout config
-  (`disable_temporal_ensemble`), or rollout refuses the policy (item 3).
+  (`disable_temporal_ensemble`), or rollout refuses the policy (item 2).
 - **The robot's TCP is assumed to be the export's gripper tip.** Training
   poses are tip poses, `T_w_tip = Twb · T_b_tip`, from `imu_to_tcp.yaml`.
   Nothing checks that the robot's configured TCP matches; a different TCP
@@ -107,7 +97,7 @@ converts each chunk back with `T_cur · T_rel`.
   robot config.
 - **With tactile grip force:** set the gripper's force limit within the
   range the export printed, and check its open-gripper reading is near 0 N
-  before trusting the policy (item 4).
+  before trusting the policy (item 3).
 
 ## Done
 
@@ -178,6 +168,30 @@ converts each chunk back with `T_cur · T_rel`.
     export, for checkpoints trained before this check
     (`rollout/checkpoint.py:checkpoint_slam_world_frame`). It can only tell
     when a local copy of that dataset exists.
+
+- **The extra rotation columns are left unnormalized, as UMI does.** ACT
+  normalizes state with mean/std, and the diagonal entries of
+  `tcp_motion_<ms>ms` stay near 1: on the `screw` export, `r1_x` has std
+  0.00006, so a fast turn normalized to about −110. With relative pose on,
+  the plugin gives the rotation entries of `tcp_motion_<ms>ms` and
+  `tcp_rotation_wrt_start` statistics that normalize them to themselves in
+  every LeRobot mode (mean 0 / std 1, min −1 / max 1, quantiles −1 / 1)
+  (`relative_pose.py:unnormalized_rotation_stats`). Their positions and
+  `gripper.width_change_<ms>ms` keep mean/std. The change is made to the
+  dataset's statistics in lerobot-train, so new runs and fine-tunes use it,
+  and the checkpoint's saved processor carries it to resume and rollout.
+  Checkpoints trained before it keep their old statistics until retrained.
+
+- **The gripper width is range-normalized, as UMI does.** ACT's mean/std
+  mapped the width's recorded range to about [−1.2, +1.4] on the `screw`
+  export. With relative pose on, the plugin sets the width's mean to the
+  middle of its [min, max] and its std to half that range, in state and
+  action, so the range maps onto [−1, 1]
+  (`relative_pose.py:range_normalized_width_stats`). The values stay in
+  metres: the postprocessor turns the policy's output back into metres before
+  the gripper gets it. Its change and the grip force keep mean/std, and a
+  width that never changes keeps its statistics. Checkpoints trained before
+  it keep their old statistics until retrained.
 
 ## Design notes
 

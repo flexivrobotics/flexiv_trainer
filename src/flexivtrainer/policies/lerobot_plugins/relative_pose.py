@@ -39,6 +39,14 @@ recomputed in the relative frame, and new ACT / Diffusion / DiT processors get
 the step pair around their normalizers. Both are saved with the checkpoint, so
 rollout needs no setting. The pair shares the anchor pose through ``_ANCHORS``
 by ``pair_id``, which survives the round trip through the processor JSON.
+
+The rotation columns of UMI's extra pose inputs (recent motion, rotation since
+start; ``rollout/pose_history.py``) get statistics that normalize them to
+themselves, as UMI leaves rotations unnormalized: their diagonal entries stay
+near 1, and dividing by that tiny spread blows small turns up into huge inputs.
+The gripper width, in state and action, gets statistics under which mean/std
+maps its recorded range onto [-1, 1], as UMI's range normalizer does; its
+values stay in metres.
 """
 
 from __future__ import annotations
@@ -47,6 +55,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -67,6 +76,7 @@ from lerobot.utils.constants import ACTION, OBS_STATE
 
 from flexivtrainer.config import TRAIN_RELATIVE_POSE_ENV
 from flexivtrainer.data.lerobot_io import ROTATION_6D_AXES
+from flexivtrainer.rollout.pose_history import history_columns
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +106,23 @@ _UMI_POSITION = ("x", "y", "z")
 _UMI_ROTATION = ("r00", "r10", "r20", "r01", "r11", "r21")
 # Position zero and R = I, in either convention.
 _IDENTITY_POSE = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+# Statistics under which a column normalizes to itself in every LeRobot mode:
+# MEAN_STD, MIN_MAX, QUANTILES (q01, q99) and QUANTILE10 (q10, q90).
+_UNNORMALIZED_STATS = {
+    "mean": 0.0,
+    "std": 1.0,
+    "min": -1.0,
+    "max": 1.0,
+    "q01": -1.0,
+    "q99": 1.0,
+    "q10": -1.0,
+    "q90": 1.0,
+}
+# "<side>.gripper.width" in metres, or the UMI layout's normalized opening.
+_GRIPPER_WIDTH = re.compile(r"^(?:[^.]+\.gripper\.width|gripper)$")
+# A narrower recorded range is left as is, as UMI's range normalizer does.
+_MIN_WIDTH_RANGE = 1e-7
 
 # pair_id -> one (position, rotation) anchor per state pose group.
 _ANCHORS: dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
@@ -446,6 +473,81 @@ def relative_action_stats(
     return running.get_statistics()
 
 
+def unnormalized_rotation_columns(names: Sequence[str]) -> list[int]:
+    """Indices of the rotation entries of UMI's extra pose inputs in the state."""
+    spec = history_columns(list(names))
+    rotations = {
+        name
+        for name in (spec.names if spec is not None else ())
+        if name.rsplit(".", 1)[-1] in ROTATION_6D_AXES
+    }
+    return [i for i, name in enumerate(names) if name in rotations]
+
+
+def unnormalized_rotation_stats(
+    stats: dict[str, np.ndarray], names: Sequence[str]
+) -> dict[str, np.ndarray]:
+    """A copy of the state statistics that leaves those rotation entries as is."""
+    columns = unnormalized_rotation_columns(names)
+    out = {key: np.array(value, copy=True) for key, value in stats.items()}
+    for key, value in _UNNORMALIZED_STATS.items():
+        if key in out and columns:
+            out[key][..., columns] = value
+    return out
+
+
+def _leave_rotations_unnormalized(meta: Any) -> None:
+    """Rewrite the dataset's state statistics, which the normalizer reads."""
+    stats = (meta.stats or {}).get(OBS_STATE)
+    if stats is None:
+        return
+    names = _feature_names(meta.features, OBS_STATE)
+    columns = unnormalized_rotation_columns(names)
+    if not columns:
+        return
+    meta.stats = {**meta.stats, OBS_STATE: unnormalized_rotation_stats(stats, names)}
+    logger.info(
+        "State rotations left unnormalized: %s", ", ".join(names[i] for i in columns)
+    )
+
+
+def gripper_width_columns(names: Sequence[str]) -> list[int]:
+    """Indices of the gripper widths (not their change or force)."""
+    return [i for i, name in enumerate(names) if _GRIPPER_WIDTH.match(name)]
+
+
+def range_normalized_width_stats(
+    stats: dict[str, np.ndarray], names: Sequence[str]
+) -> dict[str, np.ndarray]:
+    """A copy whose mean/std map each gripper width's [min, max] onto [-1, 1]."""
+    out = {key: np.array(value, copy=True) for key, value in stats.items()}
+    if not {"mean", "std", "min", "max"} <= out.keys():
+        return out
+    for i in gripper_width_columns(names):
+        low, high = out["min"][..., i], out["max"][..., i]
+        if np.all(high - low >= _MIN_WIDTH_RANGE):
+            out["mean"][..., i] = (low + high) / 2
+            out["std"][..., i] = (high - low) / 2
+    return out
+
+
+def _range_normalize_widths(meta: Any, key: str) -> None:
+    """Rewrite the dataset's statistics of ``key``, which the normalizer reads."""
+    stats = (meta.stats or {}).get(key)
+    if stats is None:
+        return
+    names = _feature_names(meta.features, key)
+    columns = gripper_width_columns(names)
+    if not columns:
+        return
+    meta.stats = {**meta.stats, key: range_normalized_width_stats(stats, names)}
+    logger.info(
+        "%s gripper width range-normalized: %s",
+        key,
+        ", ".join(names[i] for i in columns),
+    )
+
+
 def _patch_dataset_stats() -> None:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset  # noqa: PLC0415
 
@@ -456,8 +558,13 @@ def _patch_dataset_stats() -> None:
     def __init__(self, *args, **kwargs):  # noqa: N807 - patching a dunder
         original_init(self, *args, **kwargs)
         layout = requested_layout()
+        if layout is None:
+            return
+        _leave_rotations_unnormalized(self.meta)
+        _range_normalize_widths(self.meta, OBS_STATE)
         offsets = (getattr(self.reader, "delta_indices", None) or {}).get(ACTION)
-        if layout is None or offsets is None:
+        if offsets is None:
+            _range_normalize_widths(self.meta, ACTION)
             return
         hf_dataset = self.hf_dataset
         stats = relative_action_stats(
@@ -475,6 +582,7 @@ def _patch_dataset_stats() -> None:
             len(hf_dataset),
             len(offsets),
         )
+        _range_normalize_widths(self.meta, ACTION)
 
     __init__._flexiv_patched = True
     LeRobotDataset.__init__ = __init__
