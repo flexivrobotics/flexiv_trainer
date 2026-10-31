@@ -765,6 +765,32 @@ session:
 python -m flexivtrainer.evaluation.learned_check score <dataset> --model <storage>/checks/closed
 ```
 
+### Limit a rollout's length for debugging
+
+To try a policy on the hardware a little at a time, cap each rollout at a
+fixed number of planner ticks. Set it before you start the server:
+
+```bash
+export FLEXIV_TRAINER_ROLLOUT__MAX_STEPS=15
+flexiv-trainer-server
+```
+
+The same line without `export` also works in a `.env` file in the directory
+you start the server from. Restart the server to change it. `0`, the default,
+means no limit.
+
+A step is one planner tick, and the planner ticks at the checkpoint's data
+rate, often 10 Hz. When the limit is reached the rollout stops at once, with
+the stop reason `timeout`, and drops any waypoints the arm has not reached
+yet. A limit of `1` therefore runs one inference and barely moves the arm. To
+run about one action chunk, set it to the policy's `n_action_steps`, or a few
+ticks more so the last waypoints are reached.
+
+All server settings follow this pattern. `FLEXIV_TRAINER_` is followed by the
+setting's path in `AppSettings` (`src/flexivtrainer/config.py`), with `__`
+between nested names. For example, `rollout.max_steps` becomes
+`FLEXIV_TRAINER_ROLLOUT__MAX_STEPS`.
+
 ### Velocity feedforward and the safety envelope
 
 `Send velocity feedforward` streams the policy's predicted twist to the
