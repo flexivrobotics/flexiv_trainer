@@ -433,6 +433,13 @@ def hold_relative_pose_anchor(preprocessor: Any, hold: bool) -> None:
             step.hold_anchor = hold
 
 
+def reset_relative_pose_anchor(preprocessor: Any) -> None:
+    """Forget the anchor, so the next chunk must be predicted afresh."""
+    for step in getattr(preprocessor, "steps", ()):
+        if isinstance(step, RelativePoseProcessorStep):
+            step.reset()
+
+
 def relative_action_stats(
     actions: np.ndarray,
     states: np.ndarray,

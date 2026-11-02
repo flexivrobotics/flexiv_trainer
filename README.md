@@ -786,6 +786,15 @@ yet. A limit of `1` therefore runs one inference and barely moves the arm. To
 run about one action chunk, set it to the policy's `n_action_steps`, or a few
 ticks more so the last waypoints are reached.
 
+Before the first tick, the planner runs a few throwaway inferences on the
+current camera images and robot state, and logs `Policy warmed up` with their
+times. This compiles the model before any waypoint is timed, so the first chunk
+no longer loses its early waypoints to compilation, even with `compile_model`
+on. Nothing is sent to the robot during the warm-up. The number of inferences
+is `warmup_inferences` in the policy's rollout settings, default `3`; `0` turns
+the warm-up off, for example
+`FLEXIV_TRAINER_POLICIES__ACT__ROLLOUT__WARMUP_INFERENCES=0`.
+
 All server settings follow this pattern. `FLEXIV_TRAINER_` is followed by the
 setting's path in `AppSettings` (`src/flexivtrainer/config.py`), with `__`
 between nested names. For example, `rollout.max_steps` becomes

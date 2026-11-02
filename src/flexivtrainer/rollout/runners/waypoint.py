@@ -34,6 +34,9 @@ from flexivtrainer.observability import (
     error,
     warn,
 )
+from flexivtrainer.policies.lerobot_plugins.relative_pose import (
+    reset_relative_pose_anchor,
+)
 from flexivtrainer.rollout import _cudagraph_state, hardware, observations
 from flexivtrainer.rollout.executors.gripper import (
     GripperExecutor,
@@ -379,6 +382,9 @@ class WaypointRunner:
             self._waypoint_executor = waypoint_executor
             if gripper is not None:
                 gripper.start()
+            pose_format, state_index = self._warm_up(
+                cuda_graph_step_begin, camera_names
+            )
             waypoint_executor.start()
             while True:
                 if self._stop_event.is_set():
@@ -693,6 +699,83 @@ class WaypointRunner:
             )
             self._release_robots()
             self._on_finished(self._stop_reason, step)
+
+    def _warm_up(
+        self,
+        cuda_graph_step_begin: Callable[[], None] | None,
+        camera_names: list[str],
+    ) -> tuple[str | None, np.ndarray | None]:
+        """Run throwaway inferences before the loop; return the state layout.
+
+        On a real observation, so the loop's inputs have the same shapes and
+        nothing recompiles. Nothing reaches the robots: the waypoint executor
+        has not started and the chunks are discarded.
+        """
+        count = int(getattr(self._rollout_cfg, "warmup_inferences", 0) or 0)
+        if count <= 0:
+            return None, None
+        gripper = self._gripper_executor
+        images = observations.grab_images(
+            self._cameras, camera_names, self._image_resolutions
+        )
+        snapshot = observations.read_robot_snapshot(
+            self._robots,
+            gripper.measured_states() if gripper is not None else None,
+            self._sides,
+        )
+        if self._pose_history is not None:
+            self._pose_history.update(time.monotonic(), snapshot)
+        pose_format, state_index = observations.resolve_state_layout(
+            snapshot,
+            self._sides,
+            self._camera_names,
+            self._state_dim,
+            self._state_names,
+            self._append_log,
+            self._history_names(),
+        )
+        observation = observations.build_observation(
+            snapshot, images, self._sides, self._camera_names, pose_format
+        )
+        timings: list[float] = []
+        for _ in range(count):
+            if self._stop_event.is_set():
+                break
+            start = time.monotonic()
+            if cuda_graph_step_begin is not None:
+                cuda_graph_step_begin()
+            actions, _ = observations._predict_action_chunk(
+                observations.select_state(
+                    observation, state_index, self._history_values()
+                ),
+                self._policy,
+                self._device,
+                self._preprocessor,
+                self._postprocessor,
+                force_refresh=True,
+                task=self._task,
+            )
+            # Copied off the device so the timing includes the GPU work.
+            self._actions_to_lists(actions)
+            del actions
+            timings.append(time.monotonic() - start)
+        # Start the rollout from scratch: an empty action queue, so the first
+        # loop tick infers afresh; no relative-pose anchor, so no chunk can be
+        # placed from the warm-up's pose; and a pose history that begins with
+        # the loop.
+        self._policy.reset()
+        reset_relative_pose_anchor(self._preprocessor)
+        if self._pose_history is not None:
+            self._pose_history.reset()
+        if timings:
+            self._append_log(
+                "INFO",
+                "ROLLOUT",
+                "Policy warmed up",
+                f"inferences={len(timings)} first={timings[0] * 1000.0:.1f} ms "
+                f"last={timings[-1] * 1000.0:.1f} ms",
+            )
+        return pose_format, state_index
 
     def _history_names(self) -> tuple[str, ...]:
         """The state columns computed from the pose history, if trained on any."""

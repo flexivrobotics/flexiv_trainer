@@ -40,6 +40,7 @@ from flexivtrainer.policies.lerobot_plugins.relative_pose import (
     pose_layout,
     range_normalized_width_stats,
     relative_action_stats,
+    reset_relative_pose_anchor,
     state_anchors,
     to_absolute,
     to_relative,
@@ -266,6 +267,25 @@ def test_a_held_anchor_keeps_the_pose_the_chunk_was_predicted_from(
     preprocessor({"observation.state": moved_to})
     restored = postprocessor(relative)
     assert torch.allclose(restored[:, :9], moved_to[:, :9], atol=1e-5)
+
+
+def test_a_reset_anchor_must_be_predicted_afresh(monkeypatch) -> None:
+    layout = pose_layout(_features(UMI_NAMES))
+    _, preprocessor, postprocessor = _act_processors(monkeypatch, layout)
+    rng = np.random.default_rng(4)
+    (pose,) = _random_poses(rng, (1, 1), "columns").float()
+    relative = torch.zeros(1, 10)
+    relative[0, 3] = relative[0, 7] = 1.0  # the identity pose
+
+    preprocessor({"observation.state": pose})
+    hold_relative_pose_anchor(preprocessor, hold=True)
+    reset_relative_pose_anchor(preprocessor)
+    with pytest.raises(RuntimeError, match="anchor"):
+        postprocessor(relative)
+    step = next(
+        s for s in preprocessor.steps if isinstance(s, RelativePoseProcessorStep)
+    )
+    assert step.hold_anchor is False
 
 
 def test_postprocessing_before_any_observation_is_refused() -> None:

@@ -62,6 +62,11 @@ class SharedRolloutConfig(BaseModel):
     # Waypoint k targets loop_start + (k + offset) * dt; offset >= 1 keeps
     # waypoint 0 ahead of the past-filter (inference latency would drop it).
     action_anchor_offset_steps: int = Field(default=1, ge=0, le=8)
+    # Throwaway inferences on the planner thread before the control loop, so
+    # compilation, CUDA-graph recording and first-call kernel setup finish
+    # before any waypoint is timed. Without it the first chunk's waypoints are
+    # already in the past when it arrives and are dropped. 0 = no warm-up.
+    warmup_inferences: int = Field(default=3, ge=0, le=10)
     # Replay the trained trajectory faster than the dataset rate. 2.0 halves
     # waypoint spacing, so the path is traversed in half the time at twice the
     # commanded velocity, and the planner must tick twice as often.
