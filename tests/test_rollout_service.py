@@ -168,6 +168,11 @@ def _settings(tmp_path) -> AppSettings:
     settings = AppSettings(storage=StorageConfig(root=tmp_path))
     # Most loop tests use a minimal fake policy without a torch model.
     settings.policies.act.rollout.compile_model = False
+    # Their call counts assume no warm-up inferences before the loop;
+    # test_waypoint_warm_up_* covers it.
+    for family in ("act", "diffusion", "multi_task_dit"):
+        getattr(settings.policies, family).rollout.warmup_inferences = 0
+    settings.policies.plugin_rollout.warmup_inferences = 0
     # Their fake checkpoints store no stiffness; tests/test_control_settings.py
     # covers the refusal this lifts.
     settings.rollout.allow_controller_default_stiffness = True
@@ -2437,3 +2442,57 @@ def test_playback_speed_scales_the_action_rate(tmp_path) -> None:
 
     # A family without the knob must fall through unscaled.
     assert service._apply_playback_speed(30.0, SimpleNamespace()) == 30.0
+
+
+@pytest.mark.parametrize("warmup", [3, 0])
+def test_waypoint_warm_up_infers_before_the_loop_without_commanding(
+    tmp_path, monkeypatch, warmup
+) -> None:
+    # The warm-up runs throwaway inferences before any waypoint is scheduled,
+    # sends nothing to the robot, and resets the policy so the loop's first
+    # tick infers afresh.
+    policy = _FakePolicy([float(i) for i in range(19)])
+    robot = _FakeRobot("F1")
+    service = _make_service(tmp_path, policy=policy, robot=robot)
+    service._settings.policies.act.rollout.warmup_inferences = warmup
+
+    calls: list[tuple[bool, int, int]] = []
+    real_replace = WaypointExecutor.replace_waypoints
+    installs: list[int] = []
+
+    def _recording_replace(self, actions, target_times, now, **kwargs):
+        installs.append(len(calls))
+        return real_replace(self, actions, target_times, now, **kwargs)
+
+    monkeypatch.setattr(WaypointExecutor, "replace_waypoints", _recording_replace)
+
+    def _fake_predict(obs, pol, dev, pre, post, **kwargs):
+        force = bool(kwargs.get("force_refresh"))
+        calls.append((force, len(robot.commands), pol.reset_count))
+        return np.tile(pol.select_action(obs), (8, 1)), force
+
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.observations._predict_action_chunk", _fake_predict
+    )
+    monkeypatch.setattr(
+        "flexivtrainer.rollout.hardware._rdk_mode",
+        lambda: SimpleNamespace(NRT_CARTESIAN_MOTION_FORCE="cmf"),
+    )
+
+    service.start(_checkpoint(tmp_path))
+    deadline = time.monotonic() + WAIT_S
+    while len(calls) < warmup + 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    service.stop()
+
+    assert len(calls) >= warmup + 1
+    warm, loop = calls[:warmup], calls[warmup:]
+    # Warm-up inferences: all fresh, nothing commanded, nothing scheduled.
+    assert all(force and commands == 0 for force, commands, _ in warm)
+    assert not installs or installs[0] > warmup
+    # The policy was reset after the warm-up, and the loop starts afresh.
+    resets_before_loop = calls[0][2] if warmup == 0 else warm[-1][2] + 1
+    assert loop[0][0] is True
+    assert loop[0][2] == resets_before_loop
+    logs = " ".join(str(entry) for entry in service._logs)
+    assert ("Policy warmed up" in logs) is bool(warmup)

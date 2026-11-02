@@ -39,6 +39,7 @@ from flexivtrainer.rollout.executors.bspline import (
     BSplineInstallResult,
 )
 from flexivtrainer.rollout.executors.gripper import GripperExecutor
+from flexivtrainer.rollout.pose_history import PoseHistory, history_columns
 from flexivtrainer.runtime.gripper_session import GripperInitializationRegistry
 
 
@@ -79,6 +80,7 @@ class BSplineRunner:
         gripper_initialization_registry: GripperInitializationRegistry | None = None,
         gripper_command_parameters: GripperCommandMetadata | None = None,
         camera_names: list[str] | None = None,
+        state_names: list[str] | None = None,
     ) -> None:
         self._policy = policy
         self._preprocessor = preprocessor
@@ -95,6 +97,12 @@ class BSplineRunner:
         self._task = task
         self._bspline_layout = bspline_layout
         self._state_dim = state_dim
+        # The checkpoint's trained state columns; None feeds the full state.
+        self._state_names = state_names
+        # Columns computed from recent poses (UMI motion, rotation since start);
+        # the history itself starts with each run.
+        self._history_spec = history_columns(state_names)
+        self._pose_history: PoseHistory | None = None
         self._end_effector_config = end_effector_config
         self._motion_limits = motion_limits
         self._max_steps = max_steps
@@ -301,6 +309,8 @@ class BSplineRunner:
         assert executor is not None
 
         policy.reset()
+        if self._history_spec is not None:
+            self._pose_history = PoseHistory(self._history_spec, self._sides)
         self._log_timing_contract()
         period = 1.0 / target_hz
         next_observation = time.monotonic()
@@ -308,6 +318,7 @@ class BSplineRunner:
         cameras = self._camera_names
         camera_names = resolve_recording_image_names(None, sides, cameras)
         pose_format: str | None = None
+        state_index: np.ndarray | None = None
         max_steps = self._max_steps
         inference_latency = 0.0
         alignment_error = 0.0
@@ -371,15 +382,35 @@ class BSplineRunner:
                     snapshot = observations.read_robot_snapshot(
                         robots, gripper_states, sides
                     )
+                    if self._pose_history is not None:
+                        self._pose_history.update(now, snapshot)
                     if pose_format is None:
-                        pose_format = observations.resolve_state_pose_format(
-                            snapshot, sides, cameras, self._state_dim, self._append_log
+                        pose_format, state_index = observations.resolve_state_layout(
+                            snapshot,
+                            sides,
+                            cameras,
+                            self._state_dim,
+                            self._state_names,
+                            self._append_log,
+                            (
+                                self._history_spec.names
+                                if self._history_spec is not None
+                                else ()
+                            ),
                         )
                     observation = observations.build_observation(
                         snapshot, images, sides, cameras, pose_format
                     )
                     prepared = observations._prepare_policy_observation(
-                        observation,
+                        observations.select_state(
+                            observation,
+                            state_index,
+                            (
+                                self._pose_history.values()
+                                if self._pose_history is not None
+                                else None
+                            ),
+                        ),
                         self._device,
                         preprocessor,
                         task=task,

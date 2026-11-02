@@ -20,15 +20,25 @@ from .modeling_bspline_diffusion import BSplineDiffusionPolicy
 from .processor_bspline_diffusion import (
     make_bspline_diffusion_pre_post_processors,
 )
+from .relative_pose import (
+    AbsolutePoseProcessorStep,
+    RelativePoseProcessorStep,
+)
+from .relative_pose import apply_patches as apply_relative_pose_patches
 
 # LeRobot imports this package before it builds the dataset, the only window in
-# which these patches can take effect on the training subprocess.
+# which these patches can take effect on the training subprocess. The B-spline
+# processor module above has already bound the unpatched diffusion factory.
 apply_patches()
+apply_relative_pose_patches()
 
 __all__ = [
     "LOAD_DEPTH_ENV",
+    "AbsolutePoseProcessorStep",
     "BSplineDiffusionConfig",
     "BSplineDiffusionPolicy",
+    "RelativePoseProcessorStep",
     "apply_patches",
+    "apply_relative_pose_patches",
     "make_bspline_diffusion_pre_post_processors",
 ]

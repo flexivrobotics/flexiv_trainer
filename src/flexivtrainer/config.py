@@ -153,6 +153,10 @@ class StorageConfig(BaseModel):
 # TrainingService sets it; unset means "leave the dataset alone", since the app
 # imports those patches too and still needs depth for previews.
 TRAIN_LOAD_DEPTH_ENV = "FLEXIVTRAINER_TRAIN_LOAD_DEPTH"
+# The pose layout (JSON) a training job converts to chunk-relative SE(3) poses,
+# read by the relative-pose patches in the lerobot-train subprocess. Unset or
+# empty trains on absolute poses.
+TRAIN_RELATIVE_POSE_ENV = "FLEXIVTRAINER_TRAIN_RELATIVE_POSE"
 
 
 class HubConfig(BaseModel):

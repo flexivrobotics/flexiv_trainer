@@ -28,7 +28,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from flexivtrainer.config import TRAIN_LOAD_DEPTH_ENV, AppSettings
+from flexivtrainer.config import (
+    TRAIN_LOAD_DEPTH_ENV,
+    TRAIN_RELATIVE_POSE_ENV,
+    AppSettings,
+)
 from flexivtrainer.data.control_settings import (
     ControlSettings,
     checkpoint_control_settings,
@@ -46,12 +50,14 @@ from flexivtrainer.data.gripper_command import (
 )
 from flexivtrainer.data.hub import (
     ACTION_NAMES_FILENAME,
+    STATE_NAMES_FILENAME,
     HubRef,
     fetch_checkpoint_snapshot,
     fetch_dataset_metadata,
     hub_token,
     parse_hub_ref,
 )
+from flexivtrainer.data.lerobot_io import slam_world_frame
 from flexivtrainer.observability import (
     Pulse,
     error,
@@ -354,6 +360,12 @@ class TrainingJob:
     # Ordered action-axis names from the training dataset, written into each
     # saved checkpoint so rollout never has to locate that dataset again.
     action_names: list[str] | None = None
+    # Ordered observation.state names, written beside action_names so rollout
+    # feeds the policy exactly the state columns it was trained on.
+    state_names: list[str] | None = None
+    # Where the dataset's poses sit, when actions are trained chunk-relative
+    # (policies/lerobot_plugins/relative_pose.py); None trains on absolute poses.
+    relative_pose: dict[str, Any] | None = None
     phase: str = "training"
     process: subprocess.Popen[str] | None = None
     logs: list[str] = field(default_factory=list)
@@ -938,13 +950,20 @@ class TrainingService:
 
     def _dataset_action_names(self, dataset_root: Path) -> list[str] | None:
         """Ordered action-axis names from a dataset, for the checkpoint sidecar."""
+        return self._dataset_feature_names(dataset_root, "action")
+
+    def _dataset_state_names(self, dataset_root: Path) -> list[str] | None:
+        """Ordered observation.state names from a dataset, for its sidecar."""
+        return self._dataset_feature_names(dataset_root, "observation.state")
+
+    def _dataset_feature_names(self, dataset_root: Path, key: str) -> list[str] | None:
         try:
             info = self._read_json(dataset_root / "meta" / "info.json")
         except ValueError:
             return None
         features = info.get("features")
-        action = features.get("action") if isinstance(features, dict) else None
-        names = action.get("names") if isinstance(action, dict) else None
+        feature = features.get(key) if isinstance(features, dict) else None
+        names = feature.get("names") if isinstance(feature, dict) else None
         if (
             not isinstance(names, list)
             or not names
@@ -1118,15 +1137,23 @@ class TrainingService:
             and raw["info"].get("is_depth_map") is True
         }
 
-    def _training_env(self) -> dict[str, str]:
+    def _training_env(
+        self, relative_pose: dict[str, Any] | None = None
+    ) -> dict[str, str]:
         """Environment for the lerobot-train subprocess.
 
-        The depth toggle travels as an env var because the patches that read it
-        run inside that process, and LeRobot's parser rejects unknown CLI flags.
+        The depth toggle and the relative-pose layout travel as env vars because
+        the patches that read them run inside that process, and LeRobot's parser
+        rejects unknown CLI flags.
         """
 
         env = dict(os.environ)
         env[TRAIN_LOAD_DEPTH_ENV] = "1" if self._settings.training.load_depth else "0"
+        # Always assigned, so a value inherited from the app's own environment
+        # cannot switch a job to relative poses.
+        env[TRAIN_RELATIVE_POSE_ENV] = (
+            json.dumps(relative_pose, separators=(",", ":")) if relative_pose else ""
+        )
         # A Hub dataset is downloaded by this subprocess, so a configured token
         # has to reach it for private or gated repos. Assigned rather than
         # setdefault: hub_token() already ranks an operator-supplied token above
@@ -1458,7 +1485,11 @@ class TrainingService:
         return command
 
     def _spawn_job_process(
-        self, command: list[str], *, working_dir: Path
+        self,
+        command: list[str],
+        *,
+        working_dir: Path,
+        relative_pose: dict[str, Any] | None = None,
     ) -> subprocess.Popen[str]:
         return subprocess.Popen(
             command,
@@ -1466,8 +1497,67 @@ class TrainingService:
             stderr=subprocess.STDOUT,
             text=True,
             cwd=str(working_dir),
-            env=self._training_env(),
+            env=self._training_env(relative_pose),
         )
+
+    @staticmethod
+    def _refuse_absolute_slam_poses(dataset_root: Path) -> None:
+        """Absolute poses of a UMI export are SLAM map coordinates to the robot."""
+        frame = slam_world_frame(dataset_root)
+        if frame is not None:
+            raise ValueError(
+                f"This dataset's poses are in a SLAM map frame ({frame}), not "
+                "the robot's, so a policy trained on them as absolute poses "
+                "would drive the arm to map coordinates. Turn on relative pose."
+            )
+
+    def _relative_pose_layout(
+        self,
+        requested: bool,
+        policy_type: str,
+        dataset_root: Path,
+        checkpoint_info: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """The pose layout to train relative to, or None for absolute poses.
+
+        A fine-tune follows its checkpoint: its processors already convert (or
+        do not), and the dataset's statistics have to match them.
+        """
+        from flexivtrainer.policies.lerobot_plugins.relative_pose import (  # noqa: PLC0415
+            RELATIVE_POSE_POLICIES,
+            checkpoint_pose_layout,
+            pose_layout,
+        )
+
+        checkpoint_layout = (
+            checkpoint_pose_layout(Path(checkpoint_info["model_path"]))
+            if checkpoint_info is not None
+            else None
+        )
+        if checkpoint_info is not None and checkpoint_layout is None:
+            if requested:
+                raise ValueError(
+                    "This checkpoint was trained on absolute poses; fine-tuning "
+                    "cannot switch it to relative poses. Train a new policy."
+                )
+            self._refuse_absolute_slam_poses(dataset_root)
+            return None
+        if checkpoint_layout is None and not requested:
+            self._refuse_absolute_slam_poses(dataset_root)
+            return None
+        if policy_type not in RELATIVE_POSE_POLICIES:
+            raise ValueError(
+                f"Relative poses are not supported for {policy_type}; use one "
+                f"of {', '.join(RELATIVE_POSE_POLICIES)}"
+            )
+        info = self._read_json(dataset_root / "meta" / "info.json")
+        layout = pose_layout(info.get("features") or {})
+        if checkpoint_layout is not None and checkpoint_layout != layout:
+            raise ValueError(
+                "The dataset's poses are laid out differently from the ones "
+                "this relative-pose checkpoint was trained on"
+            )
+        return layout
 
     def start(
         self,
@@ -1484,6 +1574,7 @@ class TrainingService:
         checkpoint_source: str = "local",
         checkpoint_repo_id: str | None = None,
         checkpoint_revision: str | None = None,
+        relative_pose: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             if self._job is not None and self._job.status == "running":
@@ -1555,6 +1646,9 @@ class TrainingService:
                 self._validate_checkpoint_dataset(checkpoint_info, resolved_root)
             elif is_bspline and not requires_conversion:
                 bspline_contract = self._bspline_dataset_contract(resolved_root)
+            relative_pose_layout = self._relative_pose_layout(
+                relative_pose, policy_type, resolved_root, checkpoint_info
+            )
             # lerobot-train creates output_dir itself and refuses to run if it
             # already exists (resume is False), so only ensure the parent here.
             output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1629,6 +1723,8 @@ class TrainingService:
                 gripper_command_metadata=gripper_command_metadata,
                 control_settings=control_settings,
                 action_names=self._dataset_action_names(effective_root),
+                state_names=self._dataset_state_names(effective_root),
+                relative_pose=relative_pose_layout,
                 phase=phase,
                 status="running",
                 last_event=(
@@ -1642,6 +1738,7 @@ class TrainingService:
                 working_dir=(
                     effective_root.parent if requires_conversion else output_dir.parent
                 ),
+                relative_pose=relative_pose_layout,
             )
             job.pulse = Pulse(
                 (
@@ -1775,7 +1872,9 @@ class TrainingService:
                 job.phase = "training"
                 job.last_event = "training_process_started"
                 job.process = self._spawn_job_process(
-                    command, working_dir=job.output_dir.parent
+                    command,
+                    working_dir=job.output_dir.parent,
+                    relative_pose=job.relative_pose,
                 )
                 # A pause can land after the converter exits but before this
                 # handoff acquires the lock. Carry that state into the newly
@@ -1846,19 +1945,25 @@ class TrainingService:
 
     @staticmethod
     def _sync_action_names(job: TrainingJob) -> None:
-        """Write the action-axis sidecar beside every saved checkpoint.
+        """Write the action- and state-name sidecars beside every saved checkpoint.
 
         This makes a checkpoint self-describing, so rolling it out never depends
         on locating the training dataset. It is what lets a checkpoint published
         to the Hub be used elsewhere, and it also survives the local dataset
         being deleted or renamed.
         """
-        names = job.action_names
-        if not names or not job.output_dir.is_dir():
+        if not job.output_dir.is_dir():
             return
-        payload = json.dumps({"action_names": list(names)}, indent=2) + "\n"
-        for model_dir in TrainingService._checkpoint_model_dirs(job):
-            (model_dir / ACTION_NAMES_FILENAME).write_text(payload, encoding="utf-8")
+        sidecars = [
+            (ACTION_NAMES_FILENAME, "action_names", job.action_names),
+            (STATE_NAMES_FILENAME, "state_names", job.state_names),
+        ]
+        for filename, key, names in sidecars:
+            if not names:
+                continue
+            payload = json.dumps({key: list(names)}, indent=2) + "\n"
+            for model_dir in TrainingService._checkpoint_model_dirs(job):
+                (model_dir / filename).write_text(payload, encoding="utf-8")
 
     def _collect_logs(self, job: TrainingJob) -> None:
         assert job.process is not None

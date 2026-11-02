@@ -680,6 +680,23 @@ def first_dataset_task(dataset_root: Path) -> str:
     return default
 
 
+def slam_world_frame(dataset_root: Path) -> str | None:
+    """The SLAM map frame a UMI export's poses are in; None for robot poses.
+
+    flexiv_gdk's ``03_convert_to_lerobot.py`` records it as ``world_frame`` in
+    ``meta/flexiv_extras.json``. Such poses can't be compared with the robot's,
+    so only relative-pose policies can use them.
+    """
+    try:
+        extras = json.loads(
+            (dataset_root / "meta" / "flexiv_extras.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    frame = extras.get("world_frame") if isinstance(extras, dict) else None
+    return frame if isinstance(frame, str) and frame else None
+
+
 @dataclass(slots=True)
 class EpisodeManifest:
     root: Path
