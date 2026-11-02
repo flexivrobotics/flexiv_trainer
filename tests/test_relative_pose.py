@@ -178,9 +178,10 @@ def _act_processors(monkeypatch, layout):
     )
     unit = {"mean": torch.zeros(10), "std": torch.ones(10)}
     stats = {"observation.state": unit, "action": unit}
-    return config, *processor_act.make_act_pre_post_processors(
+    preprocessor, postprocessor = processor_act.make_act_pre_post_processors(
         config, dataset_stats=stats
     )
+    return config, preprocessor, postprocessor
 
 
 def test_new_processors_wrap_their_normalizers_and_round_trip(monkeypatch) -> None:
